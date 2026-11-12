@@ -68,7 +68,7 @@ test("createLogger('warning') gates debug and info, passes warn as a JSON line t
   const result = await runFixture(
     [
       `const log = createLogger("warning");`,
-      `log.debug({ path: "/v1/models" }, "hidden debug");`,
+      `log.debug({ path: "/llm/v1/models" }, "hidden debug");`,
       `log.info("hidden info");`,
       `log.warn("visible warning");`,
     ].join("\n"),

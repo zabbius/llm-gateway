@@ -11,12 +11,21 @@
  *                           codes (layers.md structural invariant): anything
  *                           uncaught maps to a 502 upstream_error envelope
  *                           and is logged at error level.
- *   [4] route mounting    — GET /v1/models, POST /v1/chat/completions,
- *                           POST /v1/completions (a single OpenAI surface —
- *                           never provider-specific routes).
- *   [5] SPA stub          — when the frontend build output (`web/dist`,
- *                           D7) exists, it is served at /; API routes take
- *                           precedence. Absent build → skipped entirely.
+ *   [4] route mounting    — GET /llm/v1/models, POST /llm/v1/chat/completions,
+ *                           POST /llm/v1/completions (a single OpenAI surface —
+ *                           never provider-specific routes) plus the
+ *                           management surface GET /api/status and
+ *                           GET /api/configuration (ADR-006).
+ *   [5] UI namespace      — ADR-006 fallthrough, in order: GET / answers
+ *                           302 -> /ui (independent of the build output);
+ *                           then, only when the frontend build output
+ *                           (`web/dist`, D7) exists, every /ui/* request
+ *                           walks static file -> SPA fallback (unmatched
+ *                           GET/HEAD serves web/dist/index.html — React
+ *                           owns everything beyond /ui) -> envelope 404.
+ *                           Unmatched paths outside /ui and all non-GET/HEAD
+ *                           methods skip straight to the envelope 404.
+ *                           Absent build → only the redirect is mounted.
  *
  * Layering (specs/architecture/layers.md invariant 3): this module imports
  * the gateway core only — the upstream registry reaches `createApp` as a
@@ -26,17 +35,36 @@
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type pino from "pino";
 import { type UpstreamRegistry, type GatewayEnv } from "../gateway/router.ts";
+import type { RedactedGatewayConfig } from "../config/redact.ts";
 import { handleModels } from "./handlers/models.ts";
+import { handleStatus } from "./handlers/status.ts";
+import { handleConfiguration } from "./handlers/configuration.ts";
 import { handleChatCompletions, handleCompletions } from "./handlers/completions.ts";
 import { notFoundResponse, upstreamErrorResponse } from "./errors.ts";
 
-/** Frontend build output served at / when present (specs/domains/frontend.md). */
+/** Frontend build output served under /ui when present (specs/domains/frontend.md). */
 export const WEB_DIST_DIR = "web/dist";
 
-/** Build the gateway app: routes mounted, middleware ordered, errors mapped. */
-export function createApp(registry: UpstreamRegistry, logger: pino.Logger): Hono<GatewayEnv> {
+/** Injectable UI-serving knobs — tests point `webDistDir` at a fixture dir. */
+export interface UiServingOptions {
+  /** Frontend build output directory; defaults to WEB_DIST_DIR. */
+  webDistDir?: string;
+}
+
+/** Build the gateway app: routes mounted, middleware ordered, errors mapped.
+ * `configuration` is the redacted config view the entry point built
+ * (src/config/redact.ts) — the raw config never reaches this layer. */
+export function createApp(
+  registry: UpstreamRegistry,
+  logger: pino.Logger,
+  configuration: RedactedGatewayConfig,
+  options: UiServingOptions = {},
+): Hono<GatewayEnv> {
+  const webDistDir = options.webDistDir ?? WEB_DIST_DIR;
   const log = logger.child({ component: "http" });
   const app = new Hono<GatewayEnv>();
 
@@ -87,15 +115,48 @@ export function createApp(registry: UpstreamRegistry, logger: pino.Logger): Hono
     return upstreamErrorResponse("The gateway failed to process the request.");
   });
 
-  // [4] Routes — the OpenAI surface (specs/contracts/client-gateway.md).
-  app.get("/v1/models", handleModels(registry, logger));
-  app.post("/v1/chat/completions", handleChatCompletions(registry, logger));
-  app.post("/v1/completions", handleCompletions(registry, logger));
+  // [4] Routes — the OpenAI surface, mounted at the /llm/v1 namespace
+  // (ADR-006, specs/contracts/client-gateway.md). Clean cut: no /v1 aliases.
+  app.get("/llm/v1/models", handleModels(registry, logger));
+  app.post("/llm/v1/chat/completions", handleChatCompletions(registry, logger));
+  app.post("/llm/v1/completions", handleCompletions(registry, logger));
 
-  // [5] SPA stub — mounted after the API routes so /v1/* always wins;
-  // unmatched paths fall through serveStatic into the envelope notFound.
-  if (existsSync(WEB_DIST_DIR)) {
-    app.use("*", serveStatic({ root: WEB_DIST_DIR }));
+  // [4b] Management surface (ADR-006, specs/contracts/gateway-management.md)
+  // — read-only gateway observation for the SPA, operators, and scripts.
+  // Mounted with the API routes, before static serving: the SPA mount can
+  // never shadow an /api route. GET /api/status reports the retained
+  // startup-probe outcomes (always 200 — a failed probe is data, not an
+  // error); GET /api/configuration serves the redacted view the entry point
+  // built — the raw config and its key material never reach this layer.
+  app.get("/api/status", handleStatus(registry));
+  app.get("/api/configuration", handleConfiguration(configuration));
+
+  // [5] UI namespace (ADR-006) — one top-level prefix per surface; the
+  // fallthrough chain is root redirect -> static file -> index.html ->
+  // envelope. The redirect is mounted unconditionally: it must not depend
+  // on the build output. The /ui mounts exist only when the build output
+  // does. Mounted after the API routes so /llm and /api always win.
+  app.get("/", (c) => c.redirect("/ui", 302));
+  if (existsSync(webDistDir)) {
+    // Static assets: /ui/icon.svg -> <webDistDir>/icon.svg. The /ui path
+    // prefix is rewritten away — the mount namespace is /ui, the dist root
+    // is not nested under it. Unknown files fall through via next().
+    app.use("/ui/*", serveStatic({
+      root: webDistDir,
+      rewriteRequestPath: (path) => path.replace(/^\/ui/, "") || "/",
+    }));
+    // SPA fallback: any /ui/* request serveStatic did not answer (GET/HEAD
+    // only) gets the SPA document — React owns everything beyond /ui, so
+    // deep links are real URLs resolved client-side (ADR-006). index.html
+    // is read per request: no caching layer in the MVP. Other methods skip
+    // into the envelope notFound below.
+    app.on(["GET", "HEAD"], "/ui/*", async () => {
+      const html = await readFile(join(webDistDir, "index.html"), "utf8");
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    });
   }
 
   // Every gateway-generated error uses the OpenAI envelope — including

@@ -3,14 +3,21 @@
  * (specs/contracts/client-gateway.md): model aggregation with graceful
  * degradation, prefix dispatch against mock upstreams, the 400/404/502/504
  * error table, unchanged relay (incl. unbuffered SSE), auth stage preceding
- * routing, and ≥1 log line per request.
+ * routing, ≥1 log line per request, the GET /api/status +
+ * GET /api/configuration management endpoints
+ * (specs/contracts/gateway-management.md), and the /ui namespace serving —
+ * root 302 redirect, static assets, SPA fallback, envelope-404 fallthrough
+ * (ADR-006, specs/domains/frontend.md).
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, beforeAll, afterAll } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type pino from "pino";
 import type { Upstream, UpstreamConfig, ModelEntry, ProxyRequest } from "../upstreams/upstream.ts";
 import { UpstreamRegistry, type UpstreamFactories } from "../upstreams/registry.ts";
 import { OpenAICompatibleUpstream } from "../upstreams/openai-compatible.ts";
-import { createApp } from "./app.ts";
+import { createApp, type UiServingOptions } from "./app.ts";
+import { redactedConfigView } from "../config/redact.ts";
 
 /* ------------------------------------------------------------------ */
 /* test infrastructure                                                 */
@@ -68,12 +75,17 @@ class FakeUpstream implements Upstream {
       models?: ModelEntry[];
       modelsError?: Error;
       respond?: Responder;
+      connectError?: Error;
     },
   ) {
     this.id = config.id;
   }
 
-  async connect(): Promise<void> {}
+  async connect(): Promise<void> {
+    if (this.options.connectError !== undefined) {
+      throw this.options.connectError;
+    }
+  }
 
   async listModels(): Promise<ModelEntry[]> {
     if (this.options.modelsError !== undefined) {
@@ -93,15 +105,20 @@ interface UpstreamSpec {
   models?: ModelEntry[];
   modelsError?: Error;
   respond?: Responder;
+  connectError?: Error;
+  /** Credential material the redacted configuration view must mask away. */
+  apiKey?: string;
+  tlsFingerprint?: string;
 }
 
 /** Build a registry of fake upstreams plus the app wired to it. */
-async function gateway(specs: UpstreamSpec[], logger: pino.Logger) {
+async function gateway(specs: UpstreamSpec[], logger: pino.Logger, ui: UiServingOptions = {}) {
   const entries: UpstreamConfig[] = specs.map((spec) => ({
     type: "openai-compatible",
     id: spec.id,
     baseUrl: `https://${spec.id}.example/v1`,
-    apiKey: "sk-test",
+    apiKey: spec.apiKey ?? "sk-test",
+    ...(spec.tlsFingerprint !== undefined ? { tlsFingerprint: spec.tlsFingerprint } : {}),
   }));
   const upstreams = new Map<string, FakeUpstream>(
     specs.map((spec, index) => [spec.id, new FakeUpstream(entries[index] as UpstreamConfig, spec)]),
@@ -114,7 +131,14 @@ async function gateway(specs: UpstreamSpec[], logger: pino.Logger) {
     },
   };
   const registry = await UpstreamRegistry.create(entries, factories, logger);
-  return { app: createApp(registry, logger), upstreams };
+  // The entry point builds the redacted view from the same entries and hands
+  // it to createApp — the raw config never crosses into the HTTP layer.
+  const configuration = redactedConfigView({
+    listen: "127.0.0.1:8080",
+    logLevel: "info",
+    upstreams: entries,
+  });
+  return { app: createApp(registry, logger, configuration, ui), upstreams };
 }
 
 function completionRequest(modelId: string): RequestInit {
@@ -136,7 +160,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 /* aggregation                                                         */
 /* ------------------------------------------------------------------ */
 
-describe("GET /v1/models", () => {
+describe("GET /llm/v1/models", () => {
   test("one flat OpenAI list: ids prefixed, owned_by rewritten, config order, extras ride along", async () => {
     const { logger } = fakeLogger();
     const { app } = await gateway(
@@ -153,7 +177,7 @@ describe("GET /v1/models", () => {
       logger,
     );
 
-    const response = await app.request("/v1/models");
+    const response = await app.request("/llm/v1/models");
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("application/json");
     const list = (await response.json()) as { object: string; data: ModelEntry[] };
@@ -181,7 +205,7 @@ describe("GET /v1/models", () => {
       logger,
     );
 
-    const response = await app.request("/v1/models");
+    const response = await app.request("/llm/v1/models");
     expect(response.status).toBe(200);
     const list = (await response.json()) as { object: string; data: ModelEntry[] };
     expect(list.object).toBe("list");
@@ -200,7 +224,7 @@ describe("GET /v1/models", () => {
 /* dispatch                                                            */
 /* ------------------------------------------------------------------ */
 
-describe("POST /v1/chat/completions and /v1/completions", () => {
+describe("POST /llm/v1/chat/completions and /llm/v1/completions", () => {
   test("de-prefixes body.model (the only transformation), relays headers minus credentials, response unchanged", async () => {
     const { logger } = fakeLogger();
     const upstreamBody = JSON.stringify({
@@ -215,7 +239,7 @@ describe("POST /v1/chat/completions and /v1/completions", () => {
       });
     const { app, upstreams } = await gateway([{ id: "alpha", respond }], logger);
 
-    const response = await app.request("/v1/chat/completions", completionRequest("alpha/gpt-4o"));
+    const response = await app.request("/llm/v1/chat/completions", completionRequest("alpha/gpt-4o"));
     expect(response.status).toBe(200);
     expect(response.headers.get("x-upstream-marker")).toBe("yes");
     expect(await response.text()).toBe(upstreamBody);
@@ -232,11 +256,11 @@ describe("POST /v1/chat/completions and /v1/completions", () => {
     expect(received.headers["authorization"]).toBeUndefined();
   });
 
-  test("legacy /v1/completions forwards the completions upstream path", async () => {
+  test("legacy /llm/v1/completions forwards the completions upstream path", async () => {
     const { logger } = fakeLogger();
     const { app, upstreams } = await gateway([{ id: "alpha" }], logger);
 
-    const response = await app.request("/v1/completions", completionRequest("alpha/davinci"));
+    const response = await app.request("/llm/v1/completions", completionRequest("alpha/davinci"));
     expect(response.status).toBe(200);
     const received = upstreams.get("alpha")?.received[0];
     if (received === undefined) throw new Error("upstream was not called");
@@ -250,7 +274,7 @@ describe("POST /v1/chat/completions and /v1/completions", () => {
     const respond: Responder = () => jsonResponse({ error: { message: "no such model" } }, 404);
     const { app, upstreams } = await gateway([{ id: "alpha", respond }], logger);
 
-    const response = await app.request("/v1/chat/completions", completionRequest("alpha/does-not-exist"));
+    const response = await app.request("/llm/v1/chat/completions", completionRequest("alpha/does-not-exist"));
     expect(response.status).toBe(404); // relayed from the upstream, NOT model_not_found from the gateway
     const body = (await response.json()) as { error: { code?: string } };
     expect(body.error.code).toBeUndefined(); // upstream's own envelope, byte-for-byte semantics
@@ -281,7 +305,7 @@ describe("POST /v1/chat/completions and /v1/completions", () => {
     };
     const { app } = await gateway([{ id: "alpha", respond }], logger);
 
-    const response = await app.request("/v1/chat/completions", completionRequest("alpha/gpt-4o"));
+    const response = await app.request("/llm/v1/chat/completions", completionRequest("alpha/gpt-4o"));
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/event-stream");
 
@@ -314,7 +338,7 @@ describe("gateway-generated errors", () => {
     const { app, upstreams } = await gateway([{ id: "alpha" }], logger);
 
     for (const bad of ["gpt-4o", "nope/gpt-4o", "alpha/", "/gpt-4o"]) {
-      const response = await app.request("/v1/chat/completions", completionRequest(bad));
+      const response = await app.request("/llm/v1/chat/completions", completionRequest(bad));
       expect(response.status).toBe(404);
       const body = (await response.json()) as { error: Record<string, string> };
       expect(body.error.type).toBe("invalid_request_error");
@@ -335,7 +359,7 @@ describe("gateway-generated errors", () => {
       body: raw,
     });
     for (const raw of ["{not json", "[]", JSON.stringify({ temperature: 1 }), JSON.stringify({ model: 7 })]) {
-      const response = await app.request("/v1/chat/completions", post(raw));
+      const response = await app.request("/llm/v1/chat/completions", post(raw));
       expect(response.status).toBe(400);
       const body = (await response.json()) as { error: Record<string, unknown> };
       expect(body.error.type).toBe("invalid_request_error");
@@ -359,21 +383,22 @@ describe("gateway-generated errors", () => {
       },
     });
     try {
+      const entries: UpstreamConfig[] = [
+        {
+          type: "openai-compatible",
+          id: "real",
+          baseUrl: `http://127.0.0.1:${upstream.port}/v1`,
+          apiKey: "sk-test",
+        },
+      ];
       const registry = await UpstreamRegistry.create(
-        [
-          {
-            type: "openai-compatible",
-            id: "real",
-            baseUrl: `http://127.0.0.1:${upstream.port}/v1`,
-            apiKey: "sk-test",
-          },
-        ],
+        entries,
         { "openai-compatible": (entry, child) => new OpenAICompatibleUpstream(entry, child) },
         logger,
       );
-      const app = createApp(registry, logger);
+      const app = createApp(registry, logger, redactedConfigView({ listen: "127.0.0.1:8080", logLevel: "info", upstreams: entries }));
 
-      const response = await app.request("/v1/chat/completions", completionRequest("real/gpt-4o"));
+      const response = await app.request("/llm/v1/chat/completions", completionRequest("real/gpt-4o"));
       expect(response.status).toBe(502);
       const body = (await response.json()) as { error: Record<string, unknown> };
       expect(body.error.type).toBe("api_error");
@@ -386,14 +411,17 @@ describe("gateway-generated errors", () => {
   test("504 upstream_timeout envelope relayed from a real upstream when the upstream is unreachable", async () => {
     const { logger } = fakeLogger();
     // port 1: nothing listens there — connect() degrades with a warning, per-request forward synthesizes 504
+    const entries: UpstreamConfig[] = [
+      { type: "openai-compatible", id: "dead", baseUrl: "http://127.0.0.1:1/v1", apiKey: "sk-test" },
+    ];
     const registry = await UpstreamRegistry.create(
-      [{ type: "openai-compatible", id: "dead", baseUrl: "http://127.0.0.1:1/v1", apiKey: "sk-test" }],
+      entries,
       { "openai-compatible": (entry, child) => new OpenAICompatibleUpstream(entry, child) },
       logger,
     );
-    const app = createApp(registry, logger);
+    const app = createApp(registry, logger, redactedConfigView({ listen: "127.0.0.1:8080", logLevel: "info", upstreams: entries }));
 
-    const response = await app.request("/v1/chat/completions", completionRequest("dead/gpt-4o"));
+    const response = await app.request("/llm/v1/chat/completions", completionRequest("dead/gpt-4o"));
     expect(response.status).toBe(504);
     const body = (await response.json()) as { error: Record<string, unknown> };
     expect(body.error.type).toBe("api_error");
@@ -408,7 +436,7 @@ describe("gateway-generated errors", () => {
     };
     const { app } = await gateway([{ id: "alpha", respond }], logger);
 
-    const response = await app.request("/v1/chat/completions", completionRequest("alpha/gpt-4o"));
+    const response = await app.request("/llm/v1/chat/completions", completionRequest("alpha/gpt-4o"));
     expect(response.status).toBe(502);
     const body = (await response.json()) as { error: Record<string, unknown> };
     expect(body.error.type).toBe("api_error");
@@ -422,6 +450,235 @@ describe("gateway-generated errors", () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* management surface                                                  */
+/* ------------------------------------------------------------------ */
+
+describe("GET /api/status", () => {
+  test("mounted before static serving: retained probe outcomes in config order, failed reason present, no key material", async () => {
+    const { logger } = fakeLogger();
+    const { app } = await gateway(
+      [
+        { id: "alpha", models: [model("gpt-4o")] },
+        { id: "dead", connectError: new Error('upstream "dead" is unreachable: timeout') },
+      ],
+      logger,
+    );
+
+    const response = await app.request("/api/status");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    const body = (await response.json()) as {
+      upstreams: Array<{ id: string; type: string; probe: string; reason?: string }>;
+    };
+    expect(body.upstreams.map((upstream) => upstream.id)).toEqual(["alpha", "dead"]);
+    // exact contract shape: ok carries no reason key (specs/contracts/gateway-management.md)
+    expect(body.upstreams[0]).toEqual({ id: "alpha", type: "openai-compatible", probe: "ok" });
+    expect(body.upstreams[1]?.probe).toBe("failed");
+    expect(body.upstreams[1]?.reason).toContain("unreachable");
+    // no key material: neither the fake apiKey nor any baseUrl leaks into the snapshot
+    const raw = JSON.stringify(body);
+    expect(raw).not.toContain("sk-test");
+    expect(raw).not.toContain(".example/v1");
+  });
+
+  test("always 200 even when every probe failed — the LLM surface still serves", async () => {
+    const { logger } = fakeLogger();
+    const { app } = await gateway(
+      [{ id: "dead", connectError: new Error("connection refused") }],
+      logger,
+    );
+
+    const response = await app.request("/api/status");
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      upstreams: Array<{ id: string; type: string; probe: string; reason?: string }>;
+    };
+    expect(body.upstreams).toEqual([
+      { id: "dead", type: "openai-compatible", probe: "failed", reason: "connection refused" },
+    ]);
+  });
+});
+
+describe("GET /api/configuration", () => {
+  test("serves the redacted view: credentials masked, listen/logLevel/baseUrl verbatim, config order", async () => {
+    const { logger } = fakeLogger();
+    const { app } = await gateway(
+      [
+        {
+          id: "openai-main",
+          apiKey: "sk-live-CONFIG-test-key",
+          tlsFingerprint: "AAkBS7Y8xgDdCPe0bPq0WE1cR4m5jXKzlvJNUdBtTR0=",
+        },
+        { id: "vllm-local" },
+      ],
+      logger,
+    );
+
+    const response = await app.request("/api/configuration");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    const body = (await response.json()) as {
+      listen: string;
+      logLevel: string;
+      upstreams: Array<{
+        type: string;
+        id: string;
+        baseUrl: string;
+        apiKey: string;
+        tlsFingerprint: string | null;
+      }>;
+    };
+    expect(body.listen).toBe("127.0.0.1:8080");
+    expect(body.logLevel).toBe("info");
+    // exact contract shape (specs/contracts/gateway-management.md): the mask
+    // replaces key material; an absent pin serializes as null
+    expect(body.upstreams[0]).toEqual({
+      type: "openai-compatible",
+      id: "openai-main",
+      baseUrl: "https://openai-main.example/v1",
+      apiKey: "[Redacted]",
+      tlsFingerprint: "[Redacted]",
+    });
+    expect(body.upstreams[1]).toEqual({
+      type: "openai-compatible",
+      id: "vllm-local",
+      baseUrl: "https://vllm-local.example/v1",
+      apiKey: "[Redacted]",
+      tlsFingerprint: null,
+    });
+  });
+
+  test("no configured key or pin material appears anywhere in the response body", async () => {
+    const { logger } = fakeLogger();
+    const { app } = await gateway(
+      [
+        {
+          id: "secretive",
+          apiKey: "sk-live-CONFIG-test-key",
+          tlsFingerprint: "AAkBS7Y8xgDdCPe0bPq0WE1cR4m5jXKzlvJNUdBtTR0=",
+        },
+      ],
+      logger,
+    );
+
+    const response = await app.request("/api/configuration");
+    const raw = JSON.stringify(await response.json());
+    expect(raw).not.toContain("sk-live-CONFIG-test-key");
+    expect(raw).not.toContain("AAkBS7Y8xgDdCPe0bPq0WE1cR4m5jXKzlvJNUdBtTR0=");
+    expect(raw).toContain("[Redacted]");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* UI namespace — root redirect + /ui/* serving (ADR-006)              */
+/* ------------------------------------------------------------------ */
+
+/** Distinctive fixture contents — index equality proves the SPA shell. */
+const UI_INDEX_HTML = "<!doctype html><title>ui fixture</title>SPA-shell-marker";
+const UI_ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg"/>';
+
+/** Absolute fixture dirs: serveStatic joins any root verbatim (node:path). */
+const UI_DIST_FIXTURE = join(import.meta.dir, "..", "..", "web", "dist-fixture");
+const UI_DIST_ABSENT = join(import.meta.dir, "..", "..", "web", "dist-absent-fixture");
+
+describe("UI namespace (ADR-006): GET / redirect and /ui/* serving", () => {
+  beforeAll(() => {
+    mkdirSync(UI_DIST_FIXTURE, { recursive: true });
+    writeFileSync(join(UI_DIST_FIXTURE, "index.html"), UI_INDEX_HTML);
+    writeFileSync(join(UI_DIST_FIXTURE, "icon.svg"), UI_ICON_SVG);
+  });
+  afterAll(() => rmSync(UI_DIST_FIXTURE, { recursive: true, force: true }));
+
+  /** Assert the OpenAI error envelope shape and hand back the body. */
+  async function expectEnvelope(response: Response): Promise<{ error: Record<string, unknown> }> {
+    expect(response.headers.get("content-type")).toContain("application/json");
+    const body = (await response.json()) as { error: Record<string, unknown> };
+    expect(body.error.type).toBe("invalid_request_error");
+    return body;
+  }
+
+  test("GET / answers 302 -> /ui, with and without the build output", async () => {
+    const { logger } = fakeLogger();
+    const served = await gateway([{ id: "alpha" }], logger, { webDistDir: UI_DIST_FIXTURE });
+    const redirect = await served.app.request("/");
+    expect(redirect.status).toBe(302);
+    expect(redirect.headers.get("location")).toBe("/ui");
+
+    const absent = await gateway([{ id: "alpha" }], logger, { webDistDir: UI_DIST_ABSENT });
+    const bare = await absent.app.request("/");
+    expect(bare.status).toBe(302);
+    expect(bare.headers.get("location")).toBe("/ui");
+  });
+
+  test("GET /ui serves the SPA document from the build output", async () => {
+    const { logger } = fakeLogger();
+    const { app } = await gateway([{ id: "alpha" }], logger, { webDistDir: UI_DIST_FIXTURE });
+
+    const response = await app.request("/ui");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    expect(await response.text()).toBe(UI_INDEX_HTML);
+  });
+
+  test("deep /ui/* routes serve index.html — React owns everything beyond /ui", async () => {
+    const { logger } = fakeLogger();
+    const { app } = await gateway([{ id: "alpha" }], logger, { webDistDir: UI_DIST_FIXTURE });
+
+    for (const path of ["/ui/status", "/ui/stats", "/ui/admin/upstreams"]) {
+      const response = await app.request(path);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/html");
+      expect(await response.text()).toBe(UI_INDEX_HTML);
+    }
+    // HEAD falls back the same way GET does.
+    const head = await app.request("/ui/status", { method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-type")).toContain("text/html");
+  });
+
+  test("existing assets are served from the build output", async () => {
+    const { logger } = fakeLogger();
+    const { app } = await gateway([{ id: "alpha" }], logger, { webDistDir: UI_DIST_FIXTURE });
+
+    const response = await app.request("/ui/icon.svg");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("image/svg");
+    expect(await response.text()).toBe(UI_ICON_SVG);
+  });
+
+  test("unmatched paths outside /ui keep the envelope — even with the build output present", async () => {
+    const { logger } = fakeLogger();
+    const { app } = await gateway([{ id: "alpha" }], logger, { webDistDir: UI_DIST_FIXTURE });
+
+    for (const path of ["/llm/v1/nope", "/api/nope", "/v2/models", "/nope"]) {
+      const response = await app.request(path);
+      expect(response.status).toBe(404);
+      await expectEnvelope(response);
+    }
+  });
+
+  test("non-GET/HEAD requests under /ui/* keep the envelope 404", async () => {
+    const { logger } = fakeLogger();
+    const { app } = await gateway([{ id: "alpha" }], logger, { webDistDir: UI_DIST_FIXTURE });
+
+    const response = await app.request("/ui/status", { method: "POST" });
+    expect(response.status).toBe(404);
+    await expectEnvelope(response);
+  });
+
+  test("without the build output, /ui/* is not served: envelope 404", async () => {
+    const { logger } = fakeLogger();
+    const { app } = await gateway([{ id: "alpha" }], logger, { webDistDir: UI_DIST_ABSENT });
+
+    for (const path of ["/ui", "/ui/status"]) {
+      const response = await app.request(path);
+      expect(response.status).toBe(404);
+      await expectEnvelope(response);
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /* cross-cutting: logging, auth order, unmatched routes                */
 /* ------------------------------------------------------------------ */
 
@@ -430,12 +687,12 @@ describe("cross-cutting middleware", () => {
     const { logger, lines } = fakeLogger();
     const { app } = await gateway([{ id: "alpha", models: [model("gpt-4o")] }], logger);
 
-    await app.request("/v1/models");
-    await app.request("/v1/chat/completions", completionRequest("alpha/gpt-4o"));
-    await app.request("/v1/chat/completions", completionRequest("bad-model"));
+    await app.request("/llm/v1/models");
+    await app.request("/llm/v1/chat/completions", completionRequest("alpha/gpt-4o"));
+    await app.request("/llm/v1/chat/completions", completionRequest("bad-model"));
     await app.request("/nope");
 
-    for (const path of ["/v1/models", "/v1/chat/completions", "/nope"]) {
+    for (const path of ["/llm/v1/models", "/llm/v1/chat/completions", "/nope"]) {
       const forPath = lines.filter(
         (line) => line.level === "debug" && (line.obj as { path?: string }).path === path,
       );
@@ -462,11 +719,15 @@ describe("cross-cutting middleware", () => {
     const { logger } = fakeLogger();
     const { app } = await gateway([{ id: "alpha" }], logger);
 
-    const response = await app.request("/v2/models");
-    expect(response.status).toBe(404);
-    expect(response.headers.get("content-type")).toContain("application/json");
-    const body = (await response.json()) as { error: Record<string, unknown> };
-    expect(body.error.type).toBe("invalid_request_error");
-    expect(body.error.code).toBeUndefined();
+    // /v1/models must 404 too — clean cut at /llm/v1, no alias (ADR-006).
+    // An unknown /api/* path is a 404 envelope as well (gateway-management.md).
+    for (const path of ["/v2/models", "/v1/models", "/api/nope"]) {
+      const response = await app.request(path);
+      expect(response.status).toBe(404);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      const body = (await response.json()) as { error: Record<string, unknown> };
+      expect(body.error.type).toBe("invalid_request_error");
+      expect(body.error.code).toBeUndefined();
+    }
   });
 });

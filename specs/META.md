@@ -34,10 +34,11 @@ specs/
 │   ├── routing.md                  prefix routing, model aggregation, dispatch
 │   ├── configuration.md            config file location, JSON schema, startup validation
 │   ├── observability.md            leveled pino logging to stderr
-│   └── frontend.md                 SPA stub (React + Bootstrap), reserved page names
+│   └── frontend.md                 SPA shell (React + Bootstrap), /ui/* client-side routing + management sections
 │
 ├── contracts/                      interfaces between layers
 │   ├── client-gateway.md           HTTP client <-> gateway (OpenAI protocol)
+│   ├── gateway-management.md       management API <-> operators/SPA (read-only /api/*)
 │   └── gateway-upstream.md         gateway upstreams <-> upstream provider APIs
 │
 └── decisions/                      Architecture Decision Records
@@ -46,7 +47,8 @@ specs/
     ├── 002-model-id-prefix-routing.md    public model id = {upstreamId}/{model}
     ├── 003-hono-http-framework.md        Hono on Bun, edge-only handlers
     ├── 004-pino-stderr-logging.md        pino, JSON lines to stderr, no file logger
-    └── 005-per-upstream-tls-pinning.md   per-upstream TLS SPKI pinning via `tlsFingerprint`
+    ├── 005-per-upstream-tls-pinning.md   per-upstream TLS SPKI pinning via `tlsFingerprint`
+    └── 006-gateway-surface-namespace.md  surface namespace: LLM /llm/v1, management /api, SPA /ui
 ```
 
 This tree is the canonical layout of the spec system: every spec file under `specs/` lands at the path shown here.

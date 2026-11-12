@@ -388,14 +388,15 @@ describe("OpenAICompatibleUpstream TLS pinning", () => {
     expect(provider.requests).toHaveLength(0);
   });
 
-  test("connect() with a wrong pin degrades to a warning and never rejects", async () => {
+  test("connect() with a wrong pin rejects with the pin-mismatch fact — the registry warns and retains the outcome", async () => {
     const provider = startTlsProvider("pinned-test-cert.pem");
     tlsServers.push(provider);
     const { upstream, lines } = makeUpstream(provider.baseUrl, PIN_OTHER);
 
-    await expect(upstream.connect()).resolves.toBeUndefined();
-    const warning = lines.find((line) => line.level === "warn");
-    expect(JSON.stringify(warning)).toContain("pin mismatch");
+    await expect(upstream.connect()).rejects.toThrow(/pin mismatch/);
+    // the warning belongs to the registry (it retains the probe outcome) —
+    // the upstream itself stays silent on failure
+    expect(lines.some((line) => line.level === "warn")).toBe(false);
     expect(provider.requests).toHaveLength(0);
   });
 

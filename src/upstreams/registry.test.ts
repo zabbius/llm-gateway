@@ -2,7 +2,9 @@
  * UpstreamRegistry construction and lookup contracts
  * (specs/domains/upstreams/README.md): factory dispatch by `type` through the
  * entry-point-injected map, probes awaited (failures logged, never fatal),
- * exact-id `find()`, config-order `all()`, registry written only at create.
+ * probe outcomes retained per upstream (`status()` — the GET /api/status
+ * snapshot), exact-id `find()`, config-order `all()`, registry written only
+ * at create.
  */
 import { describe, expect, test } from "bun:test";
 import type pino from "pino";
@@ -159,6 +161,28 @@ describe("UpstreamRegistry", () => {
     expect(detail.type).toBe("openai-compatible");
     expect(detail.id).toBe("broken");
     expect(detail.reason).toContain("probe exploded");
+  });
+
+  test("status() retains every startup-probe outcome in config order — ok, or failed with the log-safe reason", async () => {
+    const made: FakeUpstream[] = [];
+    const { logger } = fakeLogger();
+
+    const registry = await UpstreamRegistry.create(
+      [entry("healthy"), entry("broken"), entry("later")],
+      factoriesFor(made, (id) => id === "broken"),
+      logger,
+    );
+
+    // exact shape: an ok outcome carries no reason key at all; the failed
+    // outcome carries the same log-safe reason the warning logged
+    // (specs/contracts/gateway-management.md response shape)
+    expect(registry.status()).toEqual([
+      { id: "healthy", type: "openai-compatible", probe: "ok" },
+      { id: "broken", type: "openai-compatible", probe: "failed", reason: "probe exploded" },
+      { id: "later", type: "openai-compatible", probe: "ok" },
+    ]);
+    // a stable startup snapshot: the same read-only entries on every call
+    expect(registry.status()).toEqual(registry.status());
   });
 
   test("create() rejects defensively on duplicate ids (config validation normally prevents this)", async () => {

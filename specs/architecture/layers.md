@@ -12,7 +12,7 @@ Stack on MVP: TypeScript on Bun, Hono as the HTTP framework, JSON configuration.
 | ----- | ---------------- | -------------- |
 | entry point | `src/index.ts` | reads config, constructs upstreams, wires the registry, builds the app, starts the listener |
 | Hono app | `src/httpapi/app.ts` | HTTP concerns only: middleware (request logging, error mapping), route mounting |
-| gateway router | `src/gateway/router.ts` | OpenAI-protocol endpoints: aggregates `GET /v1/models`, dispatches `POST /v1/chat/completions` by upstream-id prefix |
+| gateway router | `src/gateway/router.ts` | OpenAI-protocol endpoints: aggregates `GET /llm/v1/models`, dispatches `POST /llm/v1/chat/completions` by upstream-id prefix |
 | upstream registry | `src/upstreams/registry.ts` | holds upstream instances keyed by upstream id; exact-match lookup; populated once at startup |
 | upstreams | `src/upstreams/*` | speak one provider dialect each; the openai-compatible upstream is a pure pass-through proxy |
 
@@ -39,7 +39,7 @@ Cross-cutting modules importable by every layer:
                                    v
 +--------------------------------------------------------------------+
 | gateway core: src/gateway/router.ts                                |
-| GET /v1/models aggregation, POST /v1/chat/completions dispatch     |
+| GET /llm/v1/models aggregation, POST /llm/v1/chat/completions dispatch |
 +----------------------------------+---------------------------------+
                                    | looks up by upstream id
                                    v

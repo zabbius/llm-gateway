@@ -9,7 +9,7 @@ Vocabulary: an *upstream* is one configured provider connection — a config ent
 ## Key Files
 
 - `src/upstreams/upstream.ts` — the `Upstream` interface, `UpstreamConfig`, `UpstreamType`, `ProxyRequest`, `ModelEntry`
-- `src/upstreams/registry.ts` — `UpstreamRegistry`: builds instances from config (the `type` → factory dispatch lives here; the factory map is injected by the entry point), id-keyed lookup, aggregated model listing
+- `src/upstreams/registry.ts` — `UpstreamRegistry`: builds instances from config (the `type` → factory dispatch lives here; the factory map is injected by the entry point), id-keyed lookup, aggregated model listing, retained startup-probe outcomes (`status()` — the `GET /api/status` snapshot)
 - `src/upstreams/openai-compatible.ts` — the MVP `openai-compatible` upstream (pure HTTP proxy)
 - `src/upstreams/tls-pinning.ts` — TLS SPKI pinning shared by the pinned upstream path: the per-request pinned connection (`pinnedUpstreamRequest`), pin decisions (`assertPinnedCertificate`, `computeSpkiPin`), the bare-handshake probe for the fingerprint CLI, `UpstreamTlsPinError`
 - `tools/tls-fingerprint.ts` — CLI that prints (or fail-closed verifies with `--expect`) the pin for an upstream's `tlsFingerprint`
@@ -41,9 +41,18 @@ interface ModelEntry {
 interface Upstream {
   readonly id: string;
   readonly type: UpstreamType;
-  connect(): Promise<void>;                            // startup probe; failure logged, not fatal
+  connect(): Promise<void>;                            // startup probe; failure → registry records outcome, not fatal
   listModels(): Promise<ModelEntry[]>;                 // provider-native ids, unprefixed
   forward(request: ProxyRequest): Promise<Response>;   // pure pass-through
+}
+
+/** The retained startup-probe outcome for one upstream — the GET /api/status
+    entry shape (gateway-management.md); reason exists only on "failed". */
+interface UpstreamStatus {
+  id: string;
+  type: UpstreamType;
+  probe: "ok" | "failed";
+  reason?: string;
 }
 
 /**
@@ -63,6 +72,7 @@ class UpstreamRegistry {
                 logger: pino.Logger): Promise<UpstreamRegistry>;
   find(id: string): Upstream | undefined; // exact-id lookup
   all(): readonly Upstream[];             // config order, feeds aggregation
+  status(): readonly UpstreamStatus[];    // retained probe outcomes in config order (GET /api/status)
 }
 ```
 
@@ -76,19 +86,20 @@ Startup — build and connect the pool:
 config.json ──► UpstreamRegistry.create()
                     │  one iteration per config entry (type, id)
                     ├─► factory dispatch on type ──► new Upstream
-                    ├─► upstream.connect()   (probe; failure logged, startup continues)
+                    ├─► upstream.connect()   (probe; outcome retained — ok, or
+                    │    failed + log-safe reason; failure logged, startup continues)
                     └─► upstreams.set(id, upstream)
 ```
 
 Serving — aggregation and pass-through:
 
 ```
-GET /v1/models
+GET /llm/v1/models
   registry.all() ─► Promise.all(u.listModels()) ─► prefix ids "{id}/" ─► flatten
   (a failed upstream contributes no entries — warning logged, the rest still returns)
   ─► { object: "list", data: [...] }
 
-POST /v1/chat/completions   (body.model = "openai/gpt-4o")
+POST /llm/v1/chat/completions   (body.model = "openai/gpt-4o")
   registry.find("openai") ─► upstream.forward(...)
                                 │ pass-through, incl. SSE
                                 ▼
@@ -101,7 +112,7 @@ POST /v1/chat/completions   (body.model = "openai/gpt-4o")
 - Every upstream instance corresponds to exactly one config entry and reports that entry's `type` and `id`.
 - Upstream ids are unique across the entire config, independent of `type`; duplicates fail startup.
 - The registry resolves upstreams by id; the `(type, id)` pair is the config identity validated at load time.
-- Every upstream's `connect()` probe runs during startup, before the gateway starts listening; a failed probe is logged and never blocks startup.
+- Every upstream's `connect()` probe runs during startup, before the gateway starts listening; a failed probe is logged and never blocks startup. The registry retains every outcome (ok, or failed with its log-safe reason) in config order for `GET /api/status` ([gateway-management.md](../../contracts/gateway-management.md)) — read-only after startup, carrying no credential or config material.
 - Upstreams relay requests and responses without interpreting or transforming payload bytes (prefix handling lives in routing).
 - `listModels()` exposes only models of its own upstream, with provider-native unprefixed ids; prefixing happens in the aggregation, not in upstreams.
 

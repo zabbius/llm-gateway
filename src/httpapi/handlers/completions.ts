@@ -1,6 +1,6 @@
 /**
- * Dispatch handlers for `POST /v1/chat/completions` and `POST
- * /v1/completions` (specs/domains/routing.md): parse the OpenAI request,
+ * Dispatch handlers for `POST /llm/v1/chat/completions` and `POST
+ * /llm/v1/completions` (specs/domains/routing.md): parse the OpenAI request,
  * resolve the model-id prefix against the registry, rewrite `body.model` to
  * the upstream model — the single body transformation routing makes (D3) —
  * and relay the upstream's response unchanged (status, headers, body,

@@ -2,13 +2,13 @@
 
 ## Purpose
 
-Maps OpenAI-protocol requests onto the upstream registry. The model namespace is prefixed: a client model id `"{upstreamId}/{model}"` selects the upstream; `GET /v1/models` aggregates all upstreams into one flat list; the two completion endpoints dispatch as pure pass-through.
+Maps OpenAI-protocol requests onto the upstream registry. The LLM surface mounts at `/llm/v1/*` (namespace: [ADR-006](../decisions/006-gateway-surface-namespace.md)); the model namespace is prefixed: a client model id `"{upstreamId}/{model}"` selects the upstream; `GET /llm/v1/models` aggregates all upstreams into one flat list; the two completion endpoints dispatch as pure pass-through.
 
 ## Key Files
 
 - `src/gateway/router.ts` — model-id prefix parsing and upstream resolution (`resolveModel`)
-- `src/httpapi/handlers/models.ts` — `GET /v1/models` aggregation handler
-- `src/httpapi/handlers/completions.ts` — `POST /v1/chat/completions` and `POST /v1/completions` dispatch handlers
+- `src/httpapi/handlers/models.ts` — `GET /llm/v1/models` aggregation handler
+- `src/httpapi/handlers/completions.ts` — `POST /llm/v1/chat/completions` and `POST /llm/v1/completions` dispatch handlers
 
 ## Core Types
 
@@ -51,17 +51,17 @@ Endpoint map:
 
 | Endpoint | Handling |
 | -------- | -------- |
-| `GET /v1/models` | aggregate: `registry.all()` → `listModels()` in parallel → flatten → `{ "object": "list", "data": [...] }` |
-| `POST /v1/chat/completions` | `resolveModel(body.model)` → `upstream.forward({ path: "chat/completions", … })` |
-| `POST /v1/completions` | `resolveModel(body.model)` → `upstream.forward({ path: "completions", … })` |
+| `GET /llm/v1/models` | aggregate: `registry.all()` → `listModels()` in parallel → flatten → `{ "object": "list", "data": [...] }` |
+| `POST /llm/v1/chat/completions` | `resolveModel(body.model)` → `upstream.forward({ path: "chat/completions", … })` |
+| `POST /llm/v1/completions` | `resolveModel(body.model)` → `upstream.forward({ path: "completions", … })` |
 
 ## Flow
 
-Dispatch on `/v1/chat/completions`:
+Dispatch on `/llm/v1/chat/completions`:
 
 ```
 Client                          Gateway                                   Upstream
-  │ POST /v1/chat/completions      │                                         │
+  │ POST /llm/v1/chat/completions  │                                         │
   │ { "model": "openai/gpt-4o" }   │                                         │
   │───────────────────────────────►│ parse body                              │
   │                                │ resolveModel("openai/gpt-4o")           │
@@ -73,7 +73,7 @@ Client                          Gateway                                   Upstre
   │◄─── relayed unchanged ─────────│                                         │
 ```
 
-Aggregation on `GET /v1/models`:
+Aggregation on `GET /llm/v1/models`:
 
 ```
 registry.all() ─► Promise.allSettled(upstreams.map(u => u.listModels()))
@@ -86,12 +86,12 @@ registry.all() ─► Promise.allSettled(upstreams.map(u => u.listModels()))
 ## Invariants
 
 - Every client-visible model id starts with a registered upstream id followed by `/`; the prefix grammar `[a-z0-9][a-z0-9-]*` contains no `/`.
-- `GET /v1/models` returns one flat list — entries are never grouped or nested by upstream, and the list preserves config order.
+- `GET /llm/v1/models` returns one flat list — entries are never grouped or nested by upstream, and the list preserves config order.
 - The only transformation routing makes on a dispatching request is replacing `body.model` `"a/m"` with `"m"`; the remaining bytes are forwarded as received.
 - An unknown model under a known upstream is forwarded to the upstream — model existence is the upstream's verdict, not the gateway's.
 - Requests with a malformed or unregistered prefix are rejected with `404` `model_not_found` before any upstream contact.
 - Dispatch responses are relayed unchanged — status, headers, and body (including SSE); routing never rewrites them.
-- `/v1/chat/completions` and `/v1/completions` share the same resolution path; only the forwarded upstream `path` differs.
+- `/llm/v1/chat/completions` and `/llm/v1/completions` share the same resolution path; only the forwarded upstream `path` differs.
 
 ## Configuration
 
@@ -99,7 +99,7 @@ Routing has no configuration of its own in the MVP. Its model namespace is deriv
 
 ## Extension Points
 
-- A new OpenAI-protocol endpoint (e.g. `/v1/embeddings`) adds a handler that reuses `resolveModel`; the registry and upstreams need no changes.
+- A new OpenAI-protocol endpoint (e.g. `/llm/v1/embeddings`) adds a handler that reuses `resolveModel`; the registry and upstreams need no changes.
 - Route-level auth or quotas — future cross-cutting concerns attach between request parsing and `resolveModel`; none exist in the MVP.
 
 ## Related Specs

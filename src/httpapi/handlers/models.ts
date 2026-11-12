@@ -1,5 +1,5 @@
 /**
- * `GET /v1/models` aggregation (specs/domains/routing.md): fan out
+ * `GET /llm/v1/models` aggregation (specs/domains/routing.md): fan out
  * `listModels()` over every registered upstream, prefix each provider-native
  * id with its upstream id, rewrite `owned_by` to the upstream id, flatten in
  * config order, answer with the OpenAI list envelope

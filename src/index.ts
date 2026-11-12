@@ -23,6 +23,7 @@
  */
 import { loadConfigOrExit, resolveConfigPath } from "./config/load.ts";
 import type { NormalizedGatewayConfig } from "./config/schema.ts";
+import { redactedConfigView } from "./config/redact.ts";
 import { UpstreamRegistry, type UpstreamFactories } from "./upstreams/registry.ts";
 import { OpenAICompatibleUpstream } from "./upstreams/openai-compatible.ts";
 import { createApp } from "./httpapi/app.ts";
@@ -130,8 +131,12 @@ export async function startGateway(options: StartGatewayOptions = {}): Promise<G
     logger,
   );
 
-  // [5] Build the Hono app (routes, middleware, error mapping).
-  const app = createApp(registry, logger);
+  // [5] Build the Hono app (routes, middleware, error mapping). The
+  // management configuration endpoint receives the redacted view — the mask
+  // replaces key material here, at the entry point, before anything crosses
+  // into the HTTP layer (specs/architecture/layers.md,
+  // specs/architecture/security-model.md).
+  const app = createApp(registry, logger, redactedConfigView(config));
 
   // [7] Bind the configured address — loopback by default
   // (specs/architecture/security-model.md invariant 6).

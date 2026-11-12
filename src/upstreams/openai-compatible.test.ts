@@ -5,7 +5,8 @@
  * Authorization and hop-by-hop never reach upstream), URL building,
  * SSE relayed chunk-by-chunk without buffering (cancel aborts upstream),
  * upstream 4xx JSON relayed as-is, 502/502-empty synthesis, 504 on timeout,
- * and connect() probe failures degrading to a warning instead of throwing.
+ * and connect() probe failures surfacing to the registry as a rejection with
+ * a log-safe reason (the registry warns and retains the outcome).
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import type pino from "pino";
@@ -324,23 +325,20 @@ describe("OpenAICompatibleUpstream", () => {
     expect(upstreamAborted).toBe(true);
   });
 
-  test("connect() resolves and logs a warning (type, id) when the probe fails — degraded, not fatal", async () => {
+  test("connect() rejects with a log-safe reason when the probe fails — the registry logs the warning and retains the outcome", async () => {
     const { baseUrl } = startUpstream(() =>
       new Response("<html>boom</html>", { status: 500, headers: { "content-type": "text/html" } }),
     );
     const { upstream, lines } = makeUpstream(baseUrl);
 
-    await expect(upstream.connect()).resolves.toBeUndefined();
+    await expect(upstream.connect()).rejects.toThrow("500");
 
-    const warnings = lines.filter((line) => line.level === "warn");
-    expect(warnings).toHaveLength(1);
-    const obj = warnings[0]?.obj as { type: string; id: string; reason: string };
-    expect(obj.type).toBe("openai-compatible");
-    expect(obj.id).toBe("openai");
-    expect(obj.reason).toContain("500");
+    // the warning belongs to the registry (it retains the probe outcome for
+    // GET /api/status) — the upstream itself stays silent on failure
+    expect(lines.some((line) => line.level === "warn")).toBe(false);
   });
 
-  test("connect() applies the probe budget — a stalled probe times out into a warning", async () => {
+  test("connect() applies the probe budget — a stalled probe times out into a rejection", async () => {
     const { baseUrl } = startUpstream(async () => {
       await Bun.sleep(400);
       return Response.json({ data: [] });
@@ -348,13 +346,10 @@ describe("OpenAICompatibleUpstream", () => {
     const { upstream, lines } = makeUpstream(baseUrl, { connectProbeMs: 80 });
 
     const started = Date.now();
-    await expect(upstream.connect()).resolves.toBeUndefined();
+    await expect(upstream.connect()).rejects.toThrow("timeout");
     expect(Date.now() - started).toBeLessThan(350);
 
-    const warning = lines.find((line) => line.level === "warn");
-    expect(warning).toBeDefined();
-    expect((warning?.obj as { id: string }).id).toBe("openai");
-    expect((warning?.obj as { reason: string }).reason).toContain("timeout");
+    expect(lines.some((line) => line.level === "warn")).toBe(false);
   });
 
   test("connect() logs info on a successful probe", async () => {

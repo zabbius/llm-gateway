@@ -48,13 +48,36 @@ export interface ProxyRequest {
   headers: Record<string, string>;
 }
 
+/** The outcome of one upstream's one-shot startup probe (`connect()`). */
+export type UpstreamProbe = "ok" | "failed";
+
+/**
+ * The outcome of one upstream's one-shot startup probe (`connect()`), as the
+ * registry retains it and the management surface serves it (`GET /api/status`,
+ * specs/contracts/gateway-management.md). Config identity plus the probe fact
+ * only — never credential or config material; `reason` (a log-safe failure
+ * fact, the same string the startup warning carries) exists only when
+ * `probe` is `"failed"`.
+ */
+export interface UpstreamStatus {
+  /** Config identity: unique routing namespace. */
+  readonly id: string;
+  /** Implementation discriminator; mirrors the config entry's `type`. */
+  readonly type: UpstreamType;
+  /** Whether the one-shot startup probe succeeded. */
+  readonly probe: UpstreamProbe;
+  /** Log-safe failure fact (why the probe failed); absent when `probe` is `"ok"`. */
+  readonly reason?: string;
+}
+
 /**
  * The uniform upstream surface (specs/domains/upstreams/upstream-contract.md).
  * `connect()` runs exactly once per upstream at startup, before any
- * `forward()` / `listModels()` call; it never rejects — a failed probe is
- * logged (warning naming the entry's type and id) and startup continues.
- * `forward()` relays status, headers, and body as received and never
- * fabricates a success response.
+ * `forward()` / `listModels()` call; it resolves when the probe succeeded and
+ * rejects with a log-safe reason when it did not — the registry records the
+ * outcome (`UpstreamStatus`), logs the warning naming the entry's type and
+ * id, and startup continues either way. `forward()` relays status, headers,
+ * and body as received and never fabricates a success response.
  */
 export interface Upstream {
   /** Config identity: unique routing namespace. */
@@ -62,7 +85,11 @@ export interface Upstream {
   /** Implementation discriminator; selects the constructor in the factory map. */
   readonly type: UpstreamType;
 
-  /** Startup phase. Called once; probes the upstream. Never rejects. */
+  /**
+   * Startup phase. Called once; probes the upstream. Resolves when the probe
+   * succeeded; rejects with a log-safe reason when it did not (the registry
+   * retains the outcome and startup continues — never fatal).
+   */
   connect(): Promise<void>;
 
   /** Provider-native model list; ids unprefixed — aggregation adds "{id}/". */

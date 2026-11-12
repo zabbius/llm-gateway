@@ -7,7 +7,7 @@
  *   registry is fully populated; parseListen decodes every listen grammar
  *   shape the schema accepts.
  * - subprocess smoke (the real process, real factory map, mock upstream):
- *   GET /v1/models and POST /v1/chat/completions end to end, startup lines on
+ *   GET /llm/v1/models and POST /llm/v1/chat/completions end to end, startup lines on
  *   stderr (config loaded, probe result, listening), stdout stays empty, key
  *   material never appears, SIGTERM shuts down cleanly.
  * - invalid config: every problem on stderr, exit code 1, no port bound.
@@ -124,7 +124,7 @@ describe("startGateway (in-process wiring)", () => {
       handles = await startGateway({ configPath: path, factories: fakeFactories(probes) });
 
       // By the time the listener answers, every probe already ran — and in order.
-      const response = await fetch(`http://127.0.0.1:${port}/v1/models`);
+      const response = await fetch(`http://127.0.0.1:${port}/llm/v1/models`);
       expect(response.status).toBe(200);
       expect(probes).toEqual(["alpha", "beta"]);
 
@@ -139,7 +139,7 @@ describe("startGateway (in-process wiring)", () => {
       ]);
 
       handles.stop();
-      await expect(fetch(`http://127.0.0.1:${port}/v1/models`)).rejects.toThrow();
+      await expect(fetch(`http://127.0.0.1:${port}/llm/v1/models`)).rejects.toThrow();
     } finally {
       handles?.stop();
       cleanupConfig(path);
@@ -158,7 +158,7 @@ describe("startGateway (in-process wiring)", () => {
       });
 
       expect(probes).toEqual(["alpha", "beta"]); // the second probe ran after the first threw
-      const response = await fetch(`http://127.0.0.1:${port}/v1/models`);
+      const response = await fetch(`http://127.0.0.1:${port}/llm/v1/models`);
       expect(response.status).toBe(200);
       const body = (await response.json()) as { data: Array<{ id: string }> };
       expect(body.data.map((m) => m.id)).toEqual(["alpha/alpha-model", "beta/beta-model"]);
@@ -177,7 +177,7 @@ describe("startGateway (in-process wiring)", () => {
       handles = await startGateway({ configPath: path }); // default (real) factories
 
       expect(handles.registry.find("solo")?.id).toBe("solo");
-      const response = await fetch(`http://127.0.0.1:${port}/v1/models`);
+      const response = await fetch(`http://127.0.0.1:${port}/llm/v1/models`);
       expect(response.status).toBe(200);
       const body = (await response.json()) as { object: string; data: unknown[] };
       expect(body.object).toBe("list");
@@ -284,10 +284,10 @@ describe("startGateway (subprocess, real process)", () => {
     const stdoutText = new Response(piped(proc.stdout)).text();
     const stderrText = new Response(piped(proc.stderr)).text();
     try {
-      await waitUntilReady(`http://127.0.0.1:${port}/v1/models`, proc, 15_000);
+      await waitUntilReady(`http://127.0.0.1:${port}/llm/v1/models`, proc, 15_000);
 
-      // GET /v1/models — aggregation through the running gateway process.
-      const modelsResponse = await fetch(`http://127.0.0.1:${port}/v1/models`);
+      // GET /llm/v1/models — aggregation through the running gateway process.
+      const modelsResponse = await fetch(`http://127.0.0.1:${port}/llm/v1/models`);
       expect(modelsResponse.status).toBe(200);
       const models = (await modelsResponse.json()) as {
         object: string;
@@ -296,8 +296,8 @@ describe("startGateway (subprocess, real process)", () => {
       expect(models.object).toBe("list");
       expect(models.data).toEqual([{ id: "mock/test-model", object: "model", created: 1, owned_by: "mock" }]);
 
-      // POST /v1/chat/completions — dispatch through the running process.
-      const chatResponse = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      // POST /llm/v1/chat/completions — dispatch through the running process.
+      const chatResponse = await fetch(`http://127.0.0.1:${port}/llm/v1/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: "Bearer client-junk" },
         body: JSON.stringify({ model: "mock/test-model", messages: [{ role: "user", content: "ping" }] }),
@@ -355,7 +355,7 @@ describe("startGateway (subprocess, real process)", () => {
       expect(stderr).toContain("upstreams[0]");
       expect(stderr).not.toContain('"gateway listening"');
 
-      await expect(fetch(`http://127.0.0.1:${port}/v1/models`)).rejects.toThrow();
+      await expect(fetch(`http://127.0.0.1:${port}/llm/v1/models`)).rejects.toThrow();
     } finally {
       proc.kill();
       cleanupConfig(path);

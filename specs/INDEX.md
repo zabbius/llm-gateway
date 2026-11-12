@@ -11,13 +11,14 @@ Navigation for the specification system. One glance to find the right document f
 | Add a connection of an EXISTING type (e.g. another OpenAI-compatible provider) | [domains/upstreams/openai-compatible.md](./domains/upstreams/openai-compatible.md) | [domains/configuration.md](./domains/configuration.md), [contracts/gateway-upstream.md](./contracts/gateway-upstream.md) |
 | Pin a self-signed / internal-PKI upstream (TLS `tlsFingerprint`) | [decisions/005-per-upstream-tls-pinning.md](./decisions/005-per-upstream-tls-pinning.md) | [domains/upstreams/openai-compatible.md](./domains/upstreams/openai-compatible.md), [domains/configuration.md](./domains/configuration.md), `tools/tls-fingerprint.ts` |
 | Change the routing scheme (model-id prefix, dispatch) | [domains/routing.md](./domains/routing.md), [decisions/002-model-id-prefix-routing.md](./decisions/002-model-id-prefix-routing.md) | [contracts/client-gateway.md](./contracts/client-gateway.md), [architecture/data-flow.md](./architecture/data-flow.md) |
-| Change the client-facing OpenAI surface (endpoints, error envelope, model list shape) | [contracts/client-gateway.md](./contracts/client-gateway.md) | [domains/routing.md](./domains/routing.md), [architecture/data-flow.md](./architecture/data-flow.md) |
+| Change the client-facing OpenAI surface (endpoints, error envelope, model list shape) | [contracts/client-gateway.md](./contracts/client-gateway.md) | [domains/routing.md](./domains/routing.md), [architecture/data-flow.md](./architecture/data-flow.md), [decisions/006-gateway-surface-namespace.md](./decisions/006-gateway-surface-namespace.md) (surface namespace) |
+| Add or change a management endpoint (`/api/*`: status, configuration) | [contracts/gateway-management.md](./contracts/gateway-management.md) | [decisions/006-gateway-surface-namespace.md](./decisions/006-gateway-surface-namespace.md), [architecture/data-flow.md](./architecture/data-flow.md) (startup mount), [contracts/client-gateway.md](./contracts/client-gateway.md) (shared error envelope), [architecture/security-model.md](./architecture/security-model.md) (credential masking) |
 | Change upstream interaction (paths, headers, timeouts, retries) | [contracts/gateway-upstream.md](./contracts/gateway-upstream.md) | [domains/upstreams/upstream-contract.md](./domains/upstreams/upstream-contract.md), [domains/upstreams/openai-compatible.md](./domains/upstreams/openai-compatible.md) |
 | Change the config file schema (add a field, new upstream type fields) | [domains/configuration.md](./domains/configuration.md) | [config.example.json](../config.example.json) (keep in sync — enforced by test), [architecture/data-flow.md](./architecture/data-flow.md) (startup), [contracts/gateway-upstream.md](./contracts/gateway-upstream.md) (upstream entries) |
 | Change log levels or logging behavior | [domains/observability.md](./domains/observability.md), [decisions/004-pino-stderr-logging.md](./decisions/004-pino-stderr-logging.md) | [domains/configuration.md](./domains/configuration.md) (`logLevel`) |
 | Change the startup / wiring sequence | [architecture/data-flow.md](./architecture/data-flow.md), [architecture/layers.md](./architecture/layers.md) | [domains/configuration.md](./domains/configuration.md) |
 | Touch credentials, key handling, or log redaction | [architecture/security-model.md](./architecture/security-model.md) | [domains/observability.md](./domains/observability.md), [contracts/gateway-upstream.md](./contracts/gateway-upstream.md) (Authorization policy) |
-| Work on the frontend (SPA stub) | [domains/frontend.md](./domains/frontend.md) | — |
+| Work on the frontend (SPA) | [domains/frontend.md](./domains/frontend.md) | [decisions/006-gateway-surface-namespace.md](./decisions/006-gateway-surface-namespace.md) (`/ui/*` mount, client-side routing), [contracts/gateway-management.md](./contracts/gateway-management.md) (the management API the UI consumes) |
 | Decide whether a change needs an ADR, or record one | [META.md](./META.md) (Update Protocol → ADR bar) | [decisions/_template.md](./decisions/_template.md), existing ADRs in `decisions/` |
 | Create or restructure a spec document | [META.md](./META.md) (formats, update rules) | this INDEX (keep the listing current) |
 
@@ -41,7 +42,7 @@ Condensed from [architecture/layers.md](./architecture/layers.md) — the author
                                  v
 +------------------------------------------------------------------+
 | gateway core                                                     |
-| OpenAI endpoints: /v1/models aggregation,                        |
+| OpenAI endpoints: /llm/v1/models aggregation,                    |
 | completions dispatch by upstream-id prefix                       |
 +--------------------------------+---------------------------------+
                                  | looks up by upstream id
@@ -91,10 +92,11 @@ specs/
 │   ├── routing.md                               prefix routing, model aggregation, dispatch
 │   ├── configuration.md                         config file location, JSON schema, startup validation
 │   ├── observability.md                         leveled pino logging to stderr
-│   └── frontend.md                              SPA stub (React + Bootstrap), reserved page names
+│   └── frontend.md                              SPA shell (React + Bootstrap), /ui/* client-side routing + management sections
 │
 ├── contracts/
 │   ├── client-gateway.md                        HTTP client <-> gateway (OpenAI protocol)
+│   ├── gateway-management.md                    management API <-> operators/SPA (read-only /api/*)
 │   └── gateway-upstream.md                      gateway upstreams <-> upstream provider APIs
 │
 └── decisions/
@@ -103,7 +105,8 @@ specs/
     ├── 002-model-id-prefix-routing.md           public model id = {upstreamId}/{model}
     ├── 003-hono-http-framework.md               Hono on Bun, edge-only handlers
     ├── 004-pino-stderr-logging.md               pino, JSON lines to stderr, no file logger
-    └── 005-per-upstream-tls-pinning.md          per-upstream TLS SPKI pinning via `tlsFingerprint`
+    ├── 005-per-upstream-tls-pinning.md          per-upstream TLS SPKI pinning via `tlsFingerprint`
+    └── 006-gateway-surface-namespace.md         surface namespace: LLM /llm/v1, management /api, SPA /ui
 ```
 
-All 17 spec files (3 architecture + 7 domain + 2 contracts + 5 ADRs) are listed above, alongside META.md, this INDEX, and the ADR template. After adding or removing a spec file, update this listing — see [META.md](./META.md), Update Protocol.
+All 19 spec files (3 architecture + 7 domain + 3 contracts + 6 ADRs) are listed above, alongside META.md, this INDEX, and the ADR template. After adding or removing a spec file, update this listing — see [META.md](./META.md), Update Protocol.

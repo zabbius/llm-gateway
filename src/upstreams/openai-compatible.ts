@@ -101,21 +101,16 @@ export class OpenAICompatibleUpstream implements Upstream {
   }
 
   /**
-   * Startup probe: `GET {baseUrl}/models` within the probe budget. Never
-   * rejects — the outcome is logged (info on success, warning naming type
-   * and id on failure) and startup continues; every upstream call re-attempts
-   * the provider, so a degraded upstream still serves requests.
+   * Startup probe: `GET {baseUrl}/models` within the probe budget. Resolves
+   * when the provider answered; rejects with a log-safe reason when it did
+   * not — the registry records the outcome (`UpstreamStatus`), logs the
+   * warning naming type and id, and starts up regardless (specs/contracts/
+   * gateway-management.md; every upstream call re-attempts the provider, so
+   * a degraded upstream still serves requests).
    */
   async connect(): Promise<void> {
-    try {
-      const models = await this.fetchModels(this.timeouts.connectProbeMs);
-      this.logger.info({ models: models.length }, "startup probe ok — upstream reachable");
-    } catch (error) {
-      this.logger.warn(
-        { type: this.type, id: this.id, reason: describe(error) },
-        "startup probe failed — upstream degraded, startup continues",
-      );
-    }
+    const models = await this.fetchModels(this.timeouts.connectProbeMs);
+    this.logger.info({ models: models.length }, "startup probe ok — upstream reachable");
   }
 
   /**

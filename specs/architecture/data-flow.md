@@ -25,7 +25,9 @@ process start (bun src/index.ts)
 [4] register upstreams in the registry (upstream id -> instance)  src/upstreams/registry.ts
      |
      v
-[5] build the Hono app, mount the gateway router                src/httpapi/app.ts
+[5] build the Hono app, mount the surfaces:                     src/httpapi/app.ts
+      LLM router at /llm/v1/*, management routes at /api/*,
+      SPA static serving at /ui/*, root / -> 302 redirect to /ui
      |
      v
 [6] probe every upstream (connect() -> listModels, 10 s budget)  src/upstreams/registry.ts
@@ -39,20 +41,22 @@ ready -- a client can chat with an LLM through the gateway
 
 Notes:
 
-- After construction every upstream runs a one-shot startup probe (`connect()` → `listModels()`, 10-second budget): the outcome is logged (a failure logs a warning naming the upstream id), and startup continues — the gateway comes up even with unreachable upstreams; their unavailability surfaces per request.
+- After construction every upstream runs a one-shot startup probe (`connect()` → `listModels()`, 10-second budget): the outcome is logged (a failure logs a warning naming the upstream id), and startup continues — the gateway comes up even with unreachable upstreams; their unavailability surfaces per request. The probe outcome is retained by the registry and is what `GET /api/status` later reports ([gateway-management.md](../contracts/gateway-management.md)).
 - The listener starts only after every probe finished (ok or logged).
 
 ## Request Lifecycle: Chat Completion
 
 ```
 client
-   |  POST /v1/chat/completions -- OpenAI body, model: "acme/gpt-4o"
+   |  POST /llm/v1/chat/completions -- OpenAI body, model: "acme/gpt-4o"
    v
 [1] AUTH      the auth stage runs first                          security-model.md
    |          MVP: gateway-auth is a TODO -- the stage is a no-op placeholder
    v
 [2] ROUTE     the Hono app matches the endpoint                  src/httpapi/app.ts
-   |          GET /v1/models | POST /v1/chat/completions
+   |          LLM surface: GET /llm/v1/models | POST /llm/v1/chat/completions
+   |                      | POST /llm/v1/completions
+   |          management: GET /api/status | GET /api/configuration
    |          unknown route -> 404
    v
 [3] PREFIX    model "acme/gpt-4o" splits on the first "/"
@@ -89,12 +93,12 @@ log one line at the configured level to stderr
 
 ```
 client
-   |  GET /v1/models
+   |  GET /llm/v1/models
    v
 [1] AUTH      (as above)
    |
    v
-[2] ROUTE     GET /v1/models
+[2] ROUTE     GET /llm/v1/models
    |
    v
 [3] AGGREGATE the router asks every registered upstream (via the interface)

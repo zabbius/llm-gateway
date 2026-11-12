@@ -9,9 +9,9 @@ fixed client surface.
 
 MVP scope implemented:
 
-- `GET /v1/models` — aggregated model list across upstreams, ids prefixed `{upstreamId}/{model}`;
+- `GET /llm/v1/models` — aggregated model list across upstreams, ids prefixed `{upstreamId}/{model}`;
   a failing upstream degrades its slice, never the whole list
-- `POST /v1/chat/completions`, `POST /v1/completions` — proxied to the upstream selected by
+- `POST /llm/v1/chat/completions`, `POST /llm/v1/completions` — proxied to the upstream selected by
   the model-id prefix; SSE streaming passes through chunk-by-chunk, no buffering
 - One upstream type: `openai-compatible` (OpenAI-compatible REST API, Bearer auth,
   header whitelist, fixed timeouts, optional `tlsFingerprint` TLS SPKI pinning,
@@ -54,9 +54,9 @@ request/response transformation beyond the model-id rewrite.
 4. Use it like the OpenAI API, with upstream-prefixed model ids:
 
    ```sh
-   curl http://127.0.0.1:8080/v1/models
+   curl http://127.0.0.1:8080/llm/v1/models
 
-   curl http://127.0.0.1:8080/v1/chat/completions \
+   curl http://127.0.0.1:8080/llm/v1/chat/completions \
      -H 'Content-Type: application/json' \
      -d '{"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "Hello"}]}'
    ```
@@ -113,9 +113,9 @@ so typos fail loudly at startup.
 
 | Method | Path | Behavior |
 | --- | --- | --- |
-| `GET` | `/v1/models` | Aggregated list; ids rewritten to `{upstreamId}/{model}`, `owned_by` set to the upstream id |
-| `POST` | `/v1/chat/completions` | Dispatched by the model-id prefix; SSE streaming passthrough |
-| `POST` | `/v1/completions` | Same dispatch |
+| `GET` | `/llm/v1/models` | Aggregated list; ids rewritten to `{upstreamId}/{model}`, `owned_by` set to the upstream id |
+| `POST` | `/llm/v1/chat/completions` | Dispatched by the model-id prefix; SSE streaming passthrough |
+| `POST` | `/llm/v1/completions` | Same dispatch |
 | `GET` | `/*` | Serves `web/dist` when it exists; unmatched paths get the error envelope |
 
 Gateway-generated failures use the OpenAI error envelope — `400 invalid_request_error`,

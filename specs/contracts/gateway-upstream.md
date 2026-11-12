@@ -12,7 +12,7 @@ Upstreams make one-way outbound calls to provider HTTP APIs; providers are exter
 | `OpenAICompatibleUpstream` (TS class) | `src/upstreams/openai-compatible.ts` | upstream registry (constructed from config `type: "openai-compatible"`) | openai-compatible implementation: `baseUrl` (with `/v1`) + Bearer `apiKey`, pure proxy |
 | `POST {baseUrl}/chat/completions` (provider HTTP) | provider API | `OpenAICompatibleUpstream` | chat completions upstream call (JSON or SSE response) |
 | `POST {baseUrl}/completions` (provider HTTP) | provider API | `OpenAICompatibleUpstream` | legacy completions upstream call (JSON or SSE response) |
-| `GET {baseUrl}/models` (provider HTTP) | provider API | `OpenAICompatibleUpstream.listModels()` | provider model discovery for the aggregated `/v1/models` list |
+| `GET {baseUrl}/models` (provider HTTP) | provider API | `OpenAICompatibleUpstream.listModels()` | provider model discovery for the aggregated `/llm/v1/models` list |
 
 Shape of the uniform upstream surface as landed in `src/upstreams/upstream.ts`:
 
@@ -112,7 +112,7 @@ Provider → gateway → client direction; the mapping rules must stay consisten
 | Response timeout (non-streaming) | synthesized `Response` | 504, `type: "api_error"`, `code: "upstream_timeout"` |
 | TLS verification failure on a pinned upstream (`tlsFingerprint` configured — [ADR-005](../decisions/005-per-upstream-tls-pinning.md)) | synthesized `Response` | 502, `type: "api_error"`, `code: "upstream_tls_error"` (the fact of the pin mismatch only — no certificate material); without a pin a TLS failure stays `upstream_timeout` |
 | Idle timeout mid-stream | Upstream aborted; SSE response simply ends | Stream ends — no JSON error after SSE started |
-| `listModels()` failure | Registry entry degrades; router logs a warning | That upstream contributes no entries to `/v1/models` (200) |
+| `listModels()` failure | Registry entry degrades; router logs a warning | That upstream contributes no entries to `/llm/v1/models` (200) |
 
 The upstream never invents success: any upstream outcome that is not a well-formed 2xx response is propagated per the table, and the gateway core performs no retry on any of these outcomes (MVP: no retries).
 

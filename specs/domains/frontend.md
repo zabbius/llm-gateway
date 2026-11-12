@@ -1,61 +1,86 @@
-# Frontend (SPA Stub)
+# Frontend (SPA)
 
 ## Purpose
 
-A deliberately thin placeholder SPA pinned to the React + Bootstrap stack. The MVP ships a static stub page and the build tooling; `stats`, `admin`, and `audit` exist below only as reserved names for future pages — nothing else about them is specified here.
+The operator-facing SPA served under `/ui/*` (namespace: [ADR-006](../decisions/006-gateway-surface-namespace.md)): a single-page shell whose right dock switches between the three MVP sections — Status (upstream health), Configuration (sanitized effective config), About (static overview) — over the read-only management API. Built with React + Bootstrap only; the gateway serves pre-built static assets and never executes UI code server-side.
 
 ## Key Files
 
-- `web/package.json` — React, Bootstrap, Vite (dev server + build)
-- `web/index.html` — SPA entry document
-- `web/src/main.tsx` — React mount point
-- `web/src/App.tsx` — root component: the MVP stub page
+- `web/package.json` — React 19 + Bootstrap 5.3 dependencies, Vite build; no other runtime or UI dependency enters the SPA
+- `web/vite.config.ts` — build config: `base: "/ui/"` makes every emitted asset URL resolve under the `/ui` namespace (index.html references included)
+- `web/index.html` — SPA entry document (the base is handled by the Vite config — `/icon.svg` and `/src/main.tsx` are emitted under `/ui/`)
+- `web/src/main.tsx` — React mount point (StrictMode, the Bootstrap CSS import)
+- `web/src/router.tsx` — minimal history-API router: `usePath()` (popstate + in-app navigation listener, strips the `/ui` base), `navigate()` / `replace()` (pushState/replaceState through the base), the `Link` component (real `/ui/*` hrefs, intercepts plain clicks only), the `SectionId` set, and `sectionForPath()` (unknown paths fall back to the default section)
+- `web/src/api.ts` — typed fetch helpers for the management surface (`GET /api/status`, `GET /api/configuration`) mirroring the contract shapes; the only gateway calls the SPA makes
+- `web/src/App.tsx` — the shell: a flex row of main content plus the right dock (sticky aside, `border-start`); the dock header is the brand (the glyph inlined so it inherits `currentColor`) above the section nav (Bootstrap `nav-pills flex-column`, active highlight); it also canonicalizes `/ui` and `/ui/` to the default section via client-side replaceState
+- `web/src/sections/Status.tsx` — Status section: fetches `GET /api/status` on mount plus a manual refresh button; Bootstrap table (`id`, `type`, probe badge `ok`/`failed`, `reason`); loading spinner and error alert states
+- `web/src/sections/Configuration.tsx` — Configuration section: fetches `GET /api/configuration`; the `listen` / `logLevel` summary and the upstream table with masked secrets rendered as returned
+- `web/src/sections/About.tsx` — static About section: what llm-gateway is, the stack, the OpenAI-client baseURL hint (`<host>/llm/v1`), pointers to `README.md` and `specs/`
 - `web/public/icon.svg` — brand icon (tile + white mark); served as the favicon via a `<link rel="icon">` in `web/index.html`
-- `web/public/glyph.svg` — monochrome variant of the same mark, stroked with `currentColor` and a tight viewBox, for future in-app use (inline SVG); `public/*` is copied verbatim into the build output
+- `web/public/glyph.svg` — monochrome variant of the same mark, stroked with `currentColor`; its geometry is inlined into `App.tsx` for the dock header; `public/*` is copied verbatim into the build output
 
 ## Core Types
 
-No domain types — the MVP frontend calls no gateway API. The entire UI is:
+Section identity and navigation (`web/src/router.tsx`) — the section set is the SPA's route table; a new section is one more entry:
 
-```tsx
-// MVP placeholder page
-export function App() {
-  return (
-    <div className="container py-5">
-      <h1 className="display-6">llm-gateway</h1>
-      <p className="text-body-secondary">UI is under construction.</p>
-    </div>
-  );
+```ts
+export const SECTIONS = [
+  { id: "status", label: "Status" },
+  { id: "configuration", label: "Configuration" },
+  { id: "about", label: "About" },
+] as const;
+export type SectionId = (typeof SECTIONS)[number]["id"]; // "status" is the default
+```
+
+Management API response shapes (`web/src/api.ts`), mirroring [gateway-management.md](../contracts/gateway-management.md):
+
+```ts
+export interface GatewayStatus {
+  readonly upstreams: readonly UpstreamStatus[]; // { id, type, probe: "ok" | "failed", reason? }
+}
+export interface GatewayConfiguration {
+  readonly listen: string;
+  readonly logLevel: LogLevel; // "trace" | "debug" | "info" | "warning" | "error" | "none"
+  readonly upstreams: readonly RedactedUpstreamConfig[]; // { type, id, baseUrl, apiKey: "[Redacted]", tlsFingerprint: string | null }
 }
 ```
 
-Reserved page names for the future (not designed in this spec): `stats` — usage dashboards; `admin` — upstream management; `audit` — request history.
+Failures throw an `ApiFetchError` carrying the HTTP status (0 when no response arrived) and the OpenAI envelope's `message` when the body is one.
 
 ## Flow
 
 ```
-development:  vite dev server (web/) ──► hot-reloading stub page ──► browser
-production:   vite build ──► static build output ──► gateway serves it at /
-              (the MVP page makes zero API calls)
+gateway:  GET / ──► 302 /ui ──► any unmatched GET/HEAD /ui/* serves dist/index.html (ADR-006 fallthrough)
+browser:  /ui (or /ui/) ──► React mounts ──► replaceState to /ui/status (canonical default section)
+          dock Link click ──► pushState /ui/<section> + re-render (no reload; the server never sees a section path)
+          deep link /ui/configuration ──► server answers with index.html ──► React reads location, renders that section
+sections: Status        ── GET /api/status        ──► { upstreams: [...] } ──► probe table
+          Configuration ── GET /api/configuration ──► { listen, logLevel, upstreams: [...] } ──► masked table
+          About         ── no API call — static content
 ```
 
 ## Invariants
 
-- The MVP frontend performs zero gateway API calls — it renders a static placeholder.
-- The UI stack is React + Bootstrap; no other UI framework or component library enters the MVP.
+- The SPA's stack is React + Bootstrap — no other UI framework, router library, or component library (zero runtime dependencies beyond `react`, `react-dom`, `bootstrap`).
+- The SPA calls ONLY the read-only `/api/*` management endpoints (`GET /api/status`, `GET /api/configuration`) — never `/llm/*`, never anything mutating.
+- Everything beyond `/ui` is client-side routed: the server answers every section path with the same index.html and never learns about sections; section switches happen via pushState without a reload.
+- `/ui` and `/ui/` land on the default section (`/ui/status`) via client-side replaceState — the URL is canonical before the user navigates further.
+- Unknown paths render the default section — the SPA has no 404 view.
+- Secrets stay masked end to end: the SPA renders `apiKey` / `tlsFingerprint` exactly as the management API returns them (the fixed mask, or `null`) and has no way to unmask them.
 - The SPA ships as pre-built static assets; the gateway only serves files and never executes UI code server-side.
-- `stats`, `admin`, `audit` appear only as reserved names — no routes, components, or backing APIs exist for them in the MVP.
 
 ## Configuration
 
-None in the MVP — the frontend has no entry in the gateway config file. The static-serve mount point (`/` ← the build output directory) is fixed by the gateway's HTTP layer.
+None — the frontend has no entry in the gateway config file. What the HTTP layer serves (the root 302, the `/ui/*` static mount, the SPA fallback, the envelope prefixes) is fixed by [ADR-006](../decisions/006-gateway-surface-namespace.md) and implemented in `src/httpapi/app.ts`; the build-time `base: "/ui/"` in `web/vite.config.ts` keeps every emitted asset URL inside the same namespace. The data the sections display comes from the management API's effective (normalized, masked) config — not from any frontend setting.
 
 ## Extension Points
 
-- Future pages mount as additional React routes; the stub's Bootstrap-container layout is the shell they extend or replace.
-- Any future page waits for its gateway API to be specified first — the API spec leads, the UI follows.
+- A new section is one entry in `SECTIONS` (`web/src/router.tsx`) plus one component under `web/src/sections/` wired in `App.tsx` — the dock and the router pick it up with no server-side change (the fallback already serves index.html for the new path).
+- A section that needs new gateway data waits for its management endpoint to be specified in the contract first — the API spec leads, the UI follows; the typed fetch helper joins `web/src/api.ts`.
 
 ## Related Specs
 
-- [META](../META.md) — this stub's place in the canonical spec tree
-- [Configuration](./configuration.md) — the config the future `admin` page will visualize (no UI section exists today)
+- [META](../META.md) — this spec's place in the canonical spec tree
+- [Gateway management contract](../contracts/gateway-management.md) — the read-only `/api/*` surface every section consumes: shapes, masking rule, mount order
+- [ADR-006: Gateway surface namespace](../decisions/006-gateway-surface-namespace.md) — fixes the SPA mount at `/ui/*`, the root `302` redirect, and the client-side routing rule
+- [Configuration](./configuration.md) — the config whose sanitized view the Configuration section visualizes
