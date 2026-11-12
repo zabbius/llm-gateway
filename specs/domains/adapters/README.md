@@ -9,6 +9,8 @@ Owns the connections to upstream LLM providers. The gateway instantiates one ada
 - `src/adapters/adapter.ts` — the `Adapter` interface, `AdapterConfig`, `AdapterType`, `ProxyRequest`, `ModelEntry`
 - `src/adapters/registry.ts` — `AdapterRegistry`: builds instances from config (the `type` → factory dispatch lives here; the factory map is injected by the entry point), id-keyed lookup, aggregated model listing
 - `src/adapters/openai-compatible.ts` — the MVP `openai-compatible` adapter (pure HTTP proxy)
+- `src/adapters/tls-pinning.ts` — TLS SPKI pinning shared by the pinned adapter path: bare-handshake probe, pin computation (`computeSpkiPin`), pin-only `tls` options, `UpstreamTlsPinError`
+- `tools/tls-fingerprint.ts` — CLI that prints (or fail-closed verifies with `--expect`) the pin for an adapter's `tlsFingerprint`
 
 ## Core Types
 
@@ -20,6 +22,9 @@ interface AdapterConfig {
   id: string;          // unique; names the routing prefix namespace
   baseUrl: string;     // absolute http(s) upstream URL
   apiKey: string;      // secret, sent upstream only
+  tlsFingerprint?: string;  // optional TLS SPKI pin — base64(SHA-256(SPKI DER));
+                            // set → only the pinned key is accepted, fail closed
+                            // (ADR-005); absent/empty or plain-http baseUrl → inert
 }
 
 /** One upstream model entry, as an adapter reports it — ids are unprefixed. */
@@ -100,7 +105,7 @@ POST /v1/chat/completions   (body.model = "openai/gpt-4o")
 
 ## Configuration
 
-Provided entirely by the `adapters` array of the gateway config — one entry per adapter with `type`, `id`, `baseUrl`, `apiKey`. See [Configuration](../configuration.md) for the schema, validation rules, and file location.
+Provided entirely by the `adapters` array of the gateway config — one entry per adapter with `type`, `id`, `baseUrl`, `apiKey`, and the optional `tlsFingerprint` TLS SPKI pin (enforced fail closed by the adapter module; see [ADR-005](../../decisions/005-per-adapter-tls-pinning.md)). See [Configuration](../configuration.md) for the schema, validation rules, and file location.
 
 ## Extension Points
 
@@ -112,4 +117,5 @@ Provided entirely by the `adapters` array of the gateway config — one entry pe
 - [Adapter contract](./adapter-contract.md) — the interface and connect→serve lifecycle every adapter implements
 - [OpenAI-compatible adapter](./openai-compatible.md) — the MVP provider implementation
 - [Routing](../routing.md) — consumes the registry for prefix resolution and model aggregation
-- [Configuration](../configuration.md) — where `(type, id, baseUrl, apiKey)` entries come from
+- [Configuration](../configuration.md) — where `(type, id, baseUrl, apiKey, tlsFingerprint?)` entries come from
+- [ADR-005: per-adapter TLS SPKI pinning](../../decisions/005-per-adapter-tls-pinning.md) — the `tlsFingerprint` semantics shared by this domain

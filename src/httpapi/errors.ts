@@ -12,6 +12,7 @@
  *   404  invalid_request_error  param "model", code "model_not_found"
  *   404  invalid_request_error  unmatched route (no code) — envelope rule
  *   502  api_error              code "upstream_error"
+ *   502  api_error              code "upstream_tls_error" (ADR-005)
  *   504  api_error              code "upstream_timeout"
  *
  * Upstream errors that are already OpenAI-shaped are NOT produced here —
@@ -75,5 +76,17 @@ export function upstreamErrorResponse(message: string): Response {
 export function upstreamTimeoutResponse(message: string): Response {
   return envelopeResponse(504, {
     error: { message, type: "api_error", code: "upstream_timeout" },
+  });
+}
+
+/**
+ * Upstream TLS verification failed on a pinned adapter (ADR-005): the
+ * served certificate's key does not match the configured `tlsFingerprint`.
+ * The adapter synthesizes this itself on the pinned path; the constructor
+ * keeps the full contract table representable in one module.
+ */
+export function upstreamTlsErrorResponse(message: string): Response {
+  return envelopeResponse(502, {
+    error: { message, type: "api_error", code: "upstream_tls_error" },
   });
 }

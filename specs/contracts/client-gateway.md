@@ -102,10 +102,12 @@ Every gateway-generated error is returned as an OpenAI-compatible error envelope
 | Known adapter, upstream returned 4xx/5xx | upstream status | upstream value (proxied) | upstream value (proxied) | provider |
 | Upstream returned non-JSON / empty error body | 502 | `api_error` | `upstream_error` | gateway-synthesized |
 | Upstream unreachable, connect/response timeout (non-streaming) | 504 | `api_error` | `upstream_timeout` | gateway-synthesized |
+| TLS verification failure on a pinned upstream (`tlsFingerprint` configured) | 502 | `api_error` | `upstream_tls_error` | gateway-synthesized |
 
 Rules:
 
 - The gateway never wraps an already-OpenAI-shaped upstream error in another envelope — upstream error status + body pass through byte-for-byte.
+- `upstream_tls_error` exists only on pinned upstreams (a configured `tlsFingerprint` — [ADR-005](../decisions/005-per-adapter-tls-pinning.md)): the message states the fact of the pin mismatch and never certificate material; without a pin, a TLS failure maps to `upstream_timeout`.
 - A mid-stream failure never becomes a JSON error: once the SSE response has started, only SSE bytes flow; the gateway ends the stream (aborts upstream, closes the response) and logs. JSON errors are possible only before the first byte of the response.
 - No error responses on this boundary use any format other than the envelope above.
 

@@ -26,6 +26,14 @@ interface AdapterConfig {
   baseUrl: string;
   /** non-empty; sent upstream as the Bearer credential only */
   apiKey: string;
+  /**
+   * optional TLS SPKI pin: base64 (standard alphabet) of SHA-256 over the
+   * upstream certificate's SubjectPublicKeyInfo DER (exactly 32 bytes decoded);
+   * absent/empty → default system-CA verification; set → ONLY the pinned key
+   * is accepted (ADR-005); inert on a plain-http baseUrl;
+   * computed with `tools/tls-fingerprint.ts`
+   */
+  tlsFingerprint?: string;
 }
 
 interface GatewayConfig {
@@ -60,6 +68,7 @@ startup
 - Adapter ids are unique across the whole `adapters` array, independent of `type`.
 - The default `listen` binds loopback only; a public interface is a deliberate config choice and stays discouraged while gateway-auth is unimplemented.
 - `apiKey` values live in memory only and never appear in logs.
+- `tlsFingerprint` values are validated with apiKey-grade output care: a validation problem names the rule without echoing the configured pin (a pin is not a secret, but typo diagnosis never needs the value).
 - `config.example.json` always validates against the schema and includes every supported option at its documented default.
 
 ## Configuration
@@ -84,12 +93,13 @@ The canonical, always-current example lives in `config.example.json` at the repo
 | `adapters[].id` | yes | `^[a-z0-9][a-z0-9-]*$`, no `/`, unique across the array | Stable prefix of the public model ids this connection serves (`{adapterId}/{model}`) |
 | `adapters[].baseUrl` | yes | absolute `http(s)` URL, including the API root with `/v1` | Upstream API root the adapter proxies to; a single trailing slash is normalized away at load |
 | `adapters[].apiKey` | yes | non-empty string | The secret sent upstream as the Bearer credential; never logged |
+| `adapters[].tlsFingerprint` | no (default: absent) | optional; base64 (standard alphabet, optional padding) decoding to exactly 32 bytes — the SHA-256 digest of the upstream certificate's SPKI DER; surrounding whitespace tolerated, stripped at load | TLS SPKI pin: non-empty → the adapter accepts ONLY the pinned key, fail closed ([ADR-005](../decisions/005-per-adapter-tls-pinning.md)); absent/empty → the system CA pool verifies the upstream; inert on a plain-http `baseUrl`; compute with `tools/tls-fingerprint.ts` |
 
 Unknown top-level keys and unknown per-adapter keys are rejected — the schema is strict, so typos fail loudly at startup.
 
 ### Example file
 
-`config.example.json` (repo root, next to `README.md`) is the canonical example config and a copy-paste starting point: copying it to `config.json` yields a valid config. It contains every supported option at its documented default and one adapter entry per registered adapter `type`. The file is pure JSON — JSON comments and extra description keys would fail the strict validation, so field descriptions live in the schema table above.
+`config.example.json` (repo root, next to `README.md`) is the canonical example config and a copy-paste starting point: copying it to `config.json` yields a valid config. It contains every supported option — optional keys included, each adapter entry showing the optional `tlsFingerprint` as a syntactically valid placeholder pin to be replaced with the real value from `tools/tls-fingerprint.ts` — and one adapter entry per registered adapter `type`. The file is pure JSON — JSON comments and extra description keys would fail the strict validation, so field descriptions live in the schema table above.
 
 The example is part of the schema contract and is updated in the same change as `src/config/schema.ts`:
 
@@ -109,7 +119,8 @@ All problems for one start are printed to stderr, one error line each (via the l
 - unknown adapter `type` — lists the registered types;
 - `id` missing, malformed (grammar `^[a-z0-9][a-z0-9-]*$` — uppercase, `_`, or `/` rejected), or duplicated — duplicates are named;
 - `baseUrl` missing or not an absolute `http(s)` URL;
-- `apiKey` missing or empty.
+- `apiKey` missing or empty;
+- `tlsFingerprint` not a string, or not base64 (standard alphabet) decoding to exactly 32 bytes — the problem line names the key and the rule (naming `tools/tls-fingerprint.ts` as the generator) but never echoes the configured value.
 
 ## Extension Points
 
@@ -119,5 +130,6 @@ All problems for one start are printed to stderr, one error line each (via the l
 ## Related Specs
 
 - [Provider Adapters](./adapters/README.md) — the pool built from `adapters` entries
-- [OpenAI-compatible adapter](./adapters/openai-compatible.md) — `baseUrl` / `apiKey` semantics
+- [OpenAI-compatible adapter](./adapters/openai-compatible.md) — `baseUrl` / `apiKey` semantics, and how a configured `tlsFingerprint` is enforced
 - [Observability](./observability.md) — consumer of `logLevel`
+- [ADR-005: per-adapter TLS SPKI pinning](../decisions/005-per-adapter-tls-pinning.md) — the `tlsFingerprint` semantics this schema validates

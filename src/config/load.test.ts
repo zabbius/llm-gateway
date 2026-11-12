@@ -14,6 +14,7 @@
  * line is ever lost to the exit.
  */
 import { afterAll, afterEach, beforeEach, test, expect } from "bun:test";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -23,7 +24,9 @@ import {
   DEFAULT_LISTEN,
   DEFAULT_LOG_LEVEL,
   LOG_LEVELS,
+  isValidTlsFingerprint,
   normalizeBaseUrl,
+  normalizeTlsFingerprint,
 } from "./schema.ts";
 import {
   CONFIG_ENV_VAR,
@@ -121,14 +124,23 @@ test("a missing explicit file is an error naming the path that was tried", () =>
 });
 
 test("without env and without explicit path, ./config.json is tried", () => {
-  const log = capture();
-  const result = loadConfig({ log }); // no config.json exists in the repo root
+  // the default path resolves against the process working directory — run
+  // from the fixture dir so a developer's own ./config.json in the repo root
+  // cannot make this case succeed instead of failing to find the file
+  const cwd = process.cwd();
+  process.chdir(FIXTURE_DIR);
+  try {
+    const log = capture();
+    const result = loadConfig({ log });
 
-  expect(result.ok).toBe(false);
-  if (result.ok) return;
-  expect(result.path).toBe(DEFAULT_CONFIG_PATH);
-  expect(result.problems[0]).toContain("./config.json");
-  expect(log.lines).toEqual(result.problems);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.path).toBe(DEFAULT_CONFIG_PATH);
+    expect(result.problems[0]).toContain("./config.json");
+    expect(log.lines).toEqual(result.problems);
+  } finally {
+    process.chdir(cwd);
+  }
 });
 
 test("LLM_GATEWAY_CONFIG is the only path tried — missing file names the env path", () => {
@@ -267,7 +279,7 @@ test("an unknown per-adapter key is rejected and valid keys are named", () => {
   expect(result.ok).toBe(false);
   if (result.ok) return;
   expect(result.problems).toEqual([
-    'adapters[0]: unknown key "retry" (valid keys: type, id, baseUrl, apiKey)',
+    'adapters[0]: unknown key "retry" (valid keys: type, id, baseUrl, apiKey, tlsFingerprint)',
   ]);
 });
 
@@ -497,6 +509,93 @@ test("a missing, empty, or non-string apiKey is rejected without echoing the val
     expect(result.problems.join("\n")).not.toContain(VALID_ADAPTER.apiKey);
     expect(log.lines.join("\n")).not.toContain(VALID_ADAPTER.apiKey);
   }
+});
+
+// ---------------------------------------------------------------------------
+// tlsFingerprint — optional SPKI pin; typos fail loudly at startup
+// ---------------------------------------------------------------------------
+
+/** A realistic pin: base64 of a SHA-256 digest (32 bytes decoded). */
+const VALID_PIN = createHash("sha256").update("upstream-key").digest("base64");
+
+test("a valid tlsFingerprint pin is accepted and whitespace-stripped in the normalized config", () => {
+  // the pin is not a credential — a problem line may echo it to expose typos
+  const wrapped = `  ${VALID_PIN.slice(0, 22)}\n${VALID_PIN.slice(22)}  `;
+  const result = loadConfig({
+    path: configFixture(validConfig([{ ...VALID_ADAPTER, tlsFingerprint: wrapped }])),
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) return;
+  expect(result.config.adapters[0]?.tlsFingerprint).toBe(VALID_PIN);
+});
+
+test("an empty or whitespace-only tlsFingerprint means no pin", () => {
+  for (const tlsFingerprint of ["", "   \n\t "]) {
+    const result = loadConfig({
+      path: configFixture(validConfig([{ ...VALID_ADAPTER, tlsFingerprint }])),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.config.adapters[0]?.tlsFingerprint).toBe("");
+  }
+});
+
+test("a tlsFingerprint on a plain-http baseUrl is valid (and inert)", () => {
+  const result = loadConfig({
+    path: configFixture(validConfig([{ ...VALID_ADAPTER, baseUrl: "http://localhost:11434/v1", tlsFingerprint: VALID_PIN }])),
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) return;
+  expect(result.config.adapters[0]?.tlsFingerprint).toBe(VALID_PIN);
+});
+
+test("a syntactically wrong tlsFingerprint is rejected naming the rule", () => {
+  for (const tlsFingerprint of [
+    "not-base64!!", // invalid characters
+    "-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_", // base64url alphabet, not standard base64
+    createHash("sha256").update("short").digest("base64").slice(0, 20), // decodes to 15 bytes, not 32
+    "A".repeat(42), // decodes to 31 bytes, not 32
+  ]) {
+    const result = loadConfig({
+      path: configFixture(validConfig([{ ...VALID_ADAPTER, tlsFingerprint }])),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toHaveLength(1);
+    expect(result.problems[0]).toContain("adapters[0]: tlsFingerprint");
+    expect(result.problems[0]).toContain("must be base64 (standard alphabet) decoding to exactly 32 bytes");
+    // the configured value is never echoed into the problem line
+    expect(result.problems[0]).not.toContain(tlsFingerprint);
+  }
+});
+
+test("a non-string tlsFingerprint is rejected", () => {
+  for (const tlsFingerprint of [42, null, true, ["ab"]]) {
+    const result = loadConfig({
+      path: configFixture(validConfig([{ ...VALID_ADAPTER, tlsFingerprint }])),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toEqual([
+      "adapters[0]: tlsFingerprint must be a string — base64 of the SHA-256 SPKI digest (32 bytes)",
+    ]);
+  }
+});
+
+test("isValidTlsFingerprint and normalizeTlsFingerprint agree with the config-level rules", () => {
+  expect(isValidTlsFingerprint(VALID_PIN)).toBe(true);
+  expect(isValidTlsFingerprint("")).toBe(true);
+  expect(isValidTlsFingerprint(` ${VALID_PIN} `)).toBe(true);
+  expect(normalizeTlsFingerprint(` ${VALID_PIN} `)).toBe(VALID_PIN);
+  expect(isValidTlsFingerprint("nope")).toBe(false);
+  expect(isValidTlsFingerprint(VALID_PIN.slice(0, -2))).toBe(false); // 31 bytes decoded
+  expect(isValidTlsFingerprint(VALID_PIN.slice(0, -1))).toBe(true); // unpadded 43-char form, same 32 bytes
+  expect(normalizeTlsFingerprint("k3/J9+vQ1 Z\nab==")).toBe("k3/J9+vQ1Zab==");
 });
 
 // ---------------------------------------------------------------------------

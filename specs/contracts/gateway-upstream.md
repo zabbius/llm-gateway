@@ -59,13 +59,14 @@ Target config schema (see [adapters/README.md](../domains/adapters/README.md)):
       "id": "openai-main",
       "type": "openai-compatible",
       "baseUrl": "https://api.openai.com/v1",
-      "apiKey": "sk-..."
+      "apiKey": "sk-...",
+      "tlsFingerprint": "K4vmDE8v8SKXajayPc4yMc49GIvJEHyUF8mRo7bu/EM="
     }
   ]
 }
 ```
 
-`baseUrl` is the API root **including** `/v1` (e.g. `https://api.openai.com/v1`), without a trailing slash — the adapter appends the fixed relative paths `chat/completions`, `completions`, `models` itself.
+`baseUrl` is the API root **including** `/v1` (e.g. `https://api.openai.com/v1`), without a trailing slash — the adapter appends the fixed relative paths `chat/completions`, `completions`, `models` itself. The optional `tlsFingerprint` is the upstream's TLS SPKI pin — `base64(SHA-256(SPKI DER))`, computed with `tools/tls-fingerprint.ts`; when set, only the pinned key is accepted (fail closed), and the field is inert on a plain-http `baseUrl` (semantics: [ADR-005](../decisions/005-per-adapter-tls-pinning.md)).
 
 ### Timeouts and retries (MVP policy)
 
@@ -109,6 +110,7 @@ Provider → gateway → client direction; the mapping rules must stay consisten
 | Non-JSON / empty / HTML error body | synthesized `Response` | 502, `type: "api_error"`, `code: "upstream_error"` |
 | Connect timeout, connection refused | synthesized `Response` | 504, `type: "api_error"`, `code: "upstream_timeout"` |
 | Response timeout (non-streaming) | synthesized `Response` | 504, `type: "api_error"`, `code: "upstream_timeout"` |
+| TLS verification failure on a pinned upstream (`tlsFingerprint` configured — [ADR-005](../decisions/005-per-adapter-tls-pinning.md)) | synthesized `Response` | 502, `type: "api_error"`, `code: "upstream_tls_error"` (the fact of the pin mismatch only — no certificate material); without a pin a TLS failure stays `upstream_timeout` |
 | Idle timeout mid-stream | Upstream aborted; SSE response simply ends | Stream ends — no JSON error after SSE started |
 | `listModels()` failure | Registry entry degrades; router logs a warning | That adapter contributes no entries to `/v1/models` (200) |
 
@@ -118,7 +120,7 @@ The adapter never invents success: any upstream outcome that is not a well-forme
 
 Derived from the actual coupling of this boundary:
 
-1. **Config schema (`adapters[].id` / `type` / `baseUrl` / `apiKey`)** couples the config loader, startup validation, README examples, and [client-gateway.md](client-gateway.md) examples. Any key rename, type change, or new required field must update all of them in one change; changing the config file format itself (JSON) is cross-cutting and passes the ADR bar.
+1. **Config schema (`adapters[].id` / `type` / `baseUrl` / `apiKey` / `tlsFingerprint`)** couples the config loader, startup validation, README examples, and [client-gateway.md](client-gateway.md) examples. Any key rename, type change, or new required field must update all of them in one change; changing the config file format itself (JSON) is cross-cutting and passes the ADR bar. The `tlsFingerprint` semantics (pin format, fail-closed enforcement, `upstream_tls_error`) are fixed by [ADR-005](../decisions/005-per-adapter-tls-pinning.md) — changing them supersedes that ADR first.
 2. **`baseUrl` semantics** (API root including `/v1`; the adapter appends the fixed relative paths) — changing what the URL must contain (e.g. dropping `/v1` and hardcoding it inside adapters) changes path construction in every adapter and every documented example; requires a migration note and updates to [adapters/README.md](../domains/adapters/README.md) plus this contract.
 3. **Adapter `id` grammar (`[a-z0-9][a-z0-9-]*`)** couples registry keys, `<adapterId>/` prefix parsing, and the client-facing model id scheme — always change together with item 1 of [client-gateway.md](client-gateway.md#breaking-change-checklist) and [routing.md](../domains/routing.md).
 4. **`Adapter` interface signature** couples every adapter implementation, the registry, and the router call sites — update [routing.md](../domains/routing.md) and [adapters/README.md](../domains/adapters/README.md) in the same change.

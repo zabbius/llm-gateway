@@ -6,13 +6,15 @@
       "type": "openai-compatible",
       "id": "openai",
       "baseUrl": "https://api.openai.com/v1",
-      "apiKey": "sk-replace-with-your-api-key"
+      "apiKey": "sk-replace-with-your-api-key",
+      "tlsFingerprint": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
     },
     {
       "type": "openai-compatible",
       "id": "ollama",
       "baseUrl": "http://127.0.0.1:11434/v1",
-      "apiKey": "ollama"
+      "apiKey": "ollama",
+      "tlsFingerprint": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
     }
   ]
 }

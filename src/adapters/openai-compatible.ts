@@ -14,14 +14,18 @@
  * JSON body is relayed byte-for-byte with its original status; an upstream
  * error body that is not relayable JSON (HTML / empty / wrong type) becomes
  * a synthesized `502 upstream_error`; an unreachable upstream or a timeout
- * becomes a synthesized `504 upstream_timeout`. One attempt per client
- * request — no retries in the MVP.
+ * becomes a synthesized `504 upstream_timeout`; a TLS verification failure
+ * on a pinned upstream becomes a synthesized `502 upstream_tls_error`
+ * (ADR-005). One attempt per client request — no retries in the MVP.
  */
 import type pino from "pino";
 import type { Adapter, AdapterConfig, ModelEntry, ProxyRequest } from "./adapter.ts";
+import { isTlsFailure, pinnedTlsOptions, probePinnedLeaf } from "./tls-pinning.ts";
 
 /** The `listModels()` probe inside `connect()` (startup; non-fatal on expiry). */
 export const CONNECT_PROBE_TIMEOUT_MS = 10_000;
+/** The bare TLS handshake that pins an upstream before its first request (ADR-005). */
+export const PIN_PROBE_TIMEOUT_MS = 10_000;
 /** Non-streaming `forward()` end-to-end; for streams — until response headers arrive. */
 export const FORWARD_TIMEOUT_MS = 120_000;
 /** Once streaming: maximum silence between SSE chunks (no total cap). */
@@ -34,8 +38,21 @@ export const STREAM_IDLE_TIMEOUT_MS = 300_000;
  */
 export interface OpenAICompatibleTimeouts {
   connectProbeMs?: number;
+  pinProbeMs?: number;
   forwardMs?: number;
   streamIdleMs?: number;
+}
+
+/**
+ * Request init for one upstream fetch (`upstreamFetch`'s contract): the
+ * pinned path may add TLS options, nothing else is transformed.
+ */
+interface UpstreamRequestInit {
+  method: string;
+  headers: Record<string, string>;
+  body?: ReadableStream<Uint8Array>;
+  signal: AbortSignal;
+  redirect: "manual";
 }
 
 /** Request headers relayed from the client call to upstream (whitelist). */
@@ -60,6 +77,10 @@ export class OpenAICompatibleAdapter implements Adapter {
 
   private readonly baseUrl: string;
   private readonly apiKey: string;
+  /** Non-empty config pin (ADR-005); undefined — and never enforced — when absent/empty. */
+  private readonly tlsFingerprint: string | undefined;
+  /** Probed leaf certificate PEM cache; invalidated on any TLS failure (re-probe next request). */
+  private pinnedLeaf: { pem: string; pin: string } | undefined;
   private readonly logger: pino.Logger;
   private readonly timeouts: Required<OpenAICompatibleTimeouts>;
 
@@ -68,9 +89,14 @@ export class OpenAICompatibleAdapter implements Adapter {
     this.type = config.type;
     this.baseUrl = config.baseUrl;
     this.apiKey = config.apiKey;
+    this.tlsFingerprint =
+      config.tlsFingerprint !== undefined && config.tlsFingerprint.length > 0
+        ? config.tlsFingerprint
+        : undefined;
     this.logger = logger;
     this.timeouts = {
       connectProbeMs: timeouts.connectProbeMs ?? CONNECT_PROBE_TIMEOUT_MS,
+      pinProbeMs: timeouts.pinProbeMs ?? PIN_PROBE_TIMEOUT_MS,
       forwardMs: timeouts.forwardMs ?? FORWARD_TIMEOUT_MS,
       streamIdleMs: timeouts.streamIdleMs ?? STREAM_IDLE_TIMEOUT_MS,
     };
@@ -122,7 +148,7 @@ export class OpenAICompatibleAdapter implements Adapter {
 
     let upstream: Response;
     try {
-      upstream = await fetch(this.upstreamUrl(request.path), {
+      upstream = await this.upstreamFetch(this.upstreamUrl(request.path), {
         method: request.method,
         headers: this.outHeaders(request.headers),
         body: request.body,
@@ -132,7 +158,13 @@ export class OpenAICompatibleAdapter implements Adapter {
       });
     } catch (error) {
       clearTimeout(forwardTimer);
-      return this.unreachableResponse(error, forwardTimedOut);
+      if (forwardTimedOut) return this.unreachableResponse(error, true);
+      // a TLS verification failure on a PINNED upstream is its own fact —
+      // it is not a timeout and not a relayable upstream body (ADR-005).
+      // Without a pin the pre-existing mapping stays: any TLS failure is
+      // just "unreachable" (504 upstream_timeout).
+      if (this.tlsFingerprint !== undefined && isTlsFailure(error)) return this.tlsFailureResponse(error);
+      return this.unreachableResponse(error, false);
     }
 
     const contentType = upstream.headers.get("content-type") ?? "";
@@ -220,7 +252,7 @@ export class OpenAICompatibleAdapter implements Adapter {
 
     let upstream: Response;
     try {
-      upstream = await fetch(this.upstreamUrl("models"), {
+      upstream = await this.upstreamFetch(this.upstreamUrl("models"), {
         method: "GET",
         headers: { Authorization: `Bearer ${this.apiKey}`, Accept: "application/json" },
         signal: controller.signal,
@@ -251,6 +283,48 @@ export class OpenAICompatibleAdapter implements Adapter {
 
   private upstreamUrl(path: string): string {
     return `${this.baseUrl}/${path}`;
+  }
+
+  /**
+   * The adapter's only upstream fetch. Without a pin it is plain `fetch`;
+   * with a pin (ADR-005) it first ensures a probed leaf certificate — a
+   * bare TLS handshake whose SPKI pin matched the config, cached until a
+   * TLS failure invalidates it — and opens the request with that leaf as
+   * the only trust anchor plus a pin-only `checkServerIdentity`.
+   */
+  private async upstreamFetch(url: string, init: UpstreamRequestInit): Promise<Response> {
+    const pin = this.tlsFingerprint;
+    if (pin === undefined) {
+      return fetch(url, init);
+    }
+    let leaf = this.pinnedLeaf;
+    if (leaf === undefined) {
+      leaf = await probePinnedLeaf(url, this.timeouts.pinProbeMs, pin, init.signal);
+      this.pinnedLeaf = leaf;
+    }
+    try {
+      return await fetch(url, { ...init, tls: pinnedTlsOptions(leaf.pem, pin) } as RequestInit);
+    } catch (error) {
+      // the served certificate stopped matching the pin (rotation, MITM):
+      // drop the cached leaf so the next request re-probes — a renewal with
+      // the same key pair matches the pin again on that probe
+      if (isTlsFailure(error)) {
+        this.pinnedLeaf = undefined;
+        this.logger.warn({ reason: describe(error) }, "pinned upstream TLS verification failed — leaf cache invalidated");
+      }
+      throw error;
+    }
+  }
+
+  /** Upstream TLS verification failed → synthesized `502 upstream_tls_error`. */
+  private tlsFailureResponse(error: unknown): Response {
+    const reason = error instanceof Error ? error.message : String(error);
+    this.logger.error({ code: "upstream_tls_error", reason }, "upstream TLS verification failed — synthesizing 502");
+    return synthesizedError(
+      502,
+      "upstream_tls_error",
+      `upstream "${this.id}" TLS certificate does not match the configured tlsFingerprint pin`,
+    );
   }
 
   /**
@@ -352,9 +426,15 @@ function isJsonContentType(contentType: string): boolean {
 /**
  * A gateway-generated failure in the OpenAI error envelope
  * (specs/types.ts `ErrorEnvelope` shape; type "api_error" per
- * specs/contracts/gateway-upstream.md error propagation table).
+ * specs/contracts/gateway-upstream.md error propagation table;
+ * "upstream_tls_error" per ADR-005 for a pinned upstream whose TLS
+ * verification failed).
  */
-function synthesizedError(status: 502 | 504, code: "upstream_error" | "upstream_timeout", message: string): Response {
+function synthesizedError(
+  status: 502 | 504,
+  code: "upstream_error" | "upstream_timeout" | "upstream_tls_error",
+  message: string,
+): Response {
   const body = JSON.stringify({ error: { message, type: "api_error", code } });
   return new Response(body, { status, headers: { "content-type": "application/json" } });
 }

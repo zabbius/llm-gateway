@@ -14,7 +14,7 @@ process start (bun src/index.ts)
      |
      v
 [2] validate config:
-      adapter entries (id, type, baseUrl, apiKey),
+      adapter entries (id, type, baseUrl, apiKey, optional tlsFingerprint pin),
       listen host:port, log level
      |            invalid -> error to stderr, exit non-zero
      v
@@ -67,7 +67,12 @@ client
    |            baseUrl + path; method and body relayed as received,
    |            client Authorization dropped at the edge (never forwarded),
    |            hop-by-hop headers never forwarded,
-   |            adapter attaches its own provider credentials
+   |            adapter attaches its own provider credentials;
+   |            pinned upstream (tlsFingerprint set, ADR-005): the request opens
+   |            over the cached probed leaf — bare-handshake probe, fail-closed
+   |            SPKI pin check, leaf-anchored chain, per-connection pin veto;
+   |            a TLS failure invalidates the cache (re-probe next request) and
+   |            maps to 502 upstream_tls_error
    v
 [6] upstream provider processes the request
    |
@@ -103,7 +108,7 @@ flat aggregated list in the OpenAI list shape -> client
 
 ## Errors Along the Flow
 
-- Upstream failure: the adapter never raises — it relays the upstream status and body, or synthesizes a 502 upstream_error / 504 upstream_timeout envelope (gateway-upstream.md); the app's error middleware maps only unexpected gateway-side exceptions to a 502 upstream_error envelope, and logs at warning or error.
+- Upstream failure: the adapter never raises — it relays the upstream status and body, or synthesizes a 502 upstream_error / 504 upstream_timeout envelope (gateway-upstream.md); a TLS verification failure on a pinned upstream (`tlsFingerprint` set) synthesizes a 502 upstream_tls_error (ADR-005); the app's error middleware maps only unexpected gateway-side exceptions to a 502 upstream_error envelope, and logs at warning or error.
 - Routing failures (unprefixed model, unknown adapter id) never reach an adapter — they are answered at stages [3] and [4].
 - Chat requests are single-adapter by construction, so one provider being down never blocks requests targeting other providers.
 - Models aggregation degrades: an adapter that fails or times out contributes no entries; the rest of the list still returns with status 200, and the failure is logged as a warning naming the adapter id.

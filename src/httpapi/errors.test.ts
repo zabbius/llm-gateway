@@ -9,6 +9,7 @@ import {
   notFoundResponse,
   upstreamErrorResponse,
   upstreamTimeoutResponse,
+  upstreamTlsErrorResponse,
 } from "./errors.ts";
 
 async function envelopeOf(response: Response): Promise<{ status: number; contentType: string; body: unknown }> {
@@ -66,6 +67,18 @@ describe("error envelope constructors", () => {
     expect(status).toBe(504);
     expect(body).toEqual({
       error: { message: "upstream 'acme' is unreachable: timeout", type: "api_error", code: "upstream_timeout" },
+    });
+  });
+
+  test("upstreamTlsErrorResponse — 502, api_error, code 'upstream_tls_error'", async () => {
+    const { status, body } = await envelopeOf(upstreamTlsErrorResponse('upstream "lan" TLS certificate pin mismatch'));
+    expect(status).toBe(502);
+    expect(body).toEqual({
+      error: {
+        message: 'upstream "lan" TLS certificate pin mismatch',
+        type: "api_error",
+        code: "upstream_tls_error",
+      },
     });
   });
 });

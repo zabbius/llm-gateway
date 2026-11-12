@@ -46,6 +46,14 @@ export interface AdapterConfig {
   baseUrl: string;
   /** non-empty; sent upstream as the Bearer credential only */
   apiKey: string;
+  /**
+   * Optional TLS SPKI pin: base64 (standard alphabet) of the SHA-256 digest
+   * of the upstream certificate's SubjectPublicKeyInfo DER — exactly 32 bytes
+   * decoded. Absent or empty → the system CA pool verifies the upstream
+   * certificate; non-empty → ONLY the pinned key is accepted (ADR-005).
+   * Inert on a plain-http baseUrl. Compute with `tools/tls-fingerprint.ts`.
+   */
+  tlsFingerprint?: string;
 }
 
 /** The config file shape as parsed from JSON. */
@@ -84,7 +92,33 @@ const LISTEN_PATTERN =
  * key is added or removed here, the example must follow in the same change.
  */
 export const TOP_LEVEL_KEYS: readonly string[] = ["listen", "logLevel", "adapters"];
-export const ADAPTER_KEYS: readonly string[] = ["type", "id", "baseUrl", "apiKey"];
+export const ADAPTER_KEYS: readonly string[] = ["type", "id", "baseUrl", "apiKey", "tlsFingerprint"];
+
+/**
+ * A TLS fingerprint pin: base64 (standard alphabet, optional padding) whose
+ * decoding is exactly 32 bytes — the SHA-256 digest of the upstream
+ * certificate's SPKI DER (ADR-005). Comparison is whitespace-tolerant: the
+ * normalized form strips every whitespace character before validation.
+ */
+const TLS_FINGERPRINT_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/** Strip every whitespace character (a pin pasted with line wraps still matches). */
+export function normalizeTlsFingerprint(value: string): string {
+  return value.replace(/\s+/g, "");
+}
+
+/**
+ * True when `value` is a usable TLS fingerprint pin: the empty string (no
+ * pin), or a base64 (standard alphabet) string decoding to exactly 32 bytes.
+ * A syntactically wrong pin fails config validation — typos fail loudly at
+ * startup, never at the first request (specs/domains/configuration.md).
+ */
+export function isValidTlsFingerprint(value: string): boolean {
+  const normalized = normalizeTlsFingerprint(value);
+  if (normalized.length === 0) return true;
+  if (!TLS_FINGERPRINT_PATTERN.test(normalized)) return false;
+  return Buffer.from(normalized, "base64").length === 32;
+}
 
 /** True when `value` is one of the six config log levels. */
 export function isValidLogLevel(value: unknown): value is LogLevel {
@@ -212,6 +246,23 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     } else if (typeof apiKey !== "string" || apiKey.length === 0) {
       problems.push(`adapters[${index}]: apiKey must be a non-empty string`);
     }
+
+    // The problem line names the key and the rule but never echoes the
+    // configured value — validation output stays free of pin material the
+    // same way it stays free of apiKey. A pin on a plain-http baseUrl stays
+    // valid but is inert (ADR-005).
+    const tlsFingerprint = entry.tlsFingerprint;
+    if (tlsFingerprint !== undefined) {
+      if (typeof tlsFingerprint !== "string") {
+        problems.push(
+          `adapters[${index}]: tlsFingerprint must be a string — base64 of the SHA-256 SPKI digest (32 bytes)`,
+        );
+      } else if (!isValidTlsFingerprint(tlsFingerprint)) {
+        problems.push(
+          `adapters[${index}]: tlsFingerprint must be base64 (standard alphabet) decoding to exactly 32 bytes — compute it with tools/tls-fingerprint.ts`,
+        );
+      }
+    }
   });
 
   for (const [id, indexes] of seenIds) {
@@ -234,6 +285,9 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
         id: entry.id as string,
         baseUrl: normalizeBaseUrl(entry.baseUrl as string),
         apiKey: entry.apiKey as string,
+        ...(typeof entry.tlsFingerprint === "string"
+          ? { tlsFingerprint: normalizeTlsFingerprint(entry.tlsFingerprint) }
+          : {}),
       })),
     },
   };

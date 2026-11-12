@@ -9,6 +9,7 @@ Navigation for the specification system. One glance to find the right document f
 | Start working on the project (understand the system) | [architecture/layers.md](./architecture/layers.md), [architecture/data-flow.md](./architecture/data-flow.md) | [META.md](./META.md), this INDEX |
 | Add an adapter for a NEW provider type | [domains/adapters/README.md](./domains/adapters/README.md), [domains/adapters/adapter-contract.md](./domains/adapters/adapter-contract.md) | [contracts/gateway-upstream.md](./contracts/gateway-upstream.md), [decisions/001-adapter-per-provider-type.md](./decisions/001-adapter-per-provider-type.md), [decisions/002-model-id-prefix-routing.md](./decisions/002-model-id-prefix-routing.md), [domains/configuration.md](./domains/configuration.md) |
 | Add a connection of an EXISTING type (e.g. another OpenAI-compatible provider) | [domains/adapters/openai-compatible.md](./domains/adapters/openai-compatible.md) | [domains/configuration.md](./domains/configuration.md), [contracts/gateway-upstream.md](./contracts/gateway-upstream.md) |
+| Pin a self-signed / internal-PKI upstream (TLS `tlsFingerprint`) | [decisions/005-per-adapter-tls-pinning.md](./decisions/005-per-adapter-tls-pinning.md) | [domains/adapters/openai-compatible.md](./domains/adapters/openai-compatible.md), [domains/configuration.md](./domains/configuration.md), `tools/tls-fingerprint.ts` |
 | Change the routing scheme (model-id prefix, dispatch) | [domains/routing.md](./domains/routing.md), [decisions/002-model-id-prefix-routing.md](./decisions/002-model-id-prefix-routing.md) | [contracts/client-gateway.md](./contracts/client-gateway.md), [architecture/data-flow.md](./architecture/data-flow.md) |
 | Change the client-facing OpenAI surface (endpoints, error envelope, model list shape) | [contracts/client-gateway.md](./contracts/client-gateway.md) | [domains/routing.md](./domains/routing.md), [architecture/data-flow.md](./architecture/data-flow.md) |
 | Change upstream interaction (paths, headers, timeouts, retries) | [contracts/gateway-upstream.md](./contracts/gateway-upstream.md) | [domains/adapters/adapter-contract.md](./domains/adapters/adapter-contract.md), [domains/adapters/openai-compatible.md](./domains/adapters/openai-compatible.md) |
@@ -101,7 +102,8 @@ specs/
     ├── 001-adapter-per-provider-type.md         adapter per provider connection, common interface
     ├── 002-model-id-prefix-routing.md           public model id = {adapterId}/{model}
     ├── 003-hono-http-framework.md               Hono on Bun, edge-only handlers
-    └── 004-pino-stderr-logging.md               pino, JSON lines to stderr, no file logger
+    ├── 004-pino-stderr-logging.md               pino, JSON lines to stderr, no file logger
+    └── 005-per-adapter-tls-pinning.md           per-adapter TLS SPKI pinning via `tlsFingerprint`
 ```
 
-All 16 spec files (3 architecture + 7 domain + 2 contracts + 4 ADRs) are listed above, alongside META.md, this INDEX, and the ADR template. After adding or removing a spec file, update this listing — see [META.md](./META.md), Update Protocol.
+All 17 spec files (3 architecture + 7 domain + 2 contracts + 5 ADRs) are listed above, alongside META.md, this INDEX, and the ADR template. After adding or removing a spec file, update this listing — see [META.md](./META.md), Update Protocol.
