@@ -35,21 +35,12 @@ request/response transformation beyond the model-id rewrite.
    (cd web && bun install && bun run build)   # emits web/dist
    ```
 
-2. Create `config.json` (or point the `LLM_GATEWAY_CONFIG` env var at any JSON file):
+2. Create `config.json` (or point the `LLM_GATEWAY_CONFIG` env var at any JSON file).
+   [`config.example.json`](config.example.json) is a ready-to-copy starting point with
+   every supported option at its default:
 
-   ```json
-   {
-     "listen": "127.0.0.1:8080",
-     "logLevel": "info",
-     "adapters": [
-       {
-         "type": "openai-compatible",
-         "id": "openai",
-         "baseUrl": "https://api.openai.com/v1",
-         "apiKey": "sk-..."
-       }
-     ]
-   }
+   ```sh
+   cp config.example.json config.json   # then edit the apiKey values
    ```
 
 3. Run:
@@ -69,6 +60,10 @@ request/response transformation beyond the model-id rewrite.
    ```
 
 ## Configuration
+
+[`config.example.json`](config.example.json) contains every supported option at its
+documented default and is kept in sync with the schema by `src/config/example.test.ts`
+(field descriptions and rules: `specs/domains/configuration.md`).
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |

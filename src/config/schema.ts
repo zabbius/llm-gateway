@@ -77,8 +77,14 @@ export type ValidatedConfig =
 const LISTEN_PATTERN =
   /^(\[[0-9A-Fa-f:.]+\]|[0-9A-Za-z]([0-9A-Za-z-]*[0-9A-Za-z])?(\.[0-9A-Za-z]([0-9A-Za-z-]*[0-9A-Za-z])?)*):(?<port>[0-9]{1,5})$/;
 
-const TOP_LEVEL_KEYS: readonly string[] = ["listen", "logLevel", "adapters"];
-const ADAPTER_KEYS: readonly string[] = ["type", "id", "baseUrl", "apiKey"];
+/**
+ * The exact key sets accepted at each level. Exported for
+ * `src/config/example.test.ts`, which keeps `config.example.json` in sync
+ * with the schema (specs/domains/configuration.md "Example file"): when a
+ * key is added or removed here, the example must follow in the same change.
+ */
+export const TOP_LEVEL_KEYS: readonly string[] = ["listen", "logLevel", "adapters"];
+export const ADAPTER_KEYS: readonly string[] = ["type", "id", "baseUrl", "apiKey"];
 
 /** True when `value` is one of the six config log levels. */
 export function isValidLogLevel(value: unknown): value is LogLevel {

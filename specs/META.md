@@ -229,6 +229,7 @@ What was evaluated and why it was rejected.
 - After any change that alters documented behavior
 - After adding/removing/renaming interfaces that appear in a contract
 - After changing architectural boundaries or invariants
+- After changing the config schema (a top-level or per-adapter key added, removed, or renamed, or a new adapter `type` registered): `config.example.json` is updated in the same change — the rule and its enforcement test are documented in [domains/configuration.md](./domains/configuration.md)
 - After a decision that passes the ADR bar — constrains work beyond the immediate change (cross-domain, cross-cutting, or hard to reverse) AND had real alternatives considered and rejected, or contradicts/supersedes an existing ADR or documented invariant — create an ADR; otherwise record it in the affected domain spec
 
 ### Greenfield Rule

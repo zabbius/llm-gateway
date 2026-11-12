@@ -1,0 +1,18 @@
+{
+  "listen": "127.0.0.1:8080",
+  "logLevel": "info",
+  "adapters": [
+    {
+      "type": "openai-compatible",
+      "id": "openai",
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "sk-replace-with-your-api-key"
+    },
+    {
+      "type": "openai-compatible",
+      "id": "ollama",
+      "baseUrl": "http://127.0.0.1:11434/v1",
+      "apiKey": "ollama"
+    }
+  ]
+}
