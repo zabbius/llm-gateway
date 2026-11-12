@@ -4,7 +4,7 @@
  *   [1] auth stage        — MVP no-op placeholder (D4): gateway-auth is a
  *                           documented TODO; the stage precedes routing and
  *                           no code path skips it (security-model.md).
- *   [2] request logging   — ≥1 log line per request: method, path, adapter
+ *   [2] request logging   — ≥1 log line per request: method, path, upstream
  *                           id (when dispatch resolved one), status,
  *                           duration (data-flow.md request lifecycle).
  *   [3] error mapping     — the ONLY place exceptions become HTTP status
@@ -19,15 +19,15 @@
  *                           precedence. Absent build → skipped entirely.
  *
  * Layering (specs/architecture/layers.md invariant 3): this module imports
- * the gateway core only — the adapter registry reaches `createApp` as a
+ * the gateway core only — the upstream registry reaches `createApp` as a
  * type-only re-export through `src/gateway/router.ts`, instances flow in
- * from the entry point as plain values, and no adapter lookup happens here.
+ * from the entry point as plain values, and no upstream lookup happens here.
  */
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
 import { existsSync } from "node:fs";
 import type pino from "pino";
-import { type AdapterRegistry, type GatewayEnv } from "../gateway/router.ts";
+import { type UpstreamRegistry, type GatewayEnv } from "../gateway/router.ts";
 import { handleModels } from "./handlers/models.ts";
 import { handleChatCompletions, handleCompletions } from "./handlers/completions.ts";
 import { notFoundResponse, upstreamErrorResponse } from "./errors.ts";
@@ -36,7 +36,7 @@ import { notFoundResponse, upstreamErrorResponse } from "./errors.ts";
 export const WEB_DIST_DIR = "web/dist";
 
 /** Build the gateway app: routes mounted, middleware ordered, errors mapped. */
-export function createApp(registry: AdapterRegistry, logger: pino.Logger): Hono<GatewayEnv> {
+export function createApp(registry: UpstreamRegistry, logger: pino.Logger): Hono<GatewayEnv> {
   const log = logger.child({ component: "http" });
   const app = new Hono<GatewayEnv>();
 
@@ -53,7 +53,7 @@ export function createApp(registry: AdapterRegistry, logger: pino.Logger): Hono<
   });
 
   // [2] Request logging — one line per handled request, after the chain
-  // produced its response. adapterId is set by dispatch handlers via the
+  // produced its response. upstreamId is set by dispatch handlers via the
   // GatewayEnv binding; unset for non-dispatching routes.
   app.use("*", async (c, next) => {
     const startedAt = performance.now();
@@ -63,7 +63,7 @@ export function createApp(registry: AdapterRegistry, logger: pino.Logger): Hono<
       {
         method: c.req.method,
         path: c.req.path,
-        adapterId: c.get("adapterId"),
+        upstreamId: c.get("upstreamId"),
         status: c.res.status,
         durationMs,
       },
@@ -72,7 +72,7 @@ export function createApp(registry: AdapterRegistry, logger: pino.Logger): Hono<
   });
 
   // [3] Error mapping — the single place a thrown error becomes an HTTP
-  // status (specs/architecture/layers.md). Well-behaved adapters never
+  // status (specs/architecture/layers.md). Well-behaved upstreams never
   // reject (they answer relayed or synthesized 502/504 Responses), so
   // reaching this handler means an unexpected failure on the gateway side;
   // per the client-gateway contract every gateway-generated failure uses the

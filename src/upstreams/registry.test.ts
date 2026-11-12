@@ -1,13 +1,13 @@
 /**
- * AdapterRegistry construction and lookup contracts
- * (specs/domains/adapters/README.md): factory dispatch by `type` through the
+ * UpstreamRegistry construction and lookup contracts
+ * (specs/domains/upstreams/README.md): factory dispatch by `type` through the
  * entry-point-injected map, probes awaited (failures logged, never fatal),
  * exact-id `find()`, config-order `all()`, registry written only at create.
  */
 import { describe, expect, test } from "bun:test";
 import type pino from "pino";
-import type { Adapter, AdapterConfig, ModelEntry, ProxyRequest } from "./adapter.ts";
-import { AdapterRegistry, type AdapterFactories } from "./registry.ts";
+import type { Upstream, UpstreamConfig, ModelEntry, ProxyRequest } from "./upstream.ts";
+import { UpstreamRegistry, type UpstreamFactories } from "./registry.ts";
 
 /** Minimal capturing stand-in for the injected pino logger. */
 function fakeLogger(): {
@@ -33,18 +33,18 @@ function fakeLogger(): {
   return { logger: build({}), lines };
 }
 
-function entry(id: string): AdapterConfig {
+function entry(id: string): UpstreamConfig {
   return { type: "openai-compatible", id, baseUrl: "https://upstream.example/v1", apiKey: "sk-test" };
 }
 
-class FakeAdapter implements Adapter {
+class FakeUpstream implements Upstream {
   readonly id: string;
-  readonly type: AdapterConfig["type"];
+  readonly type: UpstreamConfig["type"];
   readonly connectInvoked: boolean[] = [];
   readonly childLogger: pino.Logger;
 
   constructor(
-    config: AdapterConfig,
+    config: UpstreamConfig,
     childLogger: pino.Logger,
     private readonly connectResult: "ok" | "throw" = "ok",
   ) {
@@ -71,59 +71,59 @@ class FakeAdapter implements Adapter {
 }
 
 function factoriesFor(
-  made: FakeAdapter[],
+  made: FakeUpstream[],
   shouldThrow: (id: string) => boolean = () => false,
-): AdapterFactories {
+): UpstreamFactories {
   return {
     "openai-compatible": (config, childLogger) => {
-      const adapter = new FakeAdapter(config, childLogger, shouldThrow(config.id) ? "throw" : "ok");
-      made.push(adapter);
-      return adapter;
+      const upstream = new FakeUpstream(config, childLogger, shouldThrow(config.id) ? "throw" : "ok");
+      made.push(upstream);
+      return upstream;
     },
   };
 }
 
-describe("AdapterRegistry", () => {
-  test("dispatches by type through the injected factory map, binding an adapter:<id> child logger", async () => {
-    const made: FakeAdapter[] = [];
+describe("UpstreamRegistry", () => {
+  test("dispatches by type through the injected factory map, binding an upstream:<id> child logger", async () => {
+    const made: FakeUpstream[] = [];
     const { logger, lines } = fakeLogger();
 
-    const registry = await AdapterRegistry.create(
+    const registry = await UpstreamRegistry.create(
       [entry("alpha"), entry("beta")],
       factoriesFor(made),
       logger,
     );
 
     expect(made).toHaveLength(2);
-    expect(made.map((adapter) => adapter.id)).toEqual(["alpha", "beta"]);
-    expect(made.every((adapter) => adapter.type === "openai-compatible")).toBe(true);
+    expect(made.map((upstream) => upstream.id)).toEqual(["alpha", "beta"]);
+    expect(made.every((upstream) => upstream.type === "openai-compatible")).toBe(true);
     // connect() ran inside create(), before the registry was handed out:
-    expect(made.every((adapter) => adapter.connectInvoked.length === 1)).toBe(true);
-    // each adapter got its own component-bound child:
+    expect(made.every((upstream) => upstream.connectInvoked.length === 1)).toBe(true);
+    // each upstream got its own component-bound child:
     const components = lines.map((line) => line.bindings.component);
-    expect(components).toContain("adapter:alpha");
-    expect(components).toContain("adapter:beta");
+    expect(components).toContain("upstream:alpha");
+    expect(components).toContain("upstream:beta");
     expect(registry.all()).toHaveLength(2);
   });
 
-  test("all() returns adapters in config order", async () => {
-    const made: FakeAdapter[] = [];
+  test("all() returns upstreams in config order", async () => {
+    const made: FakeUpstream[] = [];
     const { logger } = fakeLogger();
 
-    const registry = await AdapterRegistry.create(
+    const registry = await UpstreamRegistry.create(
       [entry("charlie"), entry("alpha"), entry("bravo")],
       factoriesFor(made),
       logger,
     );
 
-    expect(registry.all().map((adapter) => adapter.id)).toEqual(["charlie", "alpha", "bravo"]);
+    expect(registry.all().map((upstream) => upstream.id)).toEqual(["charlie", "alpha", "bravo"]);
   });
 
   test("find() matches ids exactly — no fuzzy or prefix matching", async () => {
-    const made: FakeAdapter[] = [];
+    const made: FakeUpstream[] = [];
     const { logger } = fakeLogger();
 
-    const registry = await AdapterRegistry.create(
+    const registry = await UpstreamRegistry.create(
       [entry("acme"), entry("acme2")],
       factoriesFor(made),
       logger,
@@ -137,23 +137,23 @@ describe("AdapterRegistry", () => {
     expect(registry.find("")).toBeUndefined();
   });
 
-  test("a throwing connect() is non-fatal: warning with type and id, adapter still registered", async () => {
-    const made: FakeAdapter[] = [];
+  test("a throwing connect() is non-fatal: warning with type and id, upstream still registered", async () => {
+    const made: FakeUpstream[] = [];
     const { logger, lines } = fakeLogger();
 
-    const registry = await AdapterRegistry.create(
+    const registry = await UpstreamRegistry.create(
       [entry("broken"), entry("healthy")],
       factoriesFor(made, (id) => id === "broken"),
       logger,
     );
 
-    // startup continues: both adapters registered despite the probe blow-up
+    // startup continues: both upstreams registered despite the probe blow-up
     expect(registry.find("broken")).toBeDefined();
     expect(registry.find("healthy")).toBeDefined();
 
     const warnings = lines.filter((line) => line.level === "warn");
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]?.bindings.component).toBe("adapter:broken");
+    expect(warnings[0]?.bindings.component).toBe("upstream:broken");
     expect(warnings[0]?.msg).toContain("startup probe failed");
     const detail = warnings[0]?.obj as { type: string; id: string; reason: string };
     expect(detail.type).toBe("openai-compatible");
@@ -162,11 +162,11 @@ describe("AdapterRegistry", () => {
   });
 
   test("create() rejects defensively on duplicate ids (config validation normally prevents this)", async () => {
-    const made: FakeAdapter[] = [];
+    const made: FakeUpstream[] = [];
     const { logger } = fakeLogger();
 
     await expect(
-      AdapterRegistry.create([entry("dupe"), entry("dupe")], factoriesFor(made), logger),
-    ).rejects.toThrow("duplicate adapter id");
+      UpstreamRegistry.create([entry("dupe"), entry("dupe")], factoriesFor(made), logger),
+    ).rejects.toThrow("duplicate upstream id");
   });
 });

@@ -29,12 +29,12 @@ declare function createLogger(level: LogLevel): pino.Logger;
 ```
 
 Component loggers are children of the root logger, bound as
-`logger.child({ component: "router" | "http" | "config" | "adapter:<id>" })`.
+`logger.child({ component: "router" | "http" | "config" | "upstream:<id>" })`.
 
 ## Flow
 
 ```
-router / http / adapters / config
+router / http / upstreams / config
    │ log.debug/info/warning/error(obj, msg)
    ▼
 root pino logger ── level gate (from config.logLevel)
@@ -48,9 +48,9 @@ stderr (fd 2) ──► environment's log collection (out of gateway scope)
 | Level | Emitted content |
 | ----- | --------------- |
 | `trace` | per-request internals: prefix parse, resolved upstream URL, header decisions |
-| `debug` | request received (method, path), adapter resolved, upstream status + duration, models aggregated (count) |
-| `info` | startup: config loaded, adapter probe results (connected / degraded), listening address; shutdown |
-| `warning` | degraded but continuing: client aborted mid-stream, upstream answered slowly, startup probe failed (adapter degraded) |
+| `debug` | request received (method, path), upstream resolved, upstream status + duration, models aggregated (count) |
+| `info` | startup: config loaded, upstream probe results (connected / degraded), listening address; shutdown |
+| `warning` | degraded but continuing: client aborted mid-stream, upstream answered slowly, startup probe failed (upstream degraded) |
 | `error` | request failed (upstream unreachable/timeout → `504 upstream_timeout`; non-JSON upstream → `502 upstream_error`; TLS pin verification failed on a pinned upstream → `502 upstream_tls_error`), unhandled exception, startup validation failure |
 | `none` | nothing — the logger is silent |
 
@@ -73,11 +73,11 @@ Config uses the gateway vocabulary (`warning`, `none`); the mapping to pino's `w
 ## Extension Points
 
 - Per-request correlation: a request id enters as a child-logger binding when request logging lands — call sites stay unchanged.
-- Per-adapter log isolation already works via `component: "adapter:<id>"` children.
+- Per-upstream log isolation already works via `component: "upstream:<id>"` children.
 - Swapping the transport (e.g. a future OpenTelemetry bridge) touches only `src/logging/logger.ts`, not call sites.
 
 ## Related Specs
 
 - [Configuration](./configuration.md) — `logLevel` schema and validation
-- [Adapter contract](./adapters/adapter-contract.md) — adapter-side events logged on this pipeline
-- [OpenAI-compatible adapter](./adapters/openai-compatible.md) — the redaction rules this domain enforces
+- [Upstream contract](./upstreams/upstream-contract.md) — upstream-side events logged on this pipeline
+- [OpenAI-compatible upstream](./upstreams/openai-compatible.md) — the redaction rules this domain enforces

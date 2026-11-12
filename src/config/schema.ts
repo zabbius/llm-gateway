@@ -3,11 +3,11 @@
  * (specs/domains/configuration.md).
  *
  * Validation and normalization live in exactly one place — here. A new
- * adapter `type` extends this module with its own required per-type fields
+ * upstream `type` extends this module with its own required per-type fields
  * and their checks; the loading/reporting machinery in `src/config/load.ts`
  * never grows per-field knowledge.
  *
- * The schema is strict: unknown top-level keys and unknown per-adapter keys
+ * The schema is strict: unknown top-level keys and unknown per-upstream keys
  * are rejected, so typos fail loudly at startup. Validation is total — every
  * problem of one config is collected and reported together, never the first
  * one only.
@@ -15,21 +15,21 @@
 import type { LogLevel } from "../types.ts";
 
 /**
- * Registered adapter types — one per implemented adapter module
- * (specs/domains/adapters/README.md). A new adapter module adds its type
+ * Registered upstream types — one per implemented upstream module
+ * (specs/domains/upstreams/README.md). A new upstream module adds its type
  * string here and its validation to `validateGatewayConfig`.
  */
-export const ADAPTER_TYPES = ["openai-compatible"] as const;
+export const UPSTREAM_TYPES = ["openai-compatible"] as const;
 
-export type AdapterType = (typeof ADAPTER_TYPES)[number];
+export type UpstreamType = (typeof UPSTREAM_TYPES)[number];
 
 /**
- * Adapter id grammar: lowercase letters, digits and hyphens, starting with a
+ * Upstream id grammar: lowercase letters, digits and hyphens, starting with a
  * letter or digit. The grammar excludes "/" (the model-id prefix separator,
  * ADR-002), "_" and uppercase, so an id can never collide with the public
- * `<adapterId>/<model>` scheme.
+ * `<upstreamId>/<model>` scheme.
  */
-export const ADAPTER_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+export const UPSTREAM_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
 /** The gateway log-level vocabulary (also `LogLevel` in src/types.ts). */
 export const LOG_LEVELS = ["trace", "debug", "info", "warning", "error", "none"] as const;
@@ -37,9 +37,9 @@ export const LOG_LEVELS = ["trace", "debug", "info", "warning", "error", "none"]
 export const DEFAULT_LISTEN = "127.0.0.1:8080";
 export const DEFAULT_LOG_LEVEL: LogLevel = "info";
 
-/** One provider connection entry of the `adapters` array. */
-export interface AdapterConfig {
-  type: AdapterType;
+/** One provider connection entry of the `upstreams` array. */
+export interface UpstreamConfig {
+  type: UpstreamType;
   /** ^[a-z0-9][a-z0-9-]*$ — unique across the config; never contains "/" */
   id: string;
   /** absolute http(s) URL including the API root with /v1 (e.g. https://api.openai.com/v1) */
@@ -63,14 +63,14 @@ export interface GatewayConfig {
   /** omitted → "info" */
   logLevel?: LogLevel;
   /** at least one entry; ids unique across the array */
-  adapters: AdapterConfig[];
+  upstreams: UpstreamConfig[];
 }
 
 /** A validated config with every optional field defaulted and baseUrl normalized. */
 export interface NormalizedGatewayConfig extends GatewayConfig {
   listen: string;
   logLevel: LogLevel;
-  adapters: AdapterConfig[];
+  upstreams: UpstreamConfig[];
 }
 
 export type ValidatedConfig =
@@ -91,8 +91,8 @@ const LISTEN_PATTERN =
  * with the schema (specs/domains/configuration.md "Example file"): when a
  * key is added or removed here, the example must follow in the same change.
  */
-export const TOP_LEVEL_KEYS: readonly string[] = ["listen", "logLevel", "adapters"];
-export const ADAPTER_KEYS: readonly string[] = ["type", "id", "baseUrl", "apiKey", "tlsFingerprint"];
+export const TOP_LEVEL_KEYS: readonly string[] = ["listen", "logLevel", "upstreams"];
+export const UPSTREAM_KEYS: readonly string[] = ["type", "id", "baseUrl", "apiKey", "tlsFingerprint"];
 
 /**
  * A TLS fingerprint pin: base64 (standard alphabet, optional padding) whose
@@ -156,7 +156,7 @@ export function normalizeBaseUrl(url: string): string {
 /**
  * Validate and normalize a parsed config value. Collects every problem —
  * unknown keys, grammar violations, missing keys, duplicate ids — into one
- * `problems` list in a stable order (top level first, then adapter entries
+ * `problems` list in a stable order (top level first, then upstream entries
  * by index); returns the normalized config only when the list stays empty.
  */
 export function validateGatewayConfig(value: unknown): ValidatedConfig {
@@ -182,43 +182,43 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     problems.push(`logLevel must be one of: ${LOG_LEVELS.join(", ")} (got ${shown(logLevel)})`);
   }
 
-  const adapters = value.adapters;
-  if (!Array.isArray(adapters) || adapters.length === 0) {
-    problems.push("adapters must be an array with at least one adapter entry");
+  const upstreams = value.upstreams;
+  if (!Array.isArray(upstreams) || upstreams.length === 0) {
+    problems.push("upstreams must be an array with at least one upstream entry");
     return { ok: false, problems };
   }
 
   const seenIds = new Map<string, number[]>();
 
-  adapters.forEach((entry, index) => {
+  upstreams.forEach((entry, index) => {
     if (!isPlainObject(entry)) {
-      problems.push(`adapters[${index}] must be a JSON object`);
+      problems.push(`upstreams[${index}] must be a JSON object`);
       return;
     }
 
     for (const key of Object.keys(entry)) {
-      if (!ADAPTER_KEYS.includes(key)) {
-        problems.push(`adapters[${index}]: unknown key "${key}" (valid keys: ${ADAPTER_KEYS.join(", ")})`);
+      if (!UPSTREAM_KEYS.includes(key)) {
+        problems.push(`upstreams[${index}]: unknown key "${key}" (valid keys: ${UPSTREAM_KEYS.join(", ")})`);
       }
     }
 
     const type = entry.type;
     if (type === undefined) {
       problems.push(
-        `adapters[${index}]: missing required key "type" (registered adapter types: ${ADAPTER_TYPES.join(", ")})`,
+        `upstreams[${index}]: missing required key "type" (registered upstream types: ${UPSTREAM_TYPES.join(", ")})`,
       );
-    } else if (!(ADAPTER_TYPES as readonly unknown[]).includes(type)) {
+    } else if (!(UPSTREAM_TYPES as readonly unknown[]).includes(type)) {
       problems.push(
-        `adapters[${index}]: unknown adapter type ${shown(type)} (registered adapter types: ${ADAPTER_TYPES.join(", ")})`,
+        `upstreams[${index}]: unknown upstream type ${shown(type)} (registered upstream types: ${UPSTREAM_TYPES.join(", ")})`,
       );
     }
 
     const id = entry.id;
     if (id === undefined) {
-      problems.push(`adapters[${index}]: missing required key "id"`);
-    } else if (typeof id !== "string" || !ADAPTER_ID_PATTERN.test(id)) {
+      problems.push(`upstreams[${index}]: missing required key "id"`);
+    } else if (typeof id !== "string" || !UPSTREAM_ID_PATTERN.test(id)) {
       problems.push(
-        `adapters[${index}]: adapter id ${shown(id)} must match ^[a-z0-9][a-z0-9-]*$ (lowercase letters, digits, hyphens; never "/")`,
+        `upstreams[${index}]: upstream id ${shown(id)} must match ^[a-z0-9][a-z0-9-]*$ (lowercase letters, digits, hyphens; never "/")`,
       );
     } else {
       const indexes = seenIds.get(id);
@@ -231,10 +231,10 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
 
     const baseUrl = entry.baseUrl;
     if (baseUrl === undefined) {
-      problems.push(`adapters[${index}]: missing required key "baseUrl"`);
+      problems.push(`upstreams[${index}]: missing required key "baseUrl"`);
     } else if (typeof baseUrl !== "string" || !isHttpUrl(baseUrl)) {
       problems.push(
-        `adapters[${index}]: baseUrl ${shown(baseUrl)} must be an absolute http(s) URL including the API root with "/v1"`,
+        `upstreams[${index}]: baseUrl ${shown(baseUrl)} must be an absolute http(s) URL including the API root with "/v1"`,
       );
     }
 
@@ -242,9 +242,9 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     // reach stderr or any log (specs/architecture/security-model.md).
     const apiKey = entry.apiKey;
     if (apiKey === undefined) {
-      problems.push(`adapters[${index}]: missing required key "apiKey"`);
+      problems.push(`upstreams[${index}]: missing required key "apiKey"`);
     } else if (typeof apiKey !== "string" || apiKey.length === 0) {
-      problems.push(`adapters[${index}]: apiKey must be a non-empty string`);
+      problems.push(`upstreams[${index}]: apiKey must be a non-empty string`);
     }
 
     // The problem line names the key and the rule but never echoes the
@@ -255,11 +255,11 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     if (tlsFingerprint !== undefined) {
       if (typeof tlsFingerprint !== "string") {
         problems.push(
-          `adapters[${index}]: tlsFingerprint must be a string — base64 of the SHA-256 SPKI digest (32 bytes)`,
+          `upstreams[${index}]: tlsFingerprint must be a string — base64 of the SHA-256 SPKI digest (32 bytes)`,
         );
       } else if (!isValidTlsFingerprint(tlsFingerprint)) {
         problems.push(
-          `adapters[${index}]: tlsFingerprint must be base64 (standard alphabet) decoding to exactly 32 bytes — compute it with tools/tls-fingerprint.ts`,
+          `upstreams[${index}]: tlsFingerprint must be base64 (standard alphabet) decoding to exactly 32 bytes — compute it with tools/tls-fingerprint.ts`,
         );
       }
     }
@@ -267,7 +267,7 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
 
   for (const [id, indexes] of seenIds) {
     if (indexes.length > 1) {
-      problems.push(`duplicate adapter id "${id}" (entries ${indexes.join(", ")})`);
+      problems.push(`duplicate upstream id "${id}" (entries ${indexes.join(", ")})`);
     }
   }
 
@@ -280,8 +280,8 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     config: {
       listen: typeof listen === "string" ? listen : DEFAULT_LISTEN,
       logLevel: isValidLogLevel(logLevel) ? logLevel : DEFAULT_LOG_LEVEL,
-      adapters: (adapters as Record<string, unknown>[]).map((entry) => ({
-        type: entry.type as AdapterType,
+      upstreams: (upstreams as Record<string, unknown>[]).map((entry) => ({
+        type: entry.type as UpstreamType,
         id: entry.id as string,
         baseUrl: normalizeBaseUrl(entry.baseUrl as string),
         apiKey: entry.apiKey as string,

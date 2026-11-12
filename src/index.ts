@@ -1,14 +1,14 @@
 /**
  * The process entry point (specs/architecture/layers.md): the single place
- * that reads the config file, names concrete adapter classes, wires the
+ * that reads the config file, names concrete upstream classes, wires the
  * registry, builds the Hono app, and starts the listener. It constructs and
  * starts — it never serves requests itself.
  *
  * Startup order is fixed (specs/architecture/data-flow.md): config →
- * adapters → registry → app → listen. The registry's `create()` awaits every
- * adapter's `connect()` probe before resolving, so the listener never
+ * upstreams → registry → app → listen. The registry's `create()` awaits every
+ * upstream's `connect()` probe before resolving, so the listener never
  * accepts traffic before the registry is populated and every probe has
- * finished (ok or logged). A failed probe is a warning naming the adapter's
+ * finished (ok or logged). A failed probe is a warning naming the upstream's
  * (type, id) — never fatal (specs/architecture/data-flow.md anti-patterns).
  *
  * Failure reporting: an invalid config has already been fully reported to
@@ -17,14 +17,14 @@
  * failure (port taken) is logged and exits non-zero as well.
  *
  * Startup logging (specs/domains/observability.md, security-model.md
- * invariant 7): config loaded (path + adapter id/type pairs), per-adapter
+ * invariant 7): config loaded (path + upstream id/type pairs), per-upstream
  * probe results, listening address, shutdown. The raw config and key
  * material are never logged.
  */
 import { loadConfigOrExit, resolveConfigPath } from "./config/load.ts";
 import type { NormalizedGatewayConfig } from "./config/schema.ts";
-import { AdapterRegistry, type AdapterFactories } from "./adapters/registry.ts";
-import { OpenAICompatibleAdapter } from "./adapters/openai-compatible.ts";
+import { UpstreamRegistry, type UpstreamFactories } from "./upstreams/registry.ts";
+import { OpenAICompatibleUpstream } from "./upstreams/openai-compatible.ts";
 import { createApp } from "./httpapi/app.ts";
 import { createLogger } from "./logging/logger.ts";
 import type { GatewayEnv } from "./gateway/router.ts";
@@ -32,13 +32,13 @@ import type { Hono } from "hono";
 import type pino from "pino";
 
 /**
- * The `type` → factory map — the ONLY place a concrete adapter class is
- * named (specs/architecture/layers.md invariant 2). A new adapter module
- * adds its type string to `ADAPTER_TYPES` (src/config/schema.ts) and exactly
+ * The `type` → factory map — the ONLY place a concrete upstream class is
+ * named (specs/architecture/layers.md invariant 2). A new upstream module
+ * adds its type string to `UPSTREAM_TYPES` (src/config/schema.ts) and exactly
  * one entry here; nothing else in the codebase ever sees a concrete class.
  */
-const ADAPTER_FACTORIES: AdapterFactories = {
-  "openai-compatible": (entry, logger) => new OpenAICompatibleAdapter(entry, logger),
+const UPSTREAM_FACTORIES: UpstreamFactories = {
+  "openai-compatible": (entry, logger) => new OpenAICompatibleUpstream(entry, logger),
 };
 
 /** The listener handle returned by `Bun.serve` (kept as a type inference so
@@ -48,7 +48,7 @@ export type GatewayServer = ReturnType<typeof Bun.serve>;
 /** A running gateway: the wired pieces plus the listener, and how to stop it. */
 export interface GatewayHandles {
   readonly config: NormalizedGatewayConfig;
-  readonly registry: AdapterRegistry;
+  readonly registry: UpstreamRegistry;
   readonly app: Hono<GatewayEnv>;
   readonly server: GatewayServer;
   readonly logger: pino.Logger;
@@ -63,10 +63,10 @@ export interface StartGatewayOptions {
    */
   configPath?: string;
   /**
-   * Overrides the real factory map — tests inject fake adapters; production
+   * Overrides the real factory map — tests inject fake upstreams; production
    * startup never passes this.
    */
-  factories?: AdapterFactories;
+  factories?: UpstreamFactories;
 }
 
 /**
@@ -96,7 +96,7 @@ function flushAndExit(logger: pino.Logger, code: number): void {
 }
 
 /**
- * Wire and start the gateway: config → adapters → registry (probes inside) →
+ * Wire and start the gateway: config → upstreams → registry (probes inside) →
  * app → listen. Returns the running handles; the listener accepts traffic
  * only after every probe has finished (ok or logged). Exits the process with
  * code 1 when the config is invalid (every problem already on stderr) or
@@ -109,24 +109,24 @@ export async function startGateway(options: StartGatewayOptions = {}): Promise<G
   const config = loadConfigOrExit({ path: configPath });
   const logger = createLogger(config.logLevel);
 
-  // Startup log: the config path and the adapter inventory as (id, type)
+  // Startup log: the config path and the upstream inventory as (id, type)
   // pairs only — never the raw config, never key material
   // (specs/architecture/security-model.md invariant 7).
   logger.info(
     {
       configPath,
-      adapters: config.adapters.map(({ id, type }) => ({ id, type })),
+      upstreams: config.upstreams.map(({ id, type }) => ({ id, type })),
     },
-    `config loaded — ${config.adapters.length} adapter(s)`,
+    `config loaded — ${config.upstreams.length} upstream(s)`,
   );
 
-  // [3][4][6] Construct one adapter per entry through the factory map,
+  // [3][4][6] Construct one upstream per entry through the factory map,
   // register them, and run the connect() probes — sequentially, in config
   // order; probe failures warn and do not abort (registry.create resolves
   // only once every probe finished).
-  const registry = await AdapterRegistry.create(
-    config.adapters,
-    options.factories ?? ADAPTER_FACTORIES,
+  const registry = await UpstreamRegistry.create(
+    config.upstreams,
+    options.factories ?? UPSTREAM_FACTORIES,
     logger,
   );
 

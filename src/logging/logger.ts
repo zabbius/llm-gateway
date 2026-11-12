@@ -8,7 +8,7 @@
  *   at every level including trace (specs/architecture/security-model.md).
  *
  * Components never build their own logger: they take children of the root —
- * `root.child({ component: "router" | "http" | "config" | "adapter:<id>" })`.
+ * `root.child({ component: "router" | "http" | "config" | "upstream:<id>" })`.
  */
 import pino from "pino";
 import type { LogLevel } from "../types.ts";

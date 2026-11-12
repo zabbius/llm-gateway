@@ -27,7 +27,7 @@ export function App() {
 }
 ```
 
-Reserved page names for the future (not designed in this spec): `stats` — usage dashboards; `admin` — adapter management; `audit` — request history.
+Reserved page names for the future (not designed in this spec): `stats` — usage dashboards; `admin` — upstream management; `audit` — request history.
 
 ## Flow
 
@@ -55,5 +55,5 @@ None in the MVP — the frontend has no entry in the gateway config file. The st
 
 ## Related Specs
 
-- [META](../META.md) — this stub's place in the greenfield target tree
+- [META](../META.md) — this stub's place in the canonical spec tree
 - [Configuration](./configuration.md) — the config the future `admin` page will visualize (no UI section exists today)

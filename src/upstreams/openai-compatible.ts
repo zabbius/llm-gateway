@@ -1,8 +1,8 @@
 /**
- * The MVP provider adapter: a pure HTTP proxy in front of any upstream that
+ * The MVP provider upstream: a pure HTTP proxy in front of any upstream that
  * speaks the OpenAI API (base URL + API key), relaying requests and responses
  * — including SSE streams — unchanged
- * (specs/domains/adapters/openai-compatible.md).
+ * (specs/domains/upstreams/openai-compatible.md).
  *
  * Header policy (out): exactly one credential — the configured `apiKey` as a
  * `Bearer` token — plus the client's `Content-Type` and `Accept` relayed.
@@ -19,7 +19,7 @@
  * (ADR-005). One attempt per client request — no retries in the MVP.
  */
 import type pino from "pino";
-import type { Adapter, AdapterConfig, ModelEntry, ProxyRequest } from "./adapter.ts";
+import type { Upstream, UpstreamConfig, ModelEntry, ProxyRequest } from "./upstream.ts";
 import { isTlsFailure, pinnedUpstreamRequest } from "./tls-pinning.ts";
 
 /** The `listModels()` probe inside `connect()` (startup; non-fatal on expiry). */
@@ -71,9 +71,9 @@ const HOP_BY_HOP_HEADERS: readonly string[] = [
   "upgrade",
 ];
 
-export class OpenAICompatibleAdapter implements Adapter {
+export class OpenAICompatibleUpstream implements Upstream {
   readonly id: string;
-  readonly type: AdapterConfig["type"];
+  readonly type: UpstreamConfig["type"];
 
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -82,7 +82,7 @@ export class OpenAICompatibleAdapter implements Adapter {
   private readonly logger: pino.Logger;
   private readonly timeouts: Required<OpenAICompatibleTimeouts>;
 
-  constructor(config: AdapterConfig, logger: pino.Logger, timeouts: OpenAICompatibleTimeouts = {}) {
+  constructor(config: UpstreamConfig, logger: pino.Logger, timeouts: OpenAICompatibleTimeouts = {}) {
     this.id = config.id;
     this.type = config.type;
     this.baseUrl = config.baseUrl;
@@ -104,7 +104,7 @@ export class OpenAICompatibleAdapter implements Adapter {
    * Startup probe: `GET {baseUrl}/models` within the probe budget. Never
    * rejects — the outcome is logged (info on success, warning naming type
    * and id on failure) and startup continues; every upstream call re-attempts
-   * the provider, so a degraded adapter still serves requests.
+   * the provider, so a degraded upstream still serves requests.
    */
   async connect(): Promise<void> {
     try {
@@ -113,14 +113,14 @@ export class OpenAICompatibleAdapter implements Adapter {
     } catch (error) {
       this.logger.warn(
         { type: this.type, id: this.id, reason: describe(error) },
-        "startup probe failed — adapter degraded, startup continues",
+        "startup probe failed — upstream degraded, startup continues",
       );
     }
   }
 
   /**
    * Provider-native model list, ids unprefixed. Failures here degrade the
-   * adapter's contribution to `GET /v1/models` (the aggregation catches and
+   * upstream's contribution to `GET /v1/models` (the aggregation catches and
    * logs; the rest of the list still returns 200).
    */
   listModels(): Promise<ModelEntry[]> {
@@ -284,7 +284,7 @@ export class OpenAICompatibleAdapter implements Adapter {
   }
 
   /**
-   * The adapter's only upstream fetch. Without a pin it is plain `fetch`;
+   * The upstream's only upstream fetch. Without a pin it is plain `fetch`;
    * with a pin (ADR-005) the request runs over a connection the pinning
    * module verifies itself (`pinnedUpstreamRequest`): fetch's TLS layer
    * cannot express pin-only semantics, so the socket is opened there, its

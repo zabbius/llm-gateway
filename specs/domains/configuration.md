@@ -2,11 +2,11 @@
 
 ## Purpose
 
-Defines the gateway's config file: where it lives, its JSON schema (`listen`, `logLevel`, plus the `adapters` array), how it is validated at startup, and how validation failures are reported. `config.example.json` is the canonical example of that schema and is kept in sync with `src/config/schema.ts`.
+Defines the gateway's config file: where it lives, its JSON schema (`listen`, `logLevel`, plus the `upstreams` array), how it is validated at startup, and how validation failures are reported. `config.example.json` is the canonical example of that schema and is kept in sync with `src/config/schema.ts`.
 
 ## Key Files
 
-- `src/config/schema.ts` — `GatewayConfig` types and validation rules, including per-type adapter fields
+- `src/config/schema.ts` — `GatewayConfig` types and validation rules, including per-type upstream fields
 - `src/config/load.ts` — file discovery, read, parse, error aggregation, normalized config out
 - `config.example.json` — canonical example config at the repo root: every supported option at its documented default, ready to copy to `config.json`
 - `src/config/example.test.ts` — sync enforcement: fails `bun test` when the example drifts from the schema
@@ -16,10 +16,10 @@ Defines the gateway's config file: where it lives, its JSON schema (`listen`, `l
 ```ts
 type LogLevel = "trace" | "debug" | "info" | "warning" | "error" | "none";
 
-type AdapterType = "openai-compatible"; // one per implemented adapter module
+type UpstreamType = "openai-compatible"; // one per implemented upstream module
 
-interface AdapterConfig {
-  type: AdapterType;
+interface UpstreamConfig {
+  type: UpstreamType;
   /** ^[a-z0-9][a-z0-9-]*$ — unique across the config; never contains "/" */
   id: string;
   /** absolute http(s) URL including the API root with /v1 (e.g. https://api.openai.com/v1) */
@@ -42,7 +42,7 @@ interface GatewayConfig {
   /** omitted → "info" */
   logLevel?: LogLevel;
   /** at least one entry; ids unique across the array */
-  adapters: AdapterConfig[];
+  upstreams: UpstreamConfig[];
 }
 ```
 
@@ -57,7 +57,7 @@ startup
                                                     ▼
                                           validate(GatewayConfig)
       ┌── problems ─► one error line each on stderr ─► exit 1 (no listen)
-      └── clean ─► normalized GatewayConfig ─► logger + AdapterRegistry
+      └── clean ─► normalized GatewayConfig ─► logger + UpstreamRegistry
 ```
 
 ## Invariants
@@ -65,7 +65,7 @@ startup
 - The config is read and validated exactly once per process start; there is no hot reload in the MVP.
 - A config that fails validation prevents the server from binding any port.
 - Every validation problem is reported in the same startup run — the gateway never fails on the first problem and hides the rest.
-- Adapter ids are unique across the whole `adapters` array, independent of `type`.
+- Upstream ids are unique across the whole `upstreams` array, independent of `type`.
 - The default `listen` binds loopback only; a public interface is a deliberate config choice and stays discouraged while gateway-auth is unimplemented.
 - `apiKey` values live in memory only and never appear in logs.
 - `tlsFingerprint` values are validated with apiKey-grade output care: a validation problem names the rule without echoing the configured pin (a pin is not a secret, but typo diagnosis never needs the value).
@@ -88,23 +88,23 @@ The canonical, always-current example lives in `config.example.json` at the repo
 | ----- | -------- | ----- | ----------- |
 | `listen` | no (default `"127.0.0.1:8080"`) | string `"host:port"`, valid host and port range | Host and port the listener binds; the default stays on loopback while gateway-auth is unimplemented |
 | `logLevel` | no (default `info`) | one of `trace, debug, info, warning, error, none` | Verbosity of the pino logger; `none` silences log output |
-| `adapters` | yes | array with at least one entry | The provider connections the gateway fronts; config order is preserved by the registry |
-| `adapters[].type` | yes | a registered `AdapterType` (MVP: `openai-compatible`) | Selects the adapter module that speaks the provider's dialect |
-| `adapters[].id` | yes | `^[a-z0-9][a-z0-9-]*$`, no `/`, unique across the array | Stable prefix of the public model ids this connection serves (`{adapterId}/{model}`) |
-| `adapters[].baseUrl` | yes | absolute `http(s)` URL, including the API root with `/v1` | Upstream API root the adapter proxies to; a single trailing slash is normalized away at load |
-| `adapters[].apiKey` | yes | non-empty string | The secret sent upstream as the Bearer credential; never logged |
-| `adapters[].tlsFingerprint` | no (default: absent) | optional; base64 (standard alphabet, optional padding) decoding to exactly 32 bytes — the SHA-256 digest of the upstream certificate's SPKI DER; surrounding whitespace tolerated, stripped at load | TLS SPKI pin: non-empty → the adapter accepts ONLY the pinned key, fail closed ([ADR-005](../decisions/005-per-adapter-tls-pinning.md)); absent/empty → the system CA pool verifies the upstream; inert on a plain-http `baseUrl`; compute with `tools/tls-fingerprint.ts` |
+| `upstreams` | yes | array with at least one entry | The provider connections the gateway fronts; config order is preserved by the registry |
+| `upstreams[].type` | yes | a registered `UpstreamType` (MVP: `openai-compatible`) | Selects the upstream module that speaks the provider's dialect |
+| `upstreams[].id` | yes | `^[a-z0-9][a-z0-9-]*$`, no `/`, unique across the array | Stable prefix of the public model ids this connection serves (`{upstreamId}/{model}`) |
+| `upstreams[].baseUrl` | yes | absolute `http(s)` URL, including the API root with `/v1` | Upstream API root the upstream proxies to; a single trailing slash is normalized away at load |
+| `upstreams[].apiKey` | yes | non-empty string | The secret sent upstream as the Bearer credential; never logged |
+| `upstreams[].tlsFingerprint` | no (default: absent) | optional; base64 (standard alphabet, optional padding) decoding to exactly 32 bytes — the SHA-256 digest of the upstream certificate's SPKI DER; surrounding whitespace tolerated, stripped at load | TLS SPKI pin: non-empty → the upstream accepts ONLY the pinned key, fail closed ([ADR-005](../decisions/005-per-upstream-tls-pinning.md)); absent/empty → the system CA pool verifies the upstream; inert on a plain-http `baseUrl`; compute with `tools/tls-fingerprint.ts` |
 
-Unknown top-level keys and unknown per-adapter keys are rejected — the schema is strict, so typos fail loudly at startup.
+Unknown top-level keys and unknown per-upstream keys are rejected — the schema is strict, so typos fail loudly at startup.
 
 ### Example file
 
-`config.example.json` (repo root, next to `README.md`) is the canonical example config and a copy-paste starting point: copying it to `config.json` yields a valid config. It contains every supported option — optional keys included, each adapter entry showing the optional `tlsFingerprint` as a syntactically valid placeholder pin to be replaced with the real value from `tools/tls-fingerprint.ts` — and one adapter entry per registered adapter `type`. The file is pure JSON — JSON comments and extra description keys would fail the strict validation, so field descriptions live in the schema table above.
+`config.example.json` (repo root, next to `README.md`) is the canonical example config and a copy-paste starting point: copying it to `config.json` yields a valid config. It contains every supported option — optional keys included, each upstream entry showing the optional `tlsFingerprint` as a syntactically valid placeholder pin to be replaced with the real value from `tools/tls-fingerprint.ts` — and one upstream entry per registered upstream `type`. The file is pure JSON — JSON comments and extra description keys would fail the strict validation, so field descriptions live in the schema table above.
 
 The example is part of the schema contract and is updated in the same change as `src/config/schema.ts`:
 
-- a schema key added to, removed from, or renamed (top-level or per-adapter) is reflected in the example in the same change;
-- a newly registered adapter `type` gains a sample entry in the same change;
+- a schema key added to, removed from, or renamed (top-level or per-upstream) is reflected in the example in the same change;
+- a newly registered upstream `type` gains a sample entry in the same change;
 - both rules are enforced by `src/config/example.test.ts`, which validates the example against the schema and asserts exact key coverage — a schema change without the example fails `bun test`.
 
 ### Validation errors
@@ -115,8 +115,8 @@ All problems for one start are printed to stderr, one error line each (via the l
 - JSON parse error — names line/column when available;
 - `logLevel` invalid — lists the six valid values;
 - `listen` malformed — not a `"host:port"` string with a valid port;
-- `adapters` empty or not an array;
-- unknown adapter `type` — lists the registered types;
+- `upstreams` empty or not an array;
+- unknown upstream `type` — lists the registered types;
 - `id` missing, malformed (grammar `^[a-z0-9][a-z0-9-]*$` — uppercase, `_`, or `/` rejected), or duplicated — duplicates are named;
 - `baseUrl` missing or not an absolute `http(s)` URL;
 - `apiKey` missing or empty;
@@ -124,12 +124,12 @@ All problems for one start are printed to stderr, one error line each (via the l
 
 ## Extension Points
 
-- A new adapter `type` extends the schema with its own required fields inside `src/config/schema.ts`; validation stays in one place.
+- A new upstream `type` extends the schema with its own required fields inside `src/config/schema.ts`; validation stays in one place.
 - Future: environment-variable interpolation of secrets (`apiKey`) — the file format does not change.
 
 ## Related Specs
 
-- [Provider Adapters](./adapters/README.md) — the pool built from `adapters` entries
-- [OpenAI-compatible adapter](./adapters/openai-compatible.md) — `baseUrl` / `apiKey` semantics, and how a configured `tlsFingerprint` is enforced
+- [Upstreams](./upstreams/README.md) — the pool built from `upstreams` entries
+- [OpenAI-compatible upstream](./upstreams/openai-compatible.md) — `baseUrl` / `apiKey` semantics, and how a configured `tlsFingerprint` is enforced
 - [Observability](./observability.md) — consumer of `logLevel`
-- [ADR-005: per-adapter TLS SPKI pinning](../decisions/005-per-adapter-tls-pinning.md) — the `tlsFingerprint` semantics this schema validates
+- [ADR-005: per-upstream TLS SPKI pinning](../decisions/005-per-upstream-tls-pinning.md) — the `tlsFingerprint` semantics this schema validates

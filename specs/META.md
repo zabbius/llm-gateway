@@ -27,10 +27,10 @@ specs/
 │   └── security-model.md           authentication, key handling, isolation
 │
 ├── domains/                        by business domain (NOT file structure)
-│   ├── adapters/
-│   │   ├── README.md               provider adapter domain overview
-│   │   ├── adapter-contract.md     the Adapter interface, connect -> serve lifecycle
-│   │   └── openai-compatible.md    MVP adapter: pure proxy to an OpenAI-compatible upstream
+│   ├── upstreams/
+│   │   ├── README.md               upstream domain overview
+│   │   ├── upstream-contract.md    the Upstream interface, connect -> serve lifecycle
+│   │   └── openai-compatible.md    MVP upstream: pure proxy to an OpenAI-compatible provider API
 │   ├── routing.md                  prefix routing, model aggregation, dispatch
 │   ├── configuration.md            config file location, JSON schema, startup validation
 │   ├── observability.md            leveled pino logging to stderr
@@ -38,17 +38,18 @@ specs/
 │
 ├── contracts/                      interfaces between layers
 │   ├── client-gateway.md           HTTP client <-> gateway (OpenAI protocol)
-│   └── gateway-upstream.md         provider adapters <-> upstream provider APIs
+│   └── gateway-upstream.md         gateway upstreams <-> upstream provider APIs
 │
 └── decisions/                      Architecture Decision Records
     ├── _template.md                ADR template
-    ├── 001-adapter-per-provider-type.md  adapter per provider connection, common interface
-    ├── 002-model-id-prefix-routing.md    public model id = {adapterId}/{model}
+    ├── 001-upstream-per-provider-type.md  upstream per provider connection, common interface
+    ├── 002-model-id-prefix-routing.md    public model id = {upstreamId}/{model}
     ├── 003-hono-http-framework.md        Hono on Bun, edge-only handlers
-    └── 004-pino-stderr-logging.md        pino, JSON lines to stderr, no file logger
+    ├── 004-pino-stderr-logging.md        pino, JSON lines to stderr, no file logger
+    └── 005-per-upstream-tls-pinning.md   per-upstream TLS SPKI pinning via `tlsFingerprint`
 ```
 
-The repository is greenfield — it has no source code yet. This tree is the **target structure**: it is authoritative before any of these files exist, and every spec file created under `specs/` must land at the path shown here. Source-code paths referenced inside specs follow the Greenfield Rule (see Update Protocol).
+This tree is the canonical layout of the spec system: every spec file under `specs/` lands at the path shown here.
 
 ## Naming Conventions
 
@@ -156,7 +157,7 @@ How components are wired together at startup.
 
 ## Data Flow Across Boundary
 
-What data crosses the boundary, in what form, in which direction.
+What data crosses this boundary, in what form, in which direction.
 
 ## Error Propagation
 
@@ -217,7 +218,7 @@ What was evaluated and why it was rejected.
 
 ## Cross-References
 
-- Always use paths relative to the file containing the link (a link in `specs/domains/adapters/README.md` to the routing spec is `../routing.md`, not `domains/routing.md`)
+- Always use paths relative to the file containing the link (a link in `specs/domains/upstreams/README.md` to the routing spec is `../routing.md`, not `domains/routing.md`)
 - Format: `[display text](relative/path.md)`
 - For intra-file section references: `[display text](relative/path.md#section-name)` (lowercase, hyphens)
 - When referencing source code: backtick path from repo root, e.g. `src/gateway/router.ts`
@@ -229,24 +230,8 @@ What was evaluated and why it was rejected.
 - After any change that alters documented behavior
 - After adding/removing/renaming interfaces that appear in a contract
 - After changing architectural boundaries or invariants
-- After changing the config schema (a top-level or per-adapter key added, removed, or renamed, or a new adapter `type` registered): `config.example.json` is updated in the same change — the rule and its enforcement test are documented in [domains/configuration.md](./domains/configuration.md)
+- After changing the config schema (a top-level or per-upstream key added, removed, or renamed, or a new upstream `type` registered): `config.example.json` is updated in the same change — the rule and its enforcement test are documented in [domains/configuration.md](./domains/configuration.md)
 - After a decision that passes the ADR bar — constrains work beyond the immediate change (cross-domain, cross-cutting, or hard to reverse) AND had real alternatives considered and rejected, or contradicts/supersedes an existing ADR or documented invariant — create an ADR; otherwise record it in the affected domain spec
-
-### Greenfield Rule
-
-The repository currently contains no source code. Until code exists for a documented area, source paths in specs are **planned paths** — the locations the implementation is expected to create:
-
-- Every Key Files entry for not-yet-existing code MUST end with a `<!-- TODO: verify -->` marker:
-
-  ```markdown
-  ## Key Files
-
-  - `src/adapters/openai-compatible.ts` — OpenAI-compatible proxy adapter <!-- TODO: verify -->
-  ```
-
-- The marker is removed only after the file exists at that path and the description has been verified against the actual code. When the implementation lands at a different path, update the entry to the real path — the planned path expressed intent, not a claim about current code.
-- The same marking applies to every reference to a not-yet-existing source path anywhere in a spec (contract interface tables, architecture examples, flow diagrams).
-- While its `<!-- TODO: verify -->` markers are in place, a spec is a design contract: the "code paths in Key Files are accurate" validation item is deferred until the markers are removed.
 
 ### How to update
 
@@ -260,6 +245,6 @@ The repository currently contains no source code. Until code exists for a docume
 
 - [ ] All sections from the template are present
 - [ ] Cross-references point to existing files
-- [ ] Code paths in Key Files are accurate — greenfield: each planned path carries `<!-- TODO: verify -->`; accuracy is verified when the marker is removed
+- [ ] Code paths in Key Files are accurate
 - [ ] Invariants are stated affirmatively
 - [ ] INDEX.md reflects the current file set

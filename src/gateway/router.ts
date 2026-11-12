@@ -1,22 +1,22 @@
 /**
  * Model-id prefix routing (specs/domains/routing.md, ADR-002): a client model
- * id `"{adapterId}/{model}"` selects the adapter; the remainder — split on
+ * id `"{upstreamId}/{model}"` selects the upstream; the remainder — split on
  * the FIRST "/" — is the provider-native model id passed upstream in
  * `body.model`.
  *
  * Resolution is exact (no fuzzy prefix matching — "acme2" never matches
  * "acme"; specs/architecture/data-flow.md anti-patterns) and pure: it either
- * finds a registered adapter or returns null, leaving the 404 decision to the
- * HTTP layer. Adapters are referenced exclusively through the interface
+ * finds a registered upstream or returns null, leaving the 404 decision to the
+ * HTTP layer. Upstreams are referenced exclusively through the interface
  * (specs/architecture/layers.md invariant 4); the registry type is imported
  * type-only.
  */
-import type { Adapter } from "../adapters/adapter.ts";
-import type { AdapterRegistry } from "../adapters/registry.ts";
+import type { Upstream } from "../upstreams/upstream.ts";
+import type { UpstreamRegistry } from "../upstreams/registry.ts";
 
 /**
  * The Hono Env binding of the HTTP layer (ADR-003: Hono edge-only handlers).
- * Dispatch handlers publish the resolved adapter id here so the app's
+ * Dispatch handlers publish the resolved upstream id here so the app's
  * request-log middleware can include it in the per-request log line without
  * parsing request bodies itself. Lives in the gateway core — not in
  * `src/httpapi/app.ts` — so the import graph stays acyclic: the HTTP layer
@@ -24,23 +24,23 @@ import type { AdapterRegistry } from "../adapters/registry.ts";
  */
 export interface GatewayEnv {
   Variables: {
-    /** Adapter id resolved for this request; unset when routing failed before dispatch. */
-    adapterId?: string;
+    /** Upstream id resolved for this request; unset when routing failed before dispatch. */
+    upstreamId?: string;
   };
 }
 
 /** One successful prefix resolution. */
 export interface RouteResolution {
   /** Registry hit for the prefix (the segment before the first "/"). */
-  adapter: Adapter;
+  upstream: Upstream;
   /** Prefix stripped — what upstream receives in `body.model`. */
   upstreamModel: string;
 }
 
 /**
- * Resolve `"{adapterId}/{model}"` against the registry. The first "/" is the
+ * Resolve `"{upstreamId}/{model}"` against the registry. The first "/" is the
  * separator; both halves must be non-empty (leading "/", trailing "/" and
- * slash-less ids are unresolved); the prefix must be a registered adapter id
+ * slash-less ids are unresolved); the prefix must be a registered upstream id
  * — exact match only. The upstream model may itself contain slashes
  * (provider-native names like "openai/gpt-4o-preview" style ids ride behind
  * the first separator).
@@ -49,25 +49,25 @@ export interface RouteResolution {
  * model_not_found` (specs/contracts/client-gateway.md Error Propagation)
  * without any upstream contact.
  */
-export function resolveModel(model: string, registry: AdapterRegistry): RouteResolution | null {
+export function resolveModel(model: string, registry: UpstreamRegistry): RouteResolution | null {
   const separator = model.indexOf("/");
   if (separator <= 0 || separator === model.length - 1) {
     return null;
   }
-  const adapterId = model.slice(0, separator);
+  const upstreamId = model.slice(0, separator);
   const upstreamModel = model.slice(separator + 1);
-  const adapter = registry.find(adapterId);
-  if (adapter === undefined) {
+  const upstream = registry.find(upstreamId);
+  if (upstream === undefined) {
     return null;
   }
-  return { adapter, upstreamModel };
+  return { upstream, upstreamModel };
 }
 
 /**
  * Type-only re-export: the HTTP layer's wiring surface. `src/httpapi/app.ts`
- * may not import the adapter registry (specs/architecture/layers.md
+ * may not import the upstream registry (specs/architecture/layers.md
  * invariant 3 — it imports the gateway core only), so the registry type
  * reaches `createApp` through this module. Type-only: no runtime coupling,
- * mirroring the adapter.ts → config/schema.ts pattern.
+ * mirroring the upstream.ts → config/schema.ts pattern.
  */
-export type { AdapterRegistry };
+export type { UpstreamRegistry };

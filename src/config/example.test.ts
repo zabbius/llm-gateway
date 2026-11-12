@@ -5,7 +5,7 @@
  * The example file is the copy-paste starting point that documents every
  * supported option, so it must never drift from `src/config/schema.ts`.
  * These tests fail when the schema gains, drops, or renames a key without
- * the example following, when a new adapter type is registered without a
+ * the example following, when a new upstream type is registered without a
  * sample entry, or when the example stops being a valid config — forcing
  * the example update into the same change as the schema change.
  */
@@ -13,8 +13,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
-  ADAPTER_KEYS,
-  ADAPTER_TYPES,
+  UPSTREAM_KEYS,
+  UPSTREAM_TYPES,
   TOP_LEVEL_KEYS,
   validateGatewayConfig,
 } from "./schema.ts";
@@ -33,7 +33,7 @@ describe("config.example.json", () => {
     if (!validated.ok) return; // narrowing; the real failure list is asserted above
     expect(validated.config.listen).toBe("127.0.0.1:8080");
     expect(validated.config.logLevel).toBe("info");
-    expect(validated.config.adapters.length).toBeGreaterThanOrEqual(1);
+    expect(validated.config.upstreams.length).toBeGreaterThanOrEqual(1);
   });
 
   test("covers every supported top-level key exactly", () => {
@@ -41,25 +41,25 @@ describe("config.example.json", () => {
     expect(Object.keys(example).sort()).toEqual([...TOP_LEVEL_KEYS].sort());
   });
 
-  test("every adapter entry covers every supported adapter key exactly", () => {
-    const { adapters } = readExample() as { adapters: Record<string, unknown>[] };
-    expect(adapters.length).toBeGreaterThanOrEqual(1);
-    for (const entry of adapters) {
-      expect(Object.keys(entry).sort()).toEqual([...ADAPTER_KEYS].sort());
+  test("every upstream entry covers every supported upstream key exactly", () => {
+    const { upstreams } = readExample() as { upstreams: Record<string, unknown>[] };
+    expect(upstreams.length).toBeGreaterThanOrEqual(1);
+    for (const entry of upstreams) {
+      expect(Object.keys(entry).sort()).toEqual([...UPSTREAM_KEYS].sort());
     }
   });
 
-  test("every registered adapter type appears at least once", () => {
-    const { adapters } = readExample() as { adapters: { type: string }[] };
-    const exampleTypes = new Set(adapters.map((entry) => entry.type));
-    for (const type of ADAPTER_TYPES) {
+  test("every registered upstream type appears at least once", () => {
+    const { upstreams } = readExample() as { upstreams: { type: string }[] };
+    const exampleTypes = new Set(upstreams.map((entry) => entry.type));
+    for (const type of UPSTREAM_TYPES) {
       expect(exampleTypes.has(type)).toBe(true);
     }
   });
 
   test("every baseUrl demonstrates the /v1 root convention in normalized form", () => {
-    const { adapters } = readExample() as { adapters: { baseUrl: string }[] };
-    for (const entry of adapters) {
+    const { upstreams } = readExample() as { upstreams: { baseUrl: string }[] };
+    for (const entry of upstreams) {
       expect(entry.baseUrl.endsWith("/v1")).toBe(true);
       // normalized form: no trailing slash at all (normalizeBaseUrl would strip one)
       expect(entry.baseUrl.endsWith("/")).toBe(false);

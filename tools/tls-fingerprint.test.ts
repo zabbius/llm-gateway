@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const SCRIPT = join(import.meta.dir, "tls-fingerprint.ts");
-const FIXTURES = join(import.meta.dir, "..", "src", "adapters", "fixtures");
+const FIXTURES = join(import.meta.dir, "..", "src", "upstreams", "fixtures");
 const PIN_CERT = "K4vmDE8v8SKXajayPc4yMc49GIvJEHyUF8mRo7bu/EM="; // openssl ground truth of the fixture cert
 
 const servers: Array<{ stop: () => void }> = [];

@@ -1,13 +1,13 @@
-# OpenAI-Compatible Adapter
+# OpenAI-Compatible Upstream
 
 ## Role
 
-The MVP provider adapter: a pure HTTP proxy in front of any upstream that speaks the OpenAI API (base URL + API key), relaying requests and responses — including SSE streams — unchanged.
+The MVP provider upstream: a pure HTTP proxy in front of any provider API that speaks the OpenAI protocol (base URL + API key), relaying requests and responses — including SSE streams — unchanged.
 
 ## Key Files
 
-- `src/adapters/openai-compatible.ts` — `OpenAICompatibleAdapter`: proxying, header policy, timeouts, model mapping, the pinned upstream path (`upstreamFetch`)
-- `src/adapters/tls-pinning.ts` — the TLS SPKI pinning module it enforces the pin with: `pinnedUpstreamRequest`, `assertPinnedCertificate`, `computeSpkiPin`, the bare-handshake probe for the fingerprint CLI (`fetchLeafCertificate`, `probePinnedLeaf`), `UpstreamTlsPinError`
+- `src/upstreams/openai-compatible.ts` — `OpenAICompatibleUpstream`: proxying, header policy, timeouts, model mapping, the pinned upstream path (`upstreamFetch`)
+- `src/upstreams/tls-pinning.ts` — the TLS SPKI pinning module it enforces the pin with: `pinnedUpstreamRequest`, `assertPinnedCertificate`, `computeSpkiPin`, the bare-handshake probe for the fingerprint CLI (`fetchLeafCertificate`, `probePinnedLeaf`), `UpstreamTlsPinError`
 
 ## Behavior
 
@@ -15,7 +15,7 @@ The MVP provider adapter: a pure HTTP proxy in front of any upstream that speaks
 
 - `baseUrl` — absolute `http(s)` URL including the API root with `/v1` (e.g. `https://api.openai.com/v1`); a single trailing slash is stripped at config load.
 - Upstream URL = `baseUrl + "/" + ProxyRequest.path` (`chat/completions`, `completions`, `models`).
-- `listModels()` calls `GET {baseUrl}/models` and returns provider-native entries with unprefixed ids; prefixing `id → "{adapterId}/{id}"` and setting `owned_by` to the adapter id happen in the aggregation, not in the adapter.
+- `listModels()` calls `GET {baseUrl}/models` and returns provider-native entries with unprefixed ids; prefixing `id → "{upstreamId}/{id}"` and setting `owned_by` to the upstream id happen in the aggregation, not in the upstream.
 
 ### Header policy
 
@@ -26,7 +26,7 @@ The MVP provider adapter: a pure HTTP proxy in front of any upstream that speaks
 | out | `Accept` | relayed from the client request |
 | in → client | all upstream response headers | relayed unchanged (the transport strips hop-by-hop headers) |
 
-The client's own `Authorization` header is dropped — the configured `apiKey` is the only credential that ever reaches upstream.
+The client's own `Authorization` header is dropped — the configured `apiKey` is the only credential that ever reaches the provider API.
 
 ### SSE pass-through
 
@@ -38,7 +38,7 @@ When the upstream response has `Content-Type: text/event-stream`:
 
 ### TLS pinning (`tlsFingerprint`) — ADR-005
 
-A non-empty `tlsFingerprint` on the config entry switches the adapter's only upstream fetch (`upstreamFetch` — shared by `forward()` and `fetchModels()`) to the pinned path; `http` baseUrls and absent/empty pins keep the plain fetch:
+A non-empty `tlsFingerprint` on the config entry switches the upstream's only upstream fetch (`upstreamFetch` — shared by `forward()` and `fetchModels()`) to the pinned path; `http` baseUrls and absent/empty pins keep the plain fetch:
 
 ```
 upstreamFetch on a pinned upstream (https baseUrl) — pinnedUpstreamRequest:
@@ -81,7 +81,7 @@ Forward timeout expiry maps to the upstream-unreachable error path (`504`, `code
 ## Error Handling
 
 - Upstream answered (`4xx`/`5xx`) — status, headers, and body relayed to the client unchanged; the gateway adds nothing.
-- Upstream unreachable, DNS failure, timeout — the adapter synthesizes `504` with the OpenAI error envelope:
+- Upstream unreachable, DNS failure, timeout — the upstream synthesizes `504` with the OpenAI error envelope:
 
 ```json
 { "error": { "message": "upstream \"openai\" is unreachable: timeout",
@@ -89,9 +89,9 @@ Forward timeout expiry maps to the upstream-unreachable error path (`504`, `code
              "code": "upstream_timeout" } }
 ```
 
-- Upstream answered with a non-JSON, empty, or HTML error body — the adapter synthesizes `502` with `type: "api_error"`, `code: "upstream_error"`, since the payload is not a relayable OpenAI error.
+- Upstream answered with a non-JSON, empty, or HTML error body — the upstream synthesizes `502` with `type: "api_error"`, `code: "upstream_error"`, since the payload is not a relayable OpenAI error.
 
-- Upstream TLS verification failure on a pinned upstream (`tlsFingerprint` configured) — the adapter synthesizes `502` with `type: "api_error"`, `code: "upstream_tls_error"` ([ADR-005](../../decisions/005-per-adapter-tls-pinning.md)):
+- Upstream TLS verification failure on a pinned upstream (`tlsFingerprint` configured) — the upstream synthesizes `502` with `type: "api_error"`, `code: "upstream_tls_error"` ([ADR-005](../../decisions/005-per-upstream-tls-pinning.md)):
 
 ```json
 { "error": { "message": "upstream \"lan\" TLS certificate does not match the configured tlsFingerprint pin",
@@ -101,7 +101,7 @@ Forward timeout expiry maps to the upstream-unreachable error path (`504`, `code
 
   The message states the fact of the pin mismatch and never certificate bytes, subject, or DNS names; the failure is logged at error level (code + reason). Without a pin, a TLS failure keeps the pre-existing mapping — unreachable upstream, `504 upstream_timeout`.
 
-- The adapter performs a single attempt per client request — no retries in the MVP (retry policy is future work).
+- The upstream performs a single attempt per client request — no retries in the MVP (retry policy is future work).
 
 ## Invariants
 
@@ -109,13 +109,13 @@ Forward timeout expiry maps to the upstream-unreachable error path (`504`, `code
 - `apiKey` never appears in logs or in any response returned to a client.
 - SSE bodies reach the client byte-for-byte in arrival order; a streaming response never waits for the full body before relaying its first byte.
 - Upstream error responses are relayed with their original status code.
-- A configured `tlsFingerprint` always fails closed: a pin mismatch — checked on every pinned connection before any request byte is written — surfaces as `502 upstream_tls_error` and never as a relayed response or a degraded-verification success ([ADR-005](../../decisions/005-per-adapter-tls-pinning.md)).
+- A configured `tlsFingerprint` always fails closed: a pin mismatch — checked on every pinned connection before any request byte is written — surfaces as `502 upstream_tls_error` and never as a relayed response or a degraded-verification success ([ADR-005](../../decisions/005-per-upstream-tls-pinning.md)).
 - At most one upstream attempt happens per client request.
 
 ## Related Specs
 
-- [Provider Adapters](./README.md) — domain overview and registry
-- [Adapter contract](./adapter-contract.md) — interface and lifecycle this module implements
+- [Upstreams](./README.md) — domain overview and registry
+- [Upstream contract](./upstream-contract.md) — interface and lifecycle this module implements
 - [Configuration](../configuration.md) — `baseUrl` / `apiKey` / `tlsFingerprint` validation rules
-- [Observability](../observability.md) — what this adapter logs per level (never secrets)
-- [ADR-005: per-adapter TLS SPKI pinning](../../decisions/005-per-adapter-tls-pinning.md) — the decision behind the pinned path this module implements
+- [Observability](../observability.md) — what this upstream logs per level (never secrets)
+- [ADR-005: per-upstream TLS SPKI pinning](../../decisions/005-per-upstream-tls-pinning.md) — the decision behind the pinned path this module implements

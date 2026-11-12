@@ -1,4 +1,4 @@
-# ADR-005: Per-Adapter TLS SPKI Pinning (`tlsFingerprint`)
+# ADR-005: Per-Upstream TLS SPKI Pinning (`tlsFingerprint`)
 
 ## Status
 
@@ -14,11 +14,11 @@ There is also a mechanism constraint. Empirically, on Bun 1.4.4, `fetch`'s TLS l
 
 ## Decision
 
-The `adapters[]` config entries gain an optional `tlsFingerprint` field: `base64(SHA-256(SPKI DER))` of the upstream certificate's public key — the RFC 7469 / Chromium CertificatePinList construction, so a pin stays valid across certificate renewals as long as the key pair is reused. Validation (in `src/config/schema.ts`) accepts standard-alphabet base64 decoding to exactly 32 bytes, tolerates and strips whitespace, and never echoes the value into a problem line. Absent or empty means no pin: default system-CA verification, byte-identical to pre-ADR behavior.
+The `upstreams[]` config entries gain an optional `tlsFingerprint` field: `base64(SHA-256(SPKI DER))` of the upstream certificate's public key — the RFC 7469 / Chromium CertificatePinList construction, so a pin stays valid across certificate renewals as long as the key pair is reused. Validation (in `src/config/schema.ts`) accepts standard-alphabet base64 decoding to exactly 32 bytes, tolerates and strips whitespace, and never echoes the value into a problem line. Absent or empty means no pin: default system-CA verification, byte-identical to pre-ADR behavior.
 
-A configured pin means exactly one thing, with no softer mode: **only the pinned key is accepted, and every mismatch fails closed.** The mechanism (`src/adapters/tls-pinning.ts`, enforced by `OpenAICompatibleAdapter.upstreamFetch`, verified empirically on Bun 1.4.4) has three parts:
+A configured pin means exactly one thing, with no softer mode: **only the pinned key is accepted, and every mismatch fails closed.** The mechanism (`src/upstreams/tls-pinning.ts`, enforced by `OpenAICompatibleUpstream.upstreamFetch`, verified empirically on Bun 1.4.4) has three parts:
 
-1. **Pinned connection** — the adapter opens the upstream TLS connection itself (`node:tls.connect`, verification disabled: a pinned chain need not be publicly trusted), reads the served leaf certificate, and refuses the connection unless its pin matches the configuration — before any request byte, hence any credential, is written.
+1. **Pinned connection** — the upstream opens the TLS connection itself (`node:tls.connect`, verification disabled: a pinned chain need not be publicly trusted), reads the served leaf certificate, and refuses the connection unless its pin matches the configuration — before any request byte, hence any credential, is written.
 2. **Plain HTTP over the verified socket** — the request then runs over that socket via `node:http` (`createConnection`), and the response surfaces as the same `Response` the unpinned fetch path returns: relay semantics, SSE streaming included, are unchanged.
 3. **No state** — every pinned request verifies its own connection; nothing is cached between requests. A certificate renewed with the same key pair keeps matching the pin, a key change fails closed on the next request. A pinned request is a single attempt — a failed pinned connection surfaces its mapped error and never retries within the same client request (`specs/contracts/gateway-upstream.md`).
 
@@ -37,15 +37,15 @@ Positive:
 
 Negative:
 
-- Key rotation on a pinned upstream breaks the adapter until the operator recomputes and redeploys the pin — an intentional maintenance cost that keeps the trust explicit.
+- Key rotation on a pinned upstream breaks the upstream until the operator recomputes and redeploys the pin — an intentional maintenance cost that keeps the trust explicit.
 - Every pinned request pays its own TLS handshake — the pinned path does not pool connections; a handshake-budget expiry surfaces as upstream unavailability.
 - The mechanism is Bun-specific (the `fetch` TLS semantics above, plus `node:http`'s `createConnection`); a runtime upgrade that changes them requires re-verifying the design.
 - `upstream_tls_error` joins the client-visible error vocabulary of `specs/contracts/client-gateway.md` — a public surface extension.
 
 ## Alternatives Considered
 
-- **`skipVerify` flag** (per-adapter `rejectUnauthorized: false`): rejected — it accepts any certificate presented, which is a standing MITM window guarded only by network topology; it also contradicts the security-model invariants on upstream trust.
+- **`skipVerify` flag** (per-upstream `rejectUnauthorized: false`): rejected — it accepts any certificate presented, which is a standing MITM window guarded only by network topology; it also contradicts the security-model invariants on upstream trust.
 - **Pin the whole certificate** (hash of the full DER): rejected — it breaks on every routine renewal (validity dates change), turning a non-event into an incident; the SPKI binds the key pair, which is the identity that actually matters.
-- **`checkServerIdentity`-only pin** (or a `ca`-anchored fetch): rejected — empirically unreachable on Bun 1.4.4: the callback never runs when chain verification fails first, and a non-self-signed leaf cannot anchor its own chain in `tls.ca` ("unable to verify the first certificate"), so leaf-only internal-PKI upstreams fail no matter how the pin is configured; the adapter must own the connection to make the pin check meaningful.
+- **`checkServerIdentity`-only pin** (or a `ca`-anchored fetch): rejected — empirically unreachable on Bun 1.4.4: the callback never runs when chain verification fails first, and a non-self-signed leaf cannot anchor its own chain in `tls.ca` ("unable to verify the first certificate"), so leaf-only internal-PKI upstreams fail no matter how the pin is configured; the upstream must own the connection to make the pin check meaningful.
 - **Warn-and-continue on mismatch** (log the mismatch, proceed with the handshake): rejected — a pin that warns is not a pin; it converts a security signal into log noise while still relaying traffic through an unverified channel. This is a deliberate deviation from the c0wrk ADR-054 analog, which chose warn semantics; here strict reject won because the gateway relays client bodies it cannot inspect.
 - **Per-request probe without cache**: rejected — it doubles handshakes on every request and adds probe latency to each one; the cached leaf with TLS-failure invalidation gets the same freshness where it matters (immediately after any TLS failure) at a fraction of the cost.

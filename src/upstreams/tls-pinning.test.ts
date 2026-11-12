@@ -1,6 +1,6 @@
 /**
  * TLS SPKI pinning (ADR-005): the pin primitive and the bare-handshake
- * probe, plus OpenAICompatibleAdapter behavior against a REAL local TLS
+ * probe, plus OpenAICompatibleUpstream behavior against a REAL local TLS
  * upstream serving self-signed fixtures — the exact deployment scenario
  * pinning exists for (mocking fetch would bypass the TLS layer entirely).
  *
@@ -14,7 +14,7 @@ import { createServer, type Server } from "node:net";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type pino from "pino";
-import { OpenAICompatibleAdapter } from "./openai-compatible.ts";
+import { OpenAICompatibleUpstream } from "./openai-compatible.ts";
 import {
   assertPinnedCertificate,
   computeSpkiPin,
@@ -39,8 +39,8 @@ const CERT_DER = derOf("pinned-test-cert.pem");
 const ROTATED_DER = derOf("pinned-test-cert-rotated.pem");
 const OTHER_DER = derOf("pinned-test-cert-other.pem");
 
-/** One local TLS upstream serving the given fixture cert/key pair. */
-function startTlsUpstream(
+/** One local TLS provider endpoint serving the given fixture cert/key pair. */
+function startTlsProvider(
   certFile: string,
   handler?: (req: Request) => Response | Promise<Response>,
   keyFile = certFile.includes("other") ? "pinned-test-other-key.pem" : "pinned-test-key.pem",
@@ -103,12 +103,12 @@ function fakeLogger(bindings: Record<string, unknown> = {}): {
   return { logger: build(bindings), lines };
 }
 
-function makeAdapter(
+function makeUpstream(
   baseUrl: string,
   tlsFingerprint: string | undefined,
-): { adapter: OpenAICompatibleAdapter; lines: Array<{ level: string; obj: unknown; msg: string }> } {
-  const { logger, lines } = fakeLogger({ component: "adapter:pinned" });
-  const adapter = new OpenAICompatibleAdapter(
+): { upstream: OpenAICompatibleUpstream; lines: Array<{ level: string; obj: unknown; msg: string }> } {
+  const { logger, lines } = fakeLogger({ component: "upstream:pinned" });
+  const upstream = new OpenAICompatibleUpstream(
     {
       type: "openai-compatible",
       id: "pinned",
@@ -119,7 +119,7 @@ function makeAdapter(
     logger,
     { pinProbeMs: 2_000 },
   );
-  return { adapter, lines };
+  return { upstream, lines };
 }
 
 function streamOf(text: string): ReadableStream<Uint8Array> {
@@ -132,7 +132,7 @@ function streamOf(text: string): ReadableStream<Uint8Array> {
 }
 
 function proxyRequest(body = JSON.stringify({ model: "gpt-4o", stream: false })): Parameters<
-  OpenAICompatibleAdapter["forward"]
+  OpenAICompatibleUpstream["forward"]
 >[0] {
   return {
     path: "chat/completions",
@@ -226,23 +226,23 @@ describe("isTlsFailure", () => {
 
 describe("probePinnedLeaf", () => {
   test("returns the leaf PEM and pin when the pin matches", async () => {
-    const upstream = startTlsUpstream("pinned-test-cert.pem");
-    tlsServers.push(upstream);
+    const provider = startTlsProvider("pinned-test-cert.pem");
+    tlsServers.push(provider);
 
-    const leaf: PinnedLeaf = await probePinnedLeaf(upstream.baseUrl, 5_000, PIN_CERT);
+    const leaf: PinnedLeaf = await probePinnedLeaf(provider.baseUrl, 5_000, PIN_CERT);
     expect(leaf.pin).toBe(PIN_CERT);
     expect(leaf.pem).toContain("-----BEGIN CERTIFICATE-----");
     // the PEM is a usable certificate that carries exactly the probed pin
     expect(computeSpkiPin(new crypto.X509Certificate(leaf.pem))).toBe(PIN_CERT);
     // a bare handshake sends no HTTP request
-    expect(upstream.requests).toHaveLength(0);
+    expect(provider.requests).toHaveLength(0);
   });
 
   test("rejects with the fact of a mismatch — no certificate details", async () => {
-    const upstream = startTlsUpstream("pinned-test-cert.pem");
-    tlsServers.push(upstream);
+    const provider = startTlsProvider("pinned-test-cert.pem");
+    tlsServers.push(provider);
 
-    const error = await rejectionOf(probePinnedLeaf(upstream.baseUrl, 5_000, PIN_OTHER));
+    const error = await rejectionOf(probePinnedLeaf(provider.baseUrl, 5_000, PIN_OTHER));
     expect(error).toBeInstanceOf(UpstreamTlsPinError);
     expect(error.message).toBe("upstream TLS certificate pin mismatch");
     expect(error.message).not.toContain("BEGIN");
@@ -267,39 +267,39 @@ describe("probePinnedLeaf", () => {
   });
 
   test("an already-aborted signal aborts the probe", async () => {
-    const upstream = startTlsUpstream("pinned-test-cert.pem");
-    tlsServers.push(upstream);
+    const provider = startTlsProvider("pinned-test-cert.pem");
+    tlsServers.push(provider);
 
     const controller = new AbortController();
     controller.abort();
-    const error = await rejectionOf(probePinnedLeaf(upstream.baseUrl, 5_000, PIN_CERT, controller.signal));
+    const error = await rejectionOf(probePinnedLeaf(provider.baseUrl, 5_000, PIN_CERT, controller.signal));
     expect(error.message).toContain("aborted");
   });
 });
 
 // ---------------------------------------------------------------------------
-// the adapter on the pinned path (real TLS upstreams)
+// the upstream on the pinned path (real TLS provider endpoints)
 // ---------------------------------------------------------------------------
 
-describe("OpenAICompatibleAdapter TLS pinning", () => {
+describe("OpenAICompatibleUpstream TLS pinning", () => {
   test("forward() relays through the pinned connection — exactly one upstream request", async () => {
-    const upstream = startTlsUpstream("pinned-test-cert.pem");
-    tlsServers.push(upstream);
-    const { adapter } = makeAdapter(upstream.baseUrl, PIN_CERT);
+    const provider = startTlsProvider("pinned-test-cert.pem");
+    tlsServers.push(provider);
+    const { upstream } = makeUpstream(provider.baseUrl, PIN_CERT);
 
-    const response = await adapter.forward(proxyRequest());
+    const response = await upstream.forward(proxyRequest());
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ choices: [{ message: { content: "ok" } }] });
-    expect(upstream.requests).toEqual(["/v1/chat/completions"]); // only the real request, no extra traffic
+    expect(provider.requests).toEqual(["/v1/chat/completions"]); // only the real request, no extra traffic
   });
 
   test("a wrong pin fails closed with 502 upstream_tls_error — the fact, not the certificate", async () => {
-    const upstream = startTlsUpstream("pinned-test-cert.pem");
-    tlsServers.push(upstream);
-    const { adapter } = makeAdapter(upstream.baseUrl, PIN_OTHER);
+    const provider = startTlsProvider("pinned-test-cert.pem");
+    tlsServers.push(provider);
+    const { upstream } = makeUpstream(provider.baseUrl, PIN_OTHER);
 
     for (let attempt = 0; attempt < 2; attempt++) {
-      const response = await adapter.forward(proxyRequest());
+      const response = await upstream.forward(proxyRequest());
       expect(response.status).toBe(502);
       const body = (await response.json()) as { error: { type: string; code: string; message: string } };
       expect(body.error).toEqual({
@@ -309,7 +309,7 @@ describe("OpenAICompatibleAdapter TLS pinning", () => {
       });
       expect(body.error.message).not.toContain("BEGIN");
     }
-    expect(upstream.requests).toHaveLength(0); // credentials never reach a mismatching upstream
+    expect(provider.requests).toHaveLength(0); // credentials never reach a mismatching upstream
   });
 
   test("an intermediate-signed certificate served WITHOUT its chain is pinned successfully", async () => {
@@ -317,24 +317,24 @@ describe("OpenAICompatibleAdapter TLS pinning", () => {
     // non-self-signed leaf alone cannot anchor its own chain ("unable to
     // verify the first certificate") — while the per-connection pin check
     // needs no chain whatsoever: the key is the identity
-    const upstream = startTlsUpstream(
+    const provider = startTlsProvider(
       "pinned-test-chain-leaf.pem",
       undefined,
       "pinned-test-chain-leaf-key.pem",
     );
-    tlsServers.push(upstream);
+    tlsServers.push(provider);
     const leafPin = computeSpkiPin(derOf("pinned-test-chain-leaf.pem"));
-    const { adapter } = makeAdapter(upstream.baseUrl, leafPin);
+    const { upstream } = makeUpstream(provider.baseUrl, leafPin);
 
-    const response = await adapter.forward(proxyRequest());
+    const response = await upstream.forward(proxyRequest());
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ choices: [{ message: { content: "ok" } }] });
-    expect(upstream.requests).toEqual(["/v1/chat/completions"]);
+    expect(provider.requests).toEqual(["/v1/chat/completions"]);
   });
 
   test("SSE streams through the pinned path chunk-by-chunk", async () => {
     const encoder = new TextEncoder();
-    const upstream = startTlsUpstream("pinned-test-cert.pem", () => {
+    const provider = startTlsProvider("pinned-test-cert.pem", () => {
       const body = new ReadableStream<Uint8Array>({
         async start(controller) {
           for (const chunk of ['data: {"a":1}\n\n', 'data: {"b":2}\n\n', "data: [DONE]\n\n"]) {
@@ -346,83 +346,83 @@ describe("OpenAICompatibleAdapter TLS pinning", () => {
       });
       return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
     });
-    tlsServers.push(upstream);
-    const { adapter } = makeAdapter(upstream.baseUrl, PIN_CERT);
+    tlsServers.push(provider);
+    const { upstream } = makeUpstream(provider.baseUrl, PIN_CERT);
 
-    const response = await adapter.forward(proxyRequest(JSON.stringify({ model: "gpt-4o", stream: true })));
+    const response = await upstream.forward(proxyRequest(JSON.stringify({ model: "gpt-4o", stream: true })));
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     const text = await response.text();
     expect(text).toBe('data: {"a":1}\n\ndata: {"b":2}\n\ndata: [DONE]\n\n');
   });
 
   test("an empty tlsFingerprint behaves like no pin: system CA verification fails on self-signed", async () => {
-    const upstream = startTlsUpstream("pinned-test-cert.pem");
-    tlsServers.push(upstream);
-    const { adapter } = makeAdapter(upstream.baseUrl, "");
+    const provider = startTlsProvider("pinned-test-cert.pem");
+    tlsServers.push(provider);
+    const { upstream } = makeUpstream(provider.baseUrl, "");
 
-    const response = await adapter.forward(proxyRequest());
+    const response = await upstream.forward(proxyRequest());
     expect(response.status).toBe(504);
     const body = (await response.json()) as { error: { code: string } };
     expect(body.error.code).toBe("upstream_timeout");
   });
 
   test("a pin on a plain-http baseUrl is inert: the request relays without TLS pinning", async () => {
-    const upstream = Bun.serve({
+    const provider = Bun.serve({
       port: 0,
       fetch: () => Response.json({ choices: [{ message: { content: "ok" } }] }),
     });
-    tlsServers.push({ stop: () => upstream.stop(true) });
-    const { adapter } = makeAdapter(`http://localhost:${upstream.port}/v1`, PIN_CERT);
+    tlsServers.push({ stop: () => provider.stop(true) });
+    const { upstream } = makeUpstream(`http://localhost:${provider.port}/v1`, PIN_CERT);
 
-    const response = await adapter.forward(proxyRequest());
+    const response = await upstream.forward(proxyRequest());
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ choices: [{ message: { content: "ok" } }] });
   });
 
   test("listModels() with a wrong pin degrades with the pin mismatch in its reason", async () => {
-    const upstream = startTlsUpstream("pinned-test-cert.pem");
-    tlsServers.push(upstream);
-    const { adapter } = makeAdapter(upstream.baseUrl, PIN_OTHER);
+    const provider = startTlsProvider("pinned-test-cert.pem");
+    tlsServers.push(provider);
+    const { upstream } = makeUpstream(provider.baseUrl, PIN_OTHER);
 
-    await expect(adapter.listModels()).rejects.toThrow(/pin mismatch/);
-    expect(upstream.requests).toHaveLength(0);
+    await expect(upstream.listModels()).rejects.toThrow(/pin mismatch/);
+    expect(provider.requests).toHaveLength(0);
   });
 
   test("connect() with a wrong pin degrades to a warning and never rejects", async () => {
-    const upstream = startTlsUpstream("pinned-test-cert.pem");
-    tlsServers.push(upstream);
-    const { adapter, lines } = makeAdapter(upstream.baseUrl, PIN_OTHER);
+    const provider = startTlsProvider("pinned-test-cert.pem");
+    tlsServers.push(provider);
+    const { upstream, lines } = makeUpstream(provider.baseUrl, PIN_OTHER);
 
-    await expect(adapter.connect()).resolves.toBeUndefined();
+    await expect(upstream.connect()).resolves.toBeUndefined();
     const warning = lines.find((line) => line.level === "warn");
     expect(JSON.stringify(warning)).toContain("pin mismatch");
-    expect(upstream.requests).toHaveLength(0);
+    expect(provider.requests).toHaveLength(0);
   });
 
   test("a renewal on the same key pair keeps the pinned path working — the pin binds the key", async () => {
-    const renewed = startTlsUpstream("pinned-test-cert.pem"); // serves the original cert
+    const renewed = startTlsProvider("pinned-test-cert.pem"); // serves the original cert
     tlsServers.push(renewed);
     const port = Number(new URL(renewed.baseUrl).port);
-    const { adapter } = makeAdapter(renewed.baseUrl, PIN_CERT);
+    const { upstream } = makeUpstream(renewed.baseUrl, PIN_CERT);
 
-    const before = await adapter.forward(proxyRequest());
+    const before = await upstream.forward(proxyRequest());
     expect(before.status).toBe(200);
 
     // the upstream renews its certificate — same key pair, new certificate.
     // No cached anchor exists to break: every request checks the pin of the
     // freshly served certificate, and the SPKI is unchanged
     renewed.stop();
-    const rotated = startTlsUpstreamOnPort(port, "pinned-test-cert-rotated.pem");
+    const rotated = startTlsProviderOnPort(port, "pinned-test-cert-rotated.pem");
     tlsServers.push(rotated);
 
-    const after = await adapter.forward(proxyRequest());
+    const after = await upstream.forward(proxyRequest());
     expect(after.status).toBe(200);
     await expect(after.json()).resolves.toEqual({ choices: [{ message: { content: "ok" } }] });
   });
 });
 
-/** Same as startTlsUpstream, but pinned to an explicit port (rotation scenario). */
-function startTlsUpstreamOnPort(
+/** Same as startTlsProvider, but pinned to an explicit port (rotation scenario). */
+function startTlsProviderOnPort(
   port: number,
   certFile: string,
 ): { baseUrl: string; stop: () => void } {

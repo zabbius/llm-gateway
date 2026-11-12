@@ -1,7 +1,7 @@
 /**
  * TLS SPKI pinning for upstream connections (ADR-005; semantics follow
  * c0wrk ADR-054): a configured `tlsFingerprint` — base64 of SHA-256 over the
- * upstream certificate's SubjectPublicKeyInfo DER — makes the adapter accept
+ * upstream certificate's SubjectPublicKeyInfo DER — makes the upstream accept
  * ONLY the pinned key. An absent (or empty) pin leaves the default fetch
  * behavior (system CA pool) untouched. There is deliberately no mode that
  * accepts an arbitrary certificate: every mismatch fails closed.
@@ -41,7 +41,7 @@ import tls from "node:tls";
 /**
  * A TLS verification failure on the pinned path: a pin decision (mismatch,
  * missing or unparsable certificate) or a pin on a plain-http endpoint.
- * The adapter maps this class to the `upstream_tls_error` envelope;
+ * The upstream maps this class to the `upstream_tls_error` envelope;
  * anything else stays "unreachable" (504).
  */
 export class UpstreamTlsPinError extends Error {
@@ -95,7 +95,7 @@ function pemFromDer(raw: Buffer): string {
 /**
  * True when an upstream failure is a TLS verification failure (a pin
  * decision, a plain-http pin) rather than plain unreachability — the
- * adapter's error mapping branches on this.
+ * upstream's error mapping branches on this.
  */
 export function isTlsFailure(error: unknown): boolean {
   if (error instanceof UpstreamTlsPinError) return true;

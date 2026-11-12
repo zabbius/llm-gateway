@@ -19,15 +19,15 @@ export type LogLevel = "trace" | "debug" | "info" | "warning" | "error" | "none"
 
 /**
  * One entry of the `GET /v1/models` list. Provider-provided entry fields pass
- * through unchanged, except `id` (rewritten to `<adapterId>/<model>`) and
- * `owned_by` (set to `adapterId`) — hence the open index signature.
+ * through unchanged, except `id` (rewritten to `<upstreamId>/<model>`) and
+ * `owned_by` (set to `upstreamId`) — hence the open index signature.
  */
 export interface ModelEntry {
-  /** Public model id: `<adapterId>/<model>` (ADR-002 prefix scheme). */
+  /** Public model id: `<upstreamId>/<model>` (ADR-002 prefix scheme). */
   id: string;
   object: "model";
   created: number;
-  /** The adapter id that serves this model. */
+  /** The upstream id that serves this model. */
   owned_by: string;
   [field: string]: unknown;
 }

@@ -17,8 +17,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type pino from "pino";
-import type { Adapter, AdapterConfig, ModelEntry, ProxyRequest } from "./adapters/adapter.ts";
-import type { AdapterFactories } from "./adapters/registry.ts";
+import type { Upstream, UpstreamConfig, ModelEntry, ProxyRequest } from "./upstreams/upstream.ts";
+import type { UpstreamFactories } from "./upstreams/registry.ts";
 import { parseListen, startGateway, type GatewayHandles } from "./index.ts";
 
 /** A guaranteed-free loopback port (bind an ephemeral server, close it). */
@@ -42,13 +42,13 @@ function cleanupConfig(path: string): void {
   rmSync(join(path, ".."), { recursive: true, force: true });
 }
 
-/** Capturing fake adapter: records probe execution, never touches the network. */
-class FakeAdapter implements Adapter {
+/** Capturing fake upstream: records probe execution, never touches the network. */
+class FakeUpstream implements Upstream {
   readonly id: string;
-  readonly type: AdapterConfig["type"];
+  readonly type: UpstreamConfig["type"];
 
   constructor(
-    config: AdapterConfig,
+    config: UpstreamConfig,
     private readonly logger: pino.Logger,
     private readonly connectResult: "ok" | "throw" = "ok",
   ) {
@@ -74,34 +74,34 @@ class FakeAdapter implements Adapter {
   }
 }
 
-/** Factories whose adapters record probe order in the shared `probes` array. */
+/** Factories whose upstreams record probe order in the shared `probes` array. */
 function fakeFactories(
   probes: string[],
   throwing: ReadonlySet<string> = new Set(),
-): AdapterFactories {
+): UpstreamFactories {
   return {
     "openai-compatible": (entry, logger) => {
-      const adapter = new FakeAdapter(entry, logger, throwing.has(entry.id) ? "throw" : "ok");
-      const traced: Adapter = {
-        id: adapter.id,
-        type: adapter.type,
+      const upstream = new FakeUpstream(entry, logger, throwing.has(entry.id) ? "throw" : "ok");
+      const traced: Upstream = {
+        id: upstream.id,
+        type: upstream.type,
         connect: async () => {
           probes.push(entry.id);
-          await adapter.connect();
+          await upstream.connect();
         },
-        listModels: () => adapter.listModels(),
-        forward: (request) => adapter.forward(request),
+        listModels: () => upstream.listModels(),
+        forward: (request) => upstream.forward(request),
       };
       return traced;
     },
   };
 }
 
-function configJson(listen: string, adapters: AdapterConfig[]): Record<string, unknown> {
-  return { listen, logLevel: "none", adapters };
+function configJson(listen: string, upstreams: UpstreamConfig[]): Record<string, unknown> {
+  return { listen, logLevel: "none", upstreams };
 }
 
-function entry(id: string, baseUrl = "https://upstream.example/v1"): AdapterConfig {
+function entry(id: string, baseUrl = "https://upstream.example/v1"): UpstreamConfig {
   return { type: "openai-compatible", id, baseUrl, apiKey: `sk-${id}-secret` };
 }
 
@@ -276,7 +276,7 @@ describe("startGateway (subprocess, real process)", () => {
     const path = tempConfig({
       listen: `127.0.0.1:${port}`,
       logLevel: "info",
-      adapters: [
+      upstreams: [
         { type: "openai-compatible", id: "mock", baseUrl: `http://127.0.0.1:${upstream.port}/v1`, apiKey },
       ],
     });
@@ -306,7 +306,7 @@ describe("startGateway (subprocess, real process)", () => {
       const chat = (await chatResponse.json()) as { choices: Array<{ message: { content: string } }> };
       expect(chat.choices[0]?.message.content).toBe("pong");
 
-      // The upstream saw the adapter's own credential and the de-prefixed
+      // The upstream saw the upstream's own credential and the de-prefixed
       // model — never the client's Authorization header.
       const upstreamProbe = upstream.seen.find((s) => s.path === "/v1/models");
       const upstreamChat = upstream.seen.find((s) => s.path === "/v1/chat/completions");
@@ -343,7 +343,7 @@ describe("startGateway (subprocess, real process)", () => {
     const path = tempConfig({
       listen: `127.0.0.1:${port}`,
       logLevel: "info",
-      adapters: [{ type: "nonexistent-type", id: "x", baseUrl: "http://127.0.0.1:1/v1", apiKey: "k" }],
+      upstreams: [{ type: "nonexistent-type", id: "x", baseUrl: "http://127.0.0.1:1/v1", apiKey: "k" }],
     });
     const proc = spawnGateway(path);
     const stderrText = new Response(piped(proc.stderr)).text();
@@ -351,8 +351,8 @@ describe("startGateway (subprocess, real process)", () => {
       expect(await proc.exited).toBe(1);
 
       const stderr = await stderrText;
-      expect(stderr).toContain("unknown adapter type");
-      expect(stderr).toContain("adapters[0]");
+      expect(stderr).toContain("unknown upstream type");
+      expect(stderr).toContain("upstreams[0]");
       expect(stderr).not.toContain('"gateway listening"');
 
       await expect(fetch(`http://127.0.0.1:${port}/v1/models`)).rejects.toThrow();

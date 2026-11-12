@@ -17,7 +17,7 @@
  *
  * Upstream errors that are already OpenAI-shaped are NOT produced here —
  * they pass through byte-for-byte and are never wrapped
- * (specs/contracts/client-gateway.md rules; the openai-compatible adapter
+ * (specs/contracts/client-gateway.md rules; the openai-compatible upstream
  * synthesizes its own 502/504 per specs/contracts/gateway-upstream.md).
  */
 import type { ErrorEnvelope } from "../types.ts";
@@ -32,7 +32,7 @@ function envelopeResponse(status: number, envelope: ErrorEnvelope): Response {
 
 /**
  * The model id does not resolve: no "/" separator, an empty half, or an
- * unknown adapter-id prefix. Sent before any upstream contact. Message
+ * unknown upstream-id prefix. Sent before any upstream contact. Message
  * format matches the contract example ("The model 'X' does not exist").
  */
 export function modelNotFoundResponse(model: string): Response {
@@ -61,7 +61,7 @@ export function notFoundResponse(message: string): Response {
 }
 
 /**
- * Upstream answered a non-relayable error body. In the MVP the adapter
+ * Upstream answered a non-relayable error body. In the MVP the upstream
  * synthesizes this itself; the constructor serves the app's error mapping
  * (the single place exceptions become status codes) and keeps the full
  * contract table representable in one module.
@@ -80,9 +80,9 @@ export function upstreamTimeoutResponse(message: string): Response {
 }
 
 /**
- * Upstream TLS verification failed on a pinned adapter (ADR-005): the
+ * Upstream TLS verification failed on a pinned upstream (ADR-005): the
  * served certificate's key does not match the configured `tlsFingerprint`.
- * The adapter synthesizes this itself on the pinned path; the constructor
+ * The upstream synthesizes this itself on the pinned path; the constructor
  * keeps the full contract table representable in one module.
  */
 export function upstreamTlsErrorResponse(message: string): Response {

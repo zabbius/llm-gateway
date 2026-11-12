@@ -1,5 +1,5 @@
 /**
- * OpenAICompatibleAdapter against a mock upstream (Bun.serve).
+ * OpenAICompatibleUpstream against a mock upstream (Bun.serve).
  *
  * Covers the delegation acceptance criteria: header whitelist (client
  * Authorization and hop-by-hop never reach upstream), URL building,
@@ -9,9 +9,9 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import type pino from "pino";
-import type { ProxyRequest } from "./adapter.ts";
+import type { ProxyRequest } from "./upstream.ts";
 import {
-  OpenAICompatibleAdapter,
+  OpenAICompatibleUpstream,
   type OpenAICompatibleTimeouts,
 } from "./openai-compatible.ts";
 
@@ -77,17 +77,17 @@ afterEach(() => {
   servers.length = 0;
 });
 
-function makeAdapter(baseUrl: string, timeouts: OpenAICompatibleTimeouts = {}): {
-  adapter: OpenAICompatibleAdapter;
+function makeUpstream(baseUrl: string, timeouts: OpenAICompatibleTimeouts = {}): {
+  upstream: OpenAICompatibleUpstream;
   lines: ReturnType<typeof fakeLogger>["lines"];
 } {
   const { logger, lines } = fakeLogger();
-  const adapter = new OpenAICompatibleAdapter(
+  const upstream = new OpenAICompatibleUpstream(
     { type: "openai-compatible", id: "openai", baseUrl, apiKey: API_KEY },
     logger,
     timeouts,
   );
-  return { adapter, lines };
+  return { upstream, lines };
 }
 
 function streamOf(text: string): ReadableStream<Uint8Array> {
@@ -131,12 +131,12 @@ const OPENAI_ERROR_BODY = JSON.stringify({
   error: { message: "invalid api key", type: "invalid_request_error", code: "invalid_api_key" },
 });
 
-describe("OpenAICompatibleAdapter", () => {
+describe("OpenAICompatibleUpstream", () => {
   test("builds the upstream URL as baseUrl + '/' + path", async () => {
     const { requests, baseUrl } = startUpstream(() => Response.json({ ok: true }));
-    const { adapter } = makeAdapter(baseUrl);
+    const { upstream } = makeUpstream(baseUrl);
 
-    const response = await adapter.forward(proxyRequest());
+    const response = await upstream.forward(proxyRequest());
     await response.text();
 
     expect(requests).toHaveLength(1);
@@ -146,9 +146,9 @@ describe("OpenAICompatibleAdapter", () => {
 
   test("sends exactly one credential — config apiKey Bearer; client Authorization never forwarded; only Content-Type/Accept relayed", async () => {
     const { requests, baseUrl } = startUpstream(() => Response.json({ ok: true }));
-    const { adapter } = makeAdapter(baseUrl);
+    const { upstream } = makeUpstream(baseUrl);
 
-    await adapter.forward(
+    await upstream.forward(
       proxyRequest({
         headers: {
           authorization: "Bearer client-secret",
@@ -173,9 +173,9 @@ describe("OpenAICompatibleAdapter", () => {
     const { baseUrl } = startUpstream(() =>
       Response.json({ ok: true }, { headers: { "x-request-id": "req-1" } }),
     );
-    const { adapter } = makeAdapter(baseUrl);
+    const { upstream } = makeUpstream(baseUrl);
 
-    const response = await adapter.forward(proxyRequest());
+    const response = await upstream.forward(proxyRequest());
     await response.text();
 
     expect(response.headers.get("x-request-id")).toBe("req-1");
@@ -188,10 +188,10 @@ describe("OpenAICompatibleAdapter", () => {
     const { requests, baseUrl } = startUpstream(() =>
       new Response(payload, { status: 200, headers: { "content-type": "application/json" } }),
     );
-    const { adapter } = makeAdapter(baseUrl);
+    const { upstream } = makeUpstream(baseUrl);
 
     const sent = JSON.stringify({ model: "gpt-4o", stream: false });
-    const response = await adapter.forward(proxyRequest({ body: streamOf(sent) }));
+    const response = await upstream.forward(proxyRequest({ body: streamOf(sent) }));
     const body = await response.text();
 
     expect(response.status).toBe(200);
@@ -203,9 +203,9 @@ describe("OpenAICompatibleAdapter", () => {
     const { baseUrl } = startUpstream(() =>
       new Response(OPENAI_ERROR_BODY, { status: 401, headers: { "content-type": "application/json" } }),
     );
-    const { adapter } = makeAdapter(baseUrl);
+    const { upstream } = makeUpstream(baseUrl);
 
-    const response = await adapter.forward(proxyRequest());
+    const response = await upstream.forward(proxyRequest());
     const body = await response.text();
 
     expect(response.status).toBe(401);
@@ -217,9 +217,9 @@ describe("OpenAICompatibleAdapter", () => {
     const { baseUrl } = startUpstream(() =>
       new Response("<html>gateway error</html>", { status: 500, headers: { "content-type": "text/html" } }),
     );
-    const { adapter, lines } = makeAdapter(baseUrl);
+    const { upstream, lines } = makeUpstream(baseUrl);
 
-    const response = await adapter.forward(proxyRequest());
+    const response = await upstream.forward(proxyRequest());
     const parsed = (await response.json()) as { error: { type: string; code: string; message: string } };
 
     expect(response.status).toBe(502);
@@ -232,9 +232,9 @@ describe("OpenAICompatibleAdapter", () => {
 
   test("synthesizes 502 upstream_error for an empty error body", async () => {
     const { baseUrl } = startUpstream(() => new Response("", { status: 503 }));
-    const { adapter } = makeAdapter(baseUrl);
+    const { upstream } = makeUpstream(baseUrl);
 
-    const response = await adapter.forward(proxyRequest());
+    const response = await upstream.forward(proxyRequest());
     const parsed = (await response.json()) as { error: { code: string } };
 
     expect(response.status).toBe(502);
@@ -246,9 +246,9 @@ describe("OpenAICompatibleAdapter", () => {
       await Bun.sleep(400);
       return Response.json({ late: true });
     });
-    const { adapter } = makeAdapter(baseUrl, { forwardMs: 80 });
+    const { upstream } = makeUpstream(baseUrl, { forwardMs: 80 });
 
-    const response = await adapter.forward(proxyRequest());
+    const response = await upstream.forward(proxyRequest());
     const parsed = (await response.json()) as { error: { type: string; code: string; message: string } };
 
     expect(response.status).toBe(504);
@@ -260,9 +260,9 @@ describe("OpenAICompatibleAdapter", () => {
 
   test("streams SSE chunk-by-chunk without buffering — chunks arrive as the upstream sends them", async () => {
     const { baseUrl } = startUpstream(() => sseResponse(["data: a\n\n", "data: b\n\n", "data: c\n\n"], 90));
-    const { adapter } = makeAdapter(baseUrl);
+    const { upstream } = makeUpstream(baseUrl);
 
-    const response = await adapter.forward(proxyRequest());
+    const response = await upstream.forward(proxyRequest());
     expect(response.headers.get("content-type")).toBe("text/event-stream");
     expect(response.status).toBe(200);
 
@@ -284,9 +284,9 @@ describe("OpenAICompatibleAdapter", () => {
 
   test("ends the SSE stream cleanly after the idle budget — no error, no later chunks", async () => {
     const { baseUrl } = startUpstream(() => sseResponse(["data: a\n\n", "data: b-never-seen\n\n"], 600));
-    const { adapter } = makeAdapter(baseUrl, { streamIdleMs: 100 });
+    const { upstream } = makeUpstream(baseUrl, { streamIdleMs: 100 });
 
-    const response = await adapter.forward(proxyRequest());
+    const response = await upstream.forward(proxyRequest());
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
 
@@ -310,9 +310,9 @@ describe("OpenAICompatibleAdapter", () => {
       });
       return sseResponse(chunks, 50);
     });
-    const { adapter } = makeAdapter(baseUrl);
+    const { upstream } = makeUpstream(baseUrl);
 
-    const response = await adapter.forward(proxyRequest());
+    const response = await upstream.forward(proxyRequest());
     const reader = response.body!.getReader();
     await reader.read();
     await reader.cancel();
@@ -328,9 +328,9 @@ describe("OpenAICompatibleAdapter", () => {
     const { baseUrl } = startUpstream(() =>
       new Response("<html>boom</html>", { status: 500, headers: { "content-type": "text/html" } }),
     );
-    const { adapter, lines } = makeAdapter(baseUrl);
+    const { upstream, lines } = makeUpstream(baseUrl);
 
-    await expect(adapter.connect()).resolves.toBeUndefined();
+    await expect(upstream.connect()).resolves.toBeUndefined();
 
     const warnings = lines.filter((line) => line.level === "warn");
     expect(warnings).toHaveLength(1);
@@ -345,10 +345,10 @@ describe("OpenAICompatibleAdapter", () => {
       await Bun.sleep(400);
       return Response.json({ data: [] });
     });
-    const { adapter, lines } = makeAdapter(baseUrl, { connectProbeMs: 80 });
+    const { upstream, lines } = makeUpstream(baseUrl, { connectProbeMs: 80 });
 
     const started = Date.now();
-    await expect(adapter.connect()).resolves.toBeUndefined();
+    await expect(upstream.connect()).resolves.toBeUndefined();
     expect(Date.now() - started).toBeLessThan(350);
 
     const warning = lines.find((line) => line.level === "warn");
@@ -361,9 +361,9 @@ describe("OpenAICompatibleAdapter", () => {
     const { baseUrl } = startUpstream(() =>
       Response.json({ object: "list", data: [{ id: "gpt-4o", object: "model", created: 1, owned_by: "system" }] }),
     );
-    const { adapter, lines } = makeAdapter(baseUrl);
+    const { upstream, lines } = makeUpstream(baseUrl);
 
-    await expect(adapter.connect()).resolves.toBeUndefined();
+    await expect(upstream.connect()).resolves.toBeUndefined();
 
     const info = lines.find((line) => line.level === "info");
     expect(info).toBeDefined();
@@ -377,9 +377,9 @@ describe("OpenAICompatibleAdapter", () => {
       data: [{ id: "gpt-4o", object: "model", created: 1700000000, owned_by: "system", scope: "chat" }],
     };
     const { requests, baseUrl } = startUpstream(() => Response.json(upstreamList));
-    const { adapter } = makeAdapter(baseUrl);
+    const { upstream } = makeUpstream(baseUrl);
 
-    const models = await adapter.listModels();
+    const models = await upstream.listModels();
 
     expect(models).toHaveLength(1);
     expect(models[0]?.id).toBe("gpt-4o"); // unprefixed — no "openai/" prefix here

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * Print the TLS SPKI pin of the certificate an https endpoint currently
- * serves — the exact string for the `tlsFingerprint` field of an adapter
+ * serves — the exact string for the `tlsFingerprint` field of an upstream
  * config entry (ADR-005).
  *
  *   bun tools/tls-fingerprint.ts https://llm.lan:8443/v1
@@ -14,9 +14,9 @@
  * fingerprint IS what is being fetched): no HTTP request is sent, no
  * credentials are involved. Self-signed and internal-PKI certificates are
  * fingerprinted like any other; "trusted or not" plays no role. All TLS
- * handling is reused from src/adapters/tls-pinning.ts.
+ * handling is reused from src/upstreams/tls-pinning.ts.
  */
-import { fetchLeafCertificate, probePinnedLeaf, type PinnedLeaf } from "../src/adapters/tls-pinning.ts";
+import { fetchLeafCertificate, probePinnedLeaf, type PinnedLeaf } from "../src/upstreams/tls-pinning.ts";
 
 const PROBE_TIMEOUT_MS = 10_000;
 
@@ -25,7 +25,7 @@ function help(): never {
   console.log(`usage: bun tools/tls-fingerprint.ts [--expect <pin>] <https-url>
 
 Prints the TLS SPKI pin of the certificate the https endpoint serves —
-the exact string for the tlsFingerprint field of an adapter config entry.
+the exact string for the tlsFingerprint field of an upstream config entry.
 
   <https-url>      endpoint to fingerprint (https only; port and path from
                    the URL, SNI from the hostname; default port 443)

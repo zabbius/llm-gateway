@@ -1,26 +1,26 @@
 # llm-gateway
 
 An OpenAI-protocol proxy: clients speak the OpenAI API, and the gateway forwards each
-request to the provider adapter selected by the model-id prefix (`{adapterId}/{model}`),
-streaming the answer back. One gateway fronts many upstream LLM providers behind a single
+request to the upstream selected by the model-id prefix (`{upstreamId}/{model}`),
+streaming the answer back. One gateway fronts many LLM providers behind a single
 fixed client surface.
 
 ## Status
 
 MVP scope implemented:
 
-- `GET /v1/models` — aggregated model list across adapters, ids prefixed `{adapterId}/{model}`;
-  a failing adapter degrades its slice, never the whole list
-- `POST /v1/chat/completions`, `POST /v1/completions` — proxied to the adapter selected by
+- `GET /v1/models` — aggregated model list across upstreams, ids prefixed `{upstreamId}/{model}`;
+  a failing upstream degrades its slice, never the whole list
+- `POST /v1/chat/completions`, `POST /v1/completions` — proxied to the upstream selected by
   the model-id prefix; SSE streaming passes through chunk-by-chunk, no buffering
-- One adapter type: `openai-compatible` (OpenAI-compatible REST API, Bearer auth,
+- One upstream type: `openai-compatible` (OpenAI-compatible REST API, Bearer auth,
   header whitelist, fixed timeouts, optional `tlsFingerprint` TLS SPKI pinning,
   upstream 4xx/5xx relayed as-is)
 - JSON config with total validation; pino logging to stderr with credential redaction
 - Static SPA served at `/` when `web/dist` exists
 
 Not in the MVP yet: gateway authentication (a documented no-op — the listener binds to
-loopback by default, keep it that way), adapter types beyond `openai-compatible`,
+loopback by default, keep it that way), upstream types beyond `openai-compatible`,
 request/response transformation beyond the model-id rewrite.
 
 ## Requirements
@@ -51,7 +51,7 @@ request/response transformation beyond the model-id rewrite.
    bun run start        # bun run src/index.ts
    ```
 
-4. Use it like the OpenAI API, with adapter-prefixed model ids:
+4. Use it like the OpenAI API, with upstream-prefixed model ids:
 
    ```sh
    curl http://127.0.0.1:8080/v1/models
@@ -72,16 +72,16 @@ request/response transformation beyond the model-id rewrite.
 | --- | --- | --- | --- |
 | `listen` | `"host:port"` | `127.0.0.1:8080` | Bind address; IPv6 written as `[::1]:8080` |
 | `logLevel` | `trace`, `debug`, `info`, `warning`, `error`, `none` | `info` | `none` silences logging entirely |
-| `adapters` | array | — (required) | At least one entry; `id` unique, `^[a-z0-9][a-z0-9-]*$` — never `/` |
+| `upstreams` | array | — (required) | At least one entry; `id` unique, `^[a-z0-9][a-z0-9-]*$` — never `/` |
 
-Each adapter entry: `type` (registered: `openai-compatible`), `id`, `baseUrl` (absolute
+Each upstream entry: `type` (registered: `openai-compatible`), `id`, `baseUrl` (absolute
 http(s) URL including the API root, e.g. `https://api.openai.com/v1`; one trailing slash
-is stripped), `apiKey` (non-empty; sent upstream as the Bearer credential only), optional
-`tlsFingerprint` (TLS SPKI pin — see "TLS pinning" below).
+is stripped), `apiKey` (non-empty; sent to the provider API as the Bearer credential only),
+optional `tlsFingerprint` (TLS SPKI pin — see "TLS pinning" below).
 
 ### TLS pinning (self-signed / internal upstreams)
 
-An adapter entry accepts an optional `tlsFingerprint`: the TLS SPKI pin of the upstream
+An upstream entry accepts an optional `tlsFingerprint`: the TLS SPKI pin of the provider's
 certificate — `base64(SHA-256(SPKI DER))`, one line, printed by the bundled tool:
 
 ```sh
@@ -89,7 +89,7 @@ bun tools/tls-fingerprint.ts https://llm.lan:8443/v1
 # → K4vmDE8v8SKXajayPc4yMc49GIvJEHyUF8mRo7bu/EM=
 ```
 
-With a pin set, the adapter accepts **only** the pinned key: every pinned request opens its
+With a pin set, the upstream accepts **only** the pinned key: every pinned request opens its
 own TLS connection, checks the served certificate's SPKI pin before any byte — hence any
 credential — is written, and refuses the connection on a mismatch. No certificate chain is
 required: self-signed and internal-PKI certificates work even when the server presents its
@@ -102,8 +102,8 @@ verifies a configured pin against the live endpoint (exit non-zero on mismatch):
 bun tools/tls-fingerprint.ts --expect 'K4vmDE8v8SKXajayPc4yMc49GIvJEHyUF8mRo7bu/EM=' https://llm.lan:8443/v1
 ```
 
-Details: `specs/decisions/005-per-adapter-tls-pinning.md` (ADR-005),
-`specs/domains/adapters/openai-compatible.md`.
+Details: `specs/decisions/005-per-upstream-tls-pinning.md` (ADR-005),
+`specs/domains/upstreams/openai-compatible.md`.
 
 Validation is total: every problem of one config is reported to stderr (one line each)
 and the process exits with code 1 before any port is bound. Unknown keys are rejected,
@@ -113,13 +113,13 @@ so typos fail loudly at startup.
 
 | Method | Path | Behavior |
 | --- | --- | --- |
-| `GET` | `/v1/models` | Aggregated list; ids rewritten to `{adapterId}/{model}`, `owned_by` set to the adapter id |
+| `GET` | `/v1/models` | Aggregated list; ids rewritten to `{upstreamId}/{model}`, `owned_by` set to the upstream id |
 | `POST` | `/v1/chat/completions` | Dispatched by the model-id prefix; SSE streaming passthrough |
 | `POST` | `/v1/completions` | Same dispatch |
 | `GET` | `/*` | Serves `web/dist` when it exists; unmatched paths get the error envelope |
 
 Gateway-generated failures use the OpenAI error envelope — `400 invalid_request_error`,
-`404` with `code: "model_not_found"` for an unknown adapter/model, `404` for an unmatched
+`404` with `code: "model_not_found"` for an unknown upstream/model, `404` for an unmatched
 route, `502 upstream_error`, `502 upstream_tls_error` (TLS verification failed on a pinned
 upstream), `504 upstream_timeout` (`src/httpapi/errors.ts` is the single mapper). Upstream
 4xx/5xx responses are relayed as-is.
@@ -147,13 +147,13 @@ cd web && bun run build   # emits web/dist
 
 ```
 src/
-  index.ts      — process entry: the only place that wires config → adapters → app → listener
+  index.ts      — process entry: the only place that wires config → upstreams → app → listener
   types.ts      — shared vocabulary (LogLevel, …)
   config/       — config schema + validation (single place), config-file loading
   logging/      — pino-to-stderr logger with credential redaction
-  adapters/     — Adapter contract, registry, the openai-compatible implementation,
+  upstreams/    — Upstream contract, registry, the openai-compatible implementation,
                   TLS SPKI pinning
-  gateway/      — model-id prefix routing ({adapterId}/{model})
+  gateway/      — model-id prefix routing ({upstreamId}/{model})
   httpapi/      — Hono app, routes, the OpenAI error envelope, handlers
 tools/
   tls-fingerprint.ts — prints (or with --expect verifies) the tlsFingerprint SPKI pin
@@ -161,7 +161,7 @@ web/            — static SPA served at / (React 19, Bootstrap 5, Vite)
 specs/          — design contracts; start at specs/INDEX.md
 ```
 
-Dependencies point downward (`httpapi` → `gateway`/`adapters` → `config`/`logging`);
+Dependencies point downward (`httpapi` → `gateway`/`upstreams` → `config`/`logging`);
 `src/index.ts` owns all wiring. The full rules: `specs/architecture/layers.md`.
 
 ## Specifications

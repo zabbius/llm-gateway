@@ -20,7 +20,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  ADAPTER_TYPES,
+  UPSTREAM_TYPES,
   DEFAULT_LISTEN,
   DEFAULT_LOG_LEVEL,
   LOG_LEVELS,
@@ -56,7 +56,7 @@ afterAll(() => {
   rmSync(FIXTURE_DIR, { recursive: true, force: true });
 });
 
-const VALID_ADAPTER = {
+const VALID_UPSTREAM = {
   type: "openai-compatible",
   id: "openai",
   baseUrl: "https://api.openai.com/v1",
@@ -64,8 +64,8 @@ const VALID_ADAPTER = {
 };
 
 /** A config file body that is valid except for the given top-level overrides. */
-function validConfig(adapters: unknown[] = [VALID_ADAPTER], overrides: Record<string, unknown> = {}): string {
-  return JSON.stringify({ ...overrides, adapters });
+function validConfig(upstreams: unknown[] = [VALID_UPSTREAM], overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({ ...overrides, upstreams });
 }
 
 /** A capturing problem logger: records every error line loadConfig emits. */
@@ -74,15 +74,15 @@ function capture(): { lines: string[]; error(message: string): void } {
   return { lines, error: (message) => lines.push(message) };
 }
 
-/** Build one adapter entry with one field removed or replaced. */
-function adapterWith(field: keyof typeof VALID_ADAPTER, value: unknown): Record<string, unknown> {
-  const adapter: Record<string, unknown> = { ...VALID_ADAPTER };
+/** Build one upstream entry with one field removed or replaced. */
+function upstreamWith(field: keyof typeof VALID_UPSTREAM, value: unknown): Record<string, unknown> {
+  const upstream: Record<string, unknown> = { ...VALID_UPSTREAM };
   if (value === undefined) {
-    delete adapter[field];
+    delete upstream[field];
   } else {
-    adapter[field] = value;
+    upstream[field] = value;
   }
-  return adapter;
+  return upstream;
 }
 
 // ---------------------------------------------------------------------------
@@ -157,7 +157,7 @@ test("LLM_GATEWAY_CONFIG is the only path tried — missing file names the env p
 });
 
 test("LLM_GATEWAY_CONFIG is honored for an existing file", () => {
-  const path = configFixture(validConfig([{ ...VALID_ADAPTER, id: "from-env" }]));
+  const path = configFixture(validConfig([{ ...VALID_UPSTREAM, id: "from-env" }]));
   process.env[ENV_KEY] = path;
 
   const result = loadConfig({});
@@ -165,7 +165,7 @@ test("LLM_GATEWAY_CONFIG is honored for an existing file", () => {
   expect(result.ok).toBe(true);
   if (!result.ok) return;
   expect(result.path).toBe(path);
-  expect(result.config.adapters[0]?.id).toBe("from-env");
+  expect(result.config.upstreams[0]?.id).toBe("from-env");
 });
 
 test("an explicit path option beats the env var", () => {
@@ -208,7 +208,7 @@ test("an unreadable file is an error naming the path and the reason", () => {
 // ---------------------------------------------------------------------------
 
 test("a JSON parse error is reported with the path and the parser's message", () => {
-  const path = configFixture('{"adapters": [');
+  const path = configFixture('{"upstreams": [');
   const log = capture();
   const result = loadConfig({ path, log });
 
@@ -259,27 +259,27 @@ test("a non-object config root (array, string, null, number) is rejected", () =>
 test("an unknown top-level key is rejected and valid keys are named", () => {
   const log = capture();
   const result = loadConfig({
-    path: configFixture(validConfig([VALID_ADAPTER], { listern: "typo" })),
+    path: configFixture(validConfig([VALID_UPSTREAM], { listern: "typo" })),
     log,
   });
 
   expect(result.ok).toBe(false);
   if (result.ok) return;
   expect(result.problems).toEqual([
-    'unknown top-level key "listern" (valid keys: listen, logLevel, adapters)',
+    'unknown top-level key "listern" (valid keys: listen, logLevel, upstreams)',
   ]);
   expect(log.lines).toEqual(result.problems);
 });
 
-test("an unknown per-adapter key is rejected and valid keys are named", () => {
+test("an unknown per-upstream key is rejected and valid keys are named", () => {
   const result = loadConfig({
-    path: configFixture(validConfig([{ ...VALID_ADAPTER, id: "other", retry: 5 }])),
+    path: configFixture(validConfig([{ ...VALID_UPSTREAM, id: "other", retry: 5 }])),
   });
 
   expect(result.ok).toBe(false);
   if (result.ok) return;
   expect(result.problems).toEqual([
-    'adapters[0]: unknown key "retry" (valid keys: type, id, baseUrl, apiKey, tlsFingerprint)',
+    'upstreams[0]: unknown key "retry" (valid keys: type, id, baseUrl, apiKey, tlsFingerprint)',
   ]);
 });
 
@@ -301,7 +301,7 @@ test("malformed listen values are rejected with the host:port rule", () => {
     "[::1",
   ]) {
     const result = loadConfig({
-      path: configFixture(validConfig([VALID_ADAPTER], { listen })),
+      path: configFixture(validConfig([VALID_UPSTREAM], { listen })),
     });
 
     expect(result.ok).toBe(false);
@@ -315,7 +315,7 @@ test("malformed listen values are rejected with the host:port rule", () => {
 test("valid listen forms are accepted and kept in the normalized config", () => {
   for (const listen of ["127.0.0.1:8080", "localhost:80", "0.0.0.0:65535", "my-host.example:9443", "[::1]:8080"]) {
     const result = loadConfig({
-      path: configFixture(validConfig([VALID_ADAPTER], { listen })),
+      path: configFixture(validConfig([VALID_UPSTREAM], { listen })),
     });
 
     expect(result.ok).toBe(true);
@@ -331,7 +331,7 @@ test("valid listen forms are accepted and kept in the normalized config", () => 
 test("an invalid logLevel is rejected with all six valid values listed", () => {
   for (const logLevel of ["loud", "warn", "VERBOSE", "", 42, null]) {
     const result = loadConfig({
-      path: configFixture(validConfig([VALID_ADAPTER], { logLevel })),
+      path: configFixture(validConfig([VALID_UPSTREAM], { logLevel })),
     });
 
     expect(result.ok).toBe(false);
@@ -347,7 +347,7 @@ test("an invalid logLevel is rejected with all six valid values listed", () => {
 test("valid logLevel spellings pass through; omitted defaults to info", () => {
   for (const logLevel of LOG_LEVELS) {
     const result = loadConfig({
-      path: configFixture(validConfig([VALID_ADAPTER], { logLevel })),
+      path: configFixture(validConfig([VALID_UPSTREAM], { logLevel })),
     });
 
     expect(result.ok).toBe(true);
@@ -363,24 +363,24 @@ test("valid logLevel spellings pass through; omitted defaults to info", () => {
 });
 
 // ---------------------------------------------------------------------------
-// adapters array
+// upstreams array
 // ---------------------------------------------------------------------------
 
-test("adapters missing, not an array, or empty is rejected", () => {
-  for (const body of ["{}", '{"adapters": "nope"}', '{"adapters": []}', '{"adapters": {}}']) {
+test("upstreams missing, not an array, or empty is rejected", () => {
+  for (const body of ["{}", '{"upstreams": "nope"}', '{"upstreams": []}', '{"upstreams": {}}']) {
     const result = loadConfig({ path: configFixture(body) });
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.problems).toEqual(["adapters must be an array with at least one adapter entry"]);
+    expect(result.problems).toEqual(["upstreams must be an array with at least one upstream entry"]);
   }
 });
 
 // ---------------------------------------------------------------------------
-// adapter type
+// upstream type
 // ---------------------------------------------------------------------------
 
-test("a missing adapter type is rejected and registered types are listed", () => {
+test("a missing upstream type is rejected and registered types are listed", () => {
   const result = loadConfig({
     path: configFixture(validConfig([{ id: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "k" }])),
   });
@@ -388,34 +388,34 @@ test("a missing adapter type is rejected and registered types are listed", () =>
   expect(result.ok).toBe(false);
   if (result.ok) return;
   expect(result.problems).toEqual([
-    `adapters[0]: missing required key "type" (registered adapter types: ${ADAPTER_TYPES.join(", ")})`,
+    `upstreams[0]: missing required key "type" (registered upstream types: ${UPSTREAM_TYPES.join(", ")})`,
   ]);
 });
 
-test("an unknown adapter type is rejected and registered types are listed", () => {
+test("an unknown upstream type is rejected and registered types are listed", () => {
   const result = loadConfig({
-    path: configFixture(validConfig([{ ...VALID_ADAPTER, type: "azure-openai" }])),
+    path: configFixture(validConfig([{ ...VALID_UPSTREAM, type: "azure-openai" }])),
   });
 
   expect(result.ok).toBe(false);
   if (result.ok) return;
   expect(result.problems).toEqual([
-    `adapters[0]: unknown adapter type "azure-openai" (registered adapter types: ${ADAPTER_TYPES.join(", ")})`,
+    `upstreams[0]: unknown upstream type "azure-openai" (registered upstream types: ${UPSTREAM_TYPES.join(", ")})`,
   ]);
 });
 
 // ---------------------------------------------------------------------------
-// adapter id
+// upstream id
 // ---------------------------------------------------------------------------
 
 test("a missing or malformed id is rejected with the grammar", () => {
   for (const id of [undefined, "OpenAI", "my_id", "a/b", "-leading", "id.dot", "", 42, null]) {
-    const result = loadConfig({ path: configFixture(validConfig([adapterWith("id", id)])) });
+    const result = loadConfig({ path: configFixture(validConfig([upstreamWith("id", id)])) });
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.problems).toHaveLength(1);
-    expect(result.problems[0]).toContain("adapters[0]:");
+    expect(result.problems[0]).toContain("upstreams[0]:");
     // a missing key names the key; a present-but-invalid value names the grammar
     if (id === undefined) {
       expect(result.problems[0]).toContain('missing required key "id"');
@@ -428,30 +428,30 @@ test("a missing or malformed id is rejected with the grammar", () => {
 test("valid id spellings are accepted", () => {
   // "trailing-" is accepted because the spec grammar is exactly
   // ^[a-z0-9][a-z0-9-]*$ — the tail allows a trailing hyphen
-  for (const id of ["a", "9to5", "openai2", "my-adapter", "llm-gw-2", "trailing-"]) {
+  for (const id of ["a", "9to5", "openai2", "my-upstream", "llm-gw-2", "trailing-"]) {
     const result = loadConfig({
-      path: configFixture(validConfig([{ ...VALID_ADAPTER, id }])),
+      path: configFixture(validConfig([{ ...VALID_UPSTREAM, id }])),
     });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.config.adapters[0]?.id).toBe(id);
+    expect(result.config.upstreams[0]?.id).toBe(id);
   }
 });
 
 test("duplicate ids are named with their entries; unique ids are not flagged", () => {
-  const adapters = [
-    { ...VALID_ADAPTER, id: "openai" },
-    { ...VALID_ADAPTER, id: "acme" },
-    { ...VALID_ADAPTER, id: "openai" },
-    { ...VALID_ADAPTER, id: "solo" },
-    { ...VALID_ADAPTER, id: "openai" },
+  const upstreams = [
+    { ...VALID_UPSTREAM, id: "openai" },
+    { ...VALID_UPSTREAM, id: "acme" },
+    { ...VALID_UPSTREAM, id: "openai" },
+    { ...VALID_UPSTREAM, id: "solo" },
+    { ...VALID_UPSTREAM, id: "openai" },
   ];
-  const result = loadConfig({ path: configFixture(validConfig(adapters)) });
+  const result = loadConfig({ path: configFixture(validConfig(upstreams)) });
 
   expect(result.ok).toBe(false);
   if (result.ok) return;
-  expect(result.problems).toEqual(['duplicate adapter id "openai" (entries 0, 2, 4)']);
+  expect(result.problems).toEqual(['duplicate upstream id "openai" (entries 0, 2, 4)']);
 });
 
 // ---------------------------------------------------------------------------
@@ -460,12 +460,12 @@ test("duplicate ids are named with their entries; unique ids are not flagged", (
 
 test("a missing or non-absolute-http(s) baseUrl is rejected", () => {
   for (const baseUrl of [undefined, "api.openai.com/v1", "/v1", "//host/v1", "ftp://api.openai.com/v1", "", 42]) {
-    const result = loadConfig({ path: configFixture(validConfig([adapterWith("baseUrl", baseUrl)])) });
+    const result = loadConfig({ path: configFixture(validConfig([upstreamWith("baseUrl", baseUrl)])) });
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.problems).toHaveLength(1);
-    expect(result.problems[0]).toContain("adapters[0]:");
+    expect(result.problems[0]).toContain("upstreams[0]:");
     if (baseUrl === undefined) {
       expect(result.problems[0]).toContain('missing required key "baseUrl"');
     } else {
@@ -475,17 +475,17 @@ test("a missing or non-absolute-http(s) baseUrl is rejected", () => {
 });
 
 test("absolute http and https baseUrls are accepted, with or without /v1", () => {
-  // /v1 is the documented convention for the API root (the adapter builds
+  // /v1 is the documented convention for the API root (the upstream builds
   // upstream URLs from it); validation enforces the absolute-http(s) rule
   // enumerated in the spec's "Validation errors".
   for (const baseUrl of ["https://api.openai.com/v1", "http://localhost:11434/v1", "https://api.example.test"]) {
     const result = loadConfig({
-      path: configFixture(validConfig([{ ...VALID_ADAPTER, baseUrl }])),
+      path: configFixture(validConfig([{ ...VALID_UPSTREAM, baseUrl }])),
     });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.config.adapters[0]?.baseUrl).toBe(baseUrl);
+    expect(result.config.upstreams[0]?.baseUrl).toBe(baseUrl);
   }
 });
 
@@ -496,18 +496,18 @@ test("absolute http and https baseUrls are accepted, with or without /v1", () =>
 test("a missing, empty, or non-string apiKey is rejected without echoing the value", () => {
   for (const apiKey of [undefined, "", 42, null]) {
     const log = capture();
-    const result = loadConfig({ path: configFixture(validConfig([adapterWith("apiKey", apiKey)])), log });
+    const result = loadConfig({ path: configFixture(validConfig([upstreamWith("apiKey", apiKey)])), log });
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.problems).toEqual([
       apiKey === undefined
-        ? 'adapters[0]: missing required key "apiKey"'
-        : "adapters[0]: apiKey must be a non-empty string",
+        ? 'upstreams[0]: missing required key "apiKey"'
+        : "upstreams[0]: apiKey must be a non-empty string",
     ]);
     // the real key never appears anywhere in the reported output
-    expect(result.problems.join("\n")).not.toContain(VALID_ADAPTER.apiKey);
-    expect(log.lines.join("\n")).not.toContain(VALID_ADAPTER.apiKey);
+    expect(result.problems.join("\n")).not.toContain(VALID_UPSTREAM.apiKey);
+    expect(log.lines.join("\n")).not.toContain(VALID_UPSTREAM.apiKey);
   }
 });
 
@@ -522,34 +522,34 @@ test("a valid tlsFingerprint pin is accepted and whitespace-stripped in the norm
   // the pin is not a credential — a problem line may echo it to expose typos
   const wrapped = `  ${VALID_PIN.slice(0, 22)}\n${VALID_PIN.slice(22)}  `;
   const result = loadConfig({
-    path: configFixture(validConfig([{ ...VALID_ADAPTER, tlsFingerprint: wrapped }])),
+    path: configFixture(validConfig([{ ...VALID_UPSTREAM, tlsFingerprint: wrapped }])),
   });
 
   expect(result.ok).toBe(true);
   if (!result.ok) return;
-  expect(result.config.adapters[0]?.tlsFingerprint).toBe(VALID_PIN);
+  expect(result.config.upstreams[0]?.tlsFingerprint).toBe(VALID_PIN);
 });
 
 test("an empty or whitespace-only tlsFingerprint means no pin", () => {
   for (const tlsFingerprint of ["", "   \n\t "]) {
     const result = loadConfig({
-      path: configFixture(validConfig([{ ...VALID_ADAPTER, tlsFingerprint }])),
+      path: configFixture(validConfig([{ ...VALID_UPSTREAM, tlsFingerprint }])),
     });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.config.adapters[0]?.tlsFingerprint).toBe("");
+    expect(result.config.upstreams[0]?.tlsFingerprint).toBe("");
   }
 });
 
 test("a tlsFingerprint on a plain-http baseUrl is valid (and inert)", () => {
   const result = loadConfig({
-    path: configFixture(validConfig([{ ...VALID_ADAPTER, baseUrl: "http://localhost:11434/v1", tlsFingerprint: VALID_PIN }])),
+    path: configFixture(validConfig([{ ...VALID_UPSTREAM, baseUrl: "http://localhost:11434/v1", tlsFingerprint: VALID_PIN }])),
   });
 
   expect(result.ok).toBe(true);
   if (!result.ok) return;
-  expect(result.config.adapters[0]?.tlsFingerprint).toBe(VALID_PIN);
+  expect(result.config.upstreams[0]?.tlsFingerprint).toBe(VALID_PIN);
 });
 
 test("a syntactically wrong tlsFingerprint is rejected naming the rule", () => {
@@ -560,13 +560,13 @@ test("a syntactically wrong tlsFingerprint is rejected naming the rule", () => {
     "A".repeat(42), // decodes to 31 bytes, not 32
   ]) {
     const result = loadConfig({
-      path: configFixture(validConfig([{ ...VALID_ADAPTER, tlsFingerprint }])),
+      path: configFixture(validConfig([{ ...VALID_UPSTREAM, tlsFingerprint }])),
     });
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.problems).toHaveLength(1);
-    expect(result.problems[0]).toContain("adapters[0]: tlsFingerprint");
+    expect(result.problems[0]).toContain("upstreams[0]: tlsFingerprint");
     expect(result.problems[0]).toContain("must be base64 (standard alphabet) decoding to exactly 32 bytes");
     // the configured value is never echoed into the problem line
     expect(result.problems[0]).not.toContain(tlsFingerprint);
@@ -576,13 +576,13 @@ test("a syntactically wrong tlsFingerprint is rejected naming the rule", () => {
 test("a non-string tlsFingerprint is rejected", () => {
   for (const tlsFingerprint of [42, null, true, ["ab"]]) {
     const result = loadConfig({
-      path: configFixture(validConfig([{ ...VALID_ADAPTER, tlsFingerprint }])),
+      path: configFixture(validConfig([{ ...VALID_UPSTREAM, tlsFingerprint }])),
     });
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.problems).toEqual([
-      "adapters[0]: tlsFingerprint must be a string — base64 of the SHA-256 SPKI digest (32 bytes)",
+      "upstreams[0]: tlsFingerprint must be a string — base64 of the SHA-256 SPKI digest (32 bytes)",
     ]);
   }
 });
@@ -607,7 +607,7 @@ test("all problems of one config are collected, printed, and returned together",
     listern: "typo-key", // unknown top-level key
     logLevel: "loud", // invalid logLevel
     listen: "localhost", // malformed listen
-    adapters: [
+    upstreams: [
       // unknown key, unknown type, bad id, bad baseUrl, empty apiKey
       { type: "azure", id: "Bad_ID", baseUrl: "ftp://x/v1", apiKey: "", retry: true },
       // entry 1 is valid
@@ -631,13 +631,13 @@ test("all problems of one config are collected, printed, and returned together",
   expect(all).toContain('unknown top-level key "listern"');
   expect(all).toContain('listen must be a "host:port" string');
   expect(all).toContain("logLevel must be one of: trace, debug, info, warning, error, none");
-  expect(all).toContain('adapters[0]: unknown key "retry"');
-  expect(all).toContain('adapters[0]: unknown adapter type "azure"');
-  expect(all).toContain('adapter id "Bad_ID" must match ^[a-z0-9][a-z0-9-]*$');
-  expect(all).toContain('adapters[0]: baseUrl "ftp://x/v1" must be an absolute http(s) URL');
-  expect(all).toContain("adapters[0]: apiKey must be a non-empty string");
-  expect(all).toContain('duplicate adapter id "acme" (entries 1, 2)');
-  expect(all).toContain("adapters[4] must be a JSON object");
+  expect(all).toContain('upstreams[0]: unknown key "retry"');
+  expect(all).toContain('upstreams[0]: unknown upstream type "azure"');
+  expect(all).toContain('upstream id "Bad_ID" must match ^[a-z0-9][a-z0-9-]*$');
+  expect(all).toContain('upstreams[0]: baseUrl "ftp://x/v1" must be an absolute http(s) URL');
+  expect(all).toContain("upstreams[0]: apiKey must be a non-empty string");
+  expect(all).toContain('duplicate upstream id "acme" (entries 1, 2)');
+  expect(all).toContain("upstreams[4] must be a JSON object");
 
   // one log line per problem — and no secret material anywhere
   expect(log.lines).toEqual(result.problems);
@@ -659,7 +659,7 @@ test("omitted listen and logLevel get their documented defaults", () => {
   expect(result.config.listen).toBe("127.0.0.1:8080");
   expect(result.config.logLevel).toBe(DEFAULT_LOG_LEVEL);
   expect(result.config.logLevel).toBe("info");
-  expect(result.config.adapters).toEqual([
+  expect(result.config.upstreams).toEqual([
     { type: "openai-compatible", id: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "sk-valid-secret" },
   ]);
 });
@@ -674,8 +674,8 @@ test("a single trailing slash is stripped from baseUrl at load", () => {
 
   expect(result.ok).toBe(true);
   if (!result.ok) return;
-  expect(result.config.adapters[0]?.baseUrl).toBe("https://api.openai.com/v1");
-  expect(result.config.adapters[1]?.baseUrl).toBe("https://api.openai.com/v1");
+  expect(result.config.upstreams[0]?.baseUrl).toBe("https://api.openai.com/v1");
+  expect(result.config.upstreams[1]?.baseUrl).toBe("https://api.openai.com/v1");
 });
 
 test("normalizeBaseUrl strips exactly one trailing slash", () => {
@@ -732,7 +732,7 @@ test("loadConfigOrExit prints each problem as a component:'config' error line, t
   const configJson = JSON.stringify({
     listern: "typo-key",
     logLevel: "loud",
-    adapters: [VALID_ADAPTER],
+    upstreams: [VALID_UPSTREAM],
   });
 
   // the same file loaded in-process: the lines the child must print
@@ -781,7 +781,7 @@ test("loadConfigOrExit returns the normalized config and prints nothing on succe
   expect(reported).toEqual({
     listen: "127.0.0.1:8080",
     logLevel: "info",
-    adapters: [
+    upstreams: [
       { type: "openai-compatible", id: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "sk-valid-secret" },
     ],
   });
