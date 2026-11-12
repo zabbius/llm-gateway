@@ -10,7 +10,7 @@ A growing share of upstream LLM deployments lives behind self-signed or internal
 
 The parent deployment (c0wrk) faced the same question and answered it with ADR-054: pin the upstream certificate's SPKI digest per connection. This gateway adopts the same pin semantics and field name (`tlsFingerprint`) as that decision, so operators can reuse their pins and their runbooks across both systems.
 
-There is also a mechanism constraint. Empirically, on Bun 1.4.4, `fetch`'s `tls.checkServerIdentity` callback never runs when the certificate chain fails verification first — a pin-only callback cannot by itself accept a self-signed chain. Any pinning design on Bun must make the chain verifiable (by anchoring it at a known certificate) before the per-connection pin check can get a word in.
+There is also a mechanism constraint. Empirically, on Bun 1.4.4, `fetch`'s TLS layer cannot express "accept the pinned key and nothing else": the `tls.checkServerIdentity` callback never runs when chain verification fails first, and a non-self-signed leaf handed to `tls.ca` cannot anchor its own chain — so an upstream that presents its leaf without a full chain (the common internal-PKI deployment) is unpinnable through fetch at all. Any pinning design on Bun must therefore open the upstream connection itself and enforce the pin on that connection, outside fetch's TLS layer.
 
 ## Decision
 
@@ -18,11 +18,9 @@ The `adapters[]` config entries gain an optional `tlsFingerprint` field: `base64
 
 A configured pin means exactly one thing, with no softer mode: **only the pinned key is accepted, and every mismatch fails closed.** The mechanism (`src/adapters/tls-pinning.ts`, enforced by `OpenAICompatibleAdapter.upstreamFetch`, verified empirically on Bun 1.4.4) has three parts:
 
-1. **Probe** — a bare TLS handshake (`node:tls.connect`, verification disabled: no HTTP request, no credentials — the fingerprint is what is being fetched) reads the served leaf certificate and rejects it when its pin does not match the configuration.
-2. **Anchor** — the probed leaf is handed to `fetch` as its `tls.ca`, so the chain of the actually-served certificate must terminate at exactly that leaf; a rotated certificate fails closed.
-3. **Per-connection veto** — a pin-only `tls.checkServerIdentity` on the same `fetch` re-checks the SPKI pin per connection; being a custom callback, it replaces the built-in hostname check entirely — the pin is the only identity requirement.
-
-The probed leaf PEM is cached per adapter as an optimization. Any TLS failure invalidates the cache, and the next request re-probes: a certificate renewed with the same key pair matches the pin again, a key change keeps failing closed. The probe never retries within a failed request — the no-retry invariant holds (`specs/contracts/gateway-upstream.md`).
+1. **Pinned connection** — the adapter opens the upstream TLS connection itself (`node:tls.connect`, verification disabled: a pinned chain need not be publicly trusted), reads the served leaf certificate, and refuses the connection unless its pin matches the configuration — before any request byte, hence any credential, is written.
+2. **Plain HTTP over the verified socket** — the request then runs over that socket via `node:http` (`createConnection`), and the response surfaces as the same `Response` the unpinned fetch path returns: relay semantics, SSE streaming included, are unchanged.
+3. **No state** — every pinned request verifies its own connection; nothing is cached between requests. A certificate renewed with the same key pair keeps matching the pin, a key change fails closed on the next request. A pinned request is a single attempt — a failed pinned connection surfaces its mapped error and never retries within the same client request (`specs/contracts/gateway-upstream.md`).
 
 A TLS verification failure on a pinned upstream is its own client-visible fact: a synthesized `502` envelope with `type: "api_error"`, `code: "upstream_tls_error"` (`src/httpapi/errors.ts`), whose message states the fact of the mismatch and nothing else — no certificate bytes, subject, or DNS names. Without a pin, TLS failures keep the pre-existing `504 upstream_timeout` mapping. A pin on a plain-http `baseUrl` stays valid config but is inert.
 
@@ -34,20 +32,20 @@ Positive:
 
 - Self-signed and internal-PKI upstreams become usable through one config field, without ever disabling verification: there is deliberately no mode that accepts an arbitrary certificate.
 - Pins survive routine certificate renewal on the same key pair — rotation of the certificate does not break the config; rotation of the key does, by design, until the operator re-pins.
-- Every mismatch branch fails closed (probe comparison, chain-not-terminating-at-pinned-leaf, per-connection veto) and reports exactly one new error code clients can branch on.
+- Every mismatch fails closed at the single decision point — the per-connection pin check, enforced before any request byte is written — and reports exactly one new error code clients can branch on.
 - No-pin behavior and plain-http behavior are byte-identical to the pre-ADR gateway.
 
 Negative:
 
 - Key rotation on a pinned upstream breaks the adapter until the operator recomputes and redeploys the pin — an intentional maintenance cost that keeps the trust explicit.
-- The first request (or the first request after any TLS failure) on a pinned adapter pays one extra handshake; a probe timeout surfaces as upstream unavailability.
-- The mechanism is Bun-specific (the `checkServerIdentity` semantics above); a runtime upgrade that changes them requires re-verifying the three-part design.
+- Every pinned request pays its own TLS handshake — the pinned path does not pool connections; a handshake-budget expiry surfaces as upstream unavailability.
+- The mechanism is Bun-specific (the `fetch` TLS semantics above, plus `node:http`'s `createConnection`); a runtime upgrade that changes them requires re-verifying the design.
 - `upstream_tls_error` joins the client-visible error vocabulary of `specs/contracts/client-gateway.md` — a public surface extension.
 
 ## Alternatives Considered
 
 - **`skipVerify` flag** (per-adapter `rejectUnauthorized: false`): rejected — it accepts any certificate presented, which is a standing MITM window guarded only by network topology; it also contradicts the security-model invariants on upstream trust.
 - **Pin the whole certificate** (hash of the full DER): rejected — it breaks on every routine renewal (validity dates change), turning a non-event into an incident; the SPKI binds the key pair, which is the identity that actually matters.
-- **`checkServerIdentity`-only pin**: rejected — empirically unreachable on Bun 1.4.4: the callback never runs when chain verification fails first, so a self-signed upstream would always fail; the probe-and-anchor steps exist precisely to make the callback meaningful.
+- **`checkServerIdentity`-only pin** (or a `ca`-anchored fetch): rejected — empirically unreachable on Bun 1.4.4: the callback never runs when chain verification fails first, and a non-self-signed leaf cannot anchor its own chain in `tls.ca` ("unable to verify the first certificate"), so leaf-only internal-PKI upstreams fail no matter how the pin is configured; the adapter must own the connection to make the pin check meaningful.
 - **Warn-and-continue on mismatch** (log the mismatch, proceed with the handshake): rejected — a pin that warns is not a pin; it converts a security signal into log noise while still relaying traffic through an unverified channel. This is a deliberate deviation from the c0wrk ADR-054 analog, which chose warn semantics; here strict reject won because the gateway relays client bodies it cannot inspect.
 - **Per-request probe without cache**: rejected — it doubles handshakes on every request and adds probe latency to each one; the cached leaf with TLS-failure invalidation gets the same freshness where it matters (immediately after any TLS failure) at a fraction of the cost.

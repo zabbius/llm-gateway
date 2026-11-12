@@ -16,9 +16,9 @@ import { join } from "node:path";
 import type pino from "pino";
 import { OpenAICompatibleAdapter } from "./openai-compatible.ts";
 import {
+  assertPinnedCertificate,
   computeSpkiPin,
   isTlsFailure,
-  pinnedTlsOptions,
   probePinnedLeaf,
   type PinnedLeaf,
   UpstreamTlsPinError,
@@ -40,13 +40,16 @@ const ROTATED_DER = derOf("pinned-test-cert-rotated.pem");
 const OTHER_DER = derOf("pinned-test-cert-other.pem");
 
 /** One local TLS upstream serving the given fixture cert/key pair. */
-function startTlsUpstream(certFile: string, handler?: (req: Request) => Response | Promise<Response>): {
+function startTlsUpstream(
+  certFile: string,
+  handler?: (req: Request) => Response | Promise<Response>,
+  keyFile = certFile.includes("other") ? "pinned-test-other-key.pem" : "pinned-test-key.pem",
+): {
   baseUrl: string;
   requests: string[];
   stop: () => void;
 } {
   const requests: string[] = [];
-  const keyFile = certFile.includes("other") ? "pinned-test-other-key.pem" : "pinned-test-key.pem";
   const server = Bun.serve({
     port: 0,
     tls: {
@@ -182,24 +185,27 @@ describe("computeSpkiPin", () => {
   });
 });
 
-describe("pinnedTlsOptions", () => {
-  const { checkServerIdentity } = pinnedTlsOptions("PEM-PLACEHOLDER", PIN_CERT);
-
-  test("accepts the pinned certificate regardless of the hostname (pin-only identity)", () => {
-    expect(checkServerIdentity("attacker.example", { raw: CERT_DER })).toBeUndefined();
+describe("assertPinnedCertificate", () => {
+  test("accepts the pinned certificate", () => {
+    expect(() => assertPinnedCertificate(CERT_DER, PIN_CERT)).not.toThrow();
   });
 
   test("vetoes a certificate whose key differs, with the fact and nothing else", () => {
-    const error = checkServerIdentity("localhost", { raw: OTHER_DER });
-    expect(error).toBeInstanceOf(UpstreamTlsPinError);
-    expect(error?.message).toBe("upstream TLS certificate pin mismatch");
-    expect(error?.message).not.toContain("internal"); // no subject, no DNS names
+    let thrown: unknown;
+    try {
+      assertPinnedCertificate(OTHER_DER, PIN_CERT);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(UpstreamTlsPinError);
+    expect((thrown as Error).message).toBe("upstream TLS certificate pin mismatch");
+    expect((thrown as Error).message).not.toContain("internal"); // no subject, no DNS names
   });
 
   test("vetoes an unparsable certificate and a missing certificate", () => {
-    const truncated = checkServerIdentity("localhost", { raw: CERT_DER.subarray(0, CERT_DER.length - 8) });
-    expect(truncated?.message).toContain("could not be parsed");
-    expect(checkServerIdentity("localhost", {})?.message).toContain("presented no certificate");
+    const truncated = CERT_DER.subarray(0, CERT_DER.length - 8);
+    expect(() => assertPinnedCertificate(truncated, PIN_CERT)).toThrow(/could not be parsed/);
+    expect(() => assertPinnedCertificate(undefined, PIN_CERT)).toThrow(/presented no certificate/);
   });
 });
 
@@ -276,7 +282,7 @@ describe("probePinnedLeaf", () => {
 // ---------------------------------------------------------------------------
 
 describe("OpenAICompatibleAdapter TLS pinning", () => {
-  test("forward() relays through the pinned connection; the probe sends no HTTP request", async () => {
+  test("forward() relays through the pinned connection — exactly one upstream request", async () => {
     const upstream = startTlsUpstream("pinned-test-cert.pem");
     tlsServers.push(upstream);
     const { adapter } = makeAdapter(upstream.baseUrl, PIN_CERT);
@@ -284,7 +290,7 @@ describe("OpenAICompatibleAdapter TLS pinning", () => {
     const response = await adapter.forward(proxyRequest());
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ choices: [{ message: { content: "ok" } }] });
-    expect(upstream.requests).toEqual(["/v1/chat/completions"]); // one HTTP request, no probe traffic
+    expect(upstream.requests).toEqual(["/v1/chat/completions"]); // only the real request, no extra traffic
   });
 
   test("a wrong pin fails closed with 502 upstream_tls_error — the fact, not the certificate", async () => {
@@ -306,41 +312,24 @@ describe("OpenAICompatibleAdapter TLS pinning", () => {
     expect(upstream.requests).toHaveLength(0); // credentials never reach a mismatching upstream
   });
 
-  test("one upstream attempt per request: a TLS failure is never retried inside the failing request", async () => {
-    const upstream = startTlsUpstream("pinned-test-cert.pem");
+  test("an intermediate-signed certificate served WITHOUT its chain is pinned successfully", async () => {
+    // the regression scenario: fetch cannot pin this upstream at all — a
+    // non-self-signed leaf alone cannot anchor its own chain ("unable to
+    // verify the first certificate") — while the per-connection pin check
+    // needs no chain whatsoever: the key is the identity
+    const upstream = startTlsUpstream(
+      "pinned-test-chain-leaf.pem",
+      undefined,
+      "pinned-test-chain-leaf-key.pem",
+    );
     tlsServers.push(upstream);
-    const { adapter } = makeAdapter(upstream.baseUrl, PIN_CERT);
+    const leafPin = computeSpkiPin(derOf("pinned-test-chain-leaf.pem"));
+    const { adapter } = makeAdapter(upstream.baseUrl, leafPin);
 
-    // prime the leaf cache
-    const first = await adapter.forward(proxyRequest());
-    expect(first.status).toBe(200);
+    const response = await adapter.forward(proxyRequest());
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ choices: [{ message: { content: "ok" } }] });
     expect(upstream.requests).toEqual(["/v1/chat/completions"]);
-
-    // the next request's fetch fails at the TLS level: the adapter must
-    // surface the failure instead of re-probing and retrying within the
-    // same request (one attempt per client request — no retries)
-    const realFetch = globalThis.fetch;
-    let attempts = 0;
-    globalThis.fetch = (async (): Promise<Response> => {
-      attempts += 1;
-      throw new Error("certificate verify failed");
-    }) as unknown as typeof fetch;
-    let failing: Response;
-    try {
-      failing = await adapter.forward(proxyRequest());
-    } finally {
-      globalThis.fetch = realFetch;
-    }
-    expect(failing.status).toBe(502);
-    const body = (await failing.json()) as { error: { code: string } };
-    expect(body.error.code).toBe("upstream_tls_error");
-    expect(attempts).toBe(1);
-
-    // the failed request invalidated the leaf cache: the NEXT request
-    // re-probes against the real upstream and relays again
-    const reArmed = await adapter.forward(proxyRequest());
-    expect(reArmed.status).toBe(200);
-    expect(upstream.requests).toEqual(["/v1/chat/completions", "/v1/chat/completions"]);
   });
 
   test("SSE streams through the pinned path chunk-by-chunk", async () => {
@@ -377,6 +366,19 @@ describe("OpenAICompatibleAdapter TLS pinning", () => {
     expect(body.error.code).toBe("upstream_timeout");
   });
 
+  test("a pin on a plain-http baseUrl is inert: the request relays without TLS pinning", async () => {
+    const upstream = Bun.serve({
+      port: 0,
+      fetch: () => Response.json({ choices: [{ message: { content: "ok" } }] }),
+    });
+    tlsServers.push({ stop: () => upstream.stop(true) });
+    const { adapter } = makeAdapter(`http://localhost:${upstream.port}/v1`, PIN_CERT);
+
+    const response = await adapter.forward(proxyRequest());
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ choices: [{ message: { content: "ok" } }] });
+  });
+
   test("listModels() with a wrong pin degrades with the pin mismatch in its reason", async () => {
     const upstream = startTlsUpstream("pinned-test-cert.pem");
     tlsServers.push(upstream);
@@ -397,31 +399,25 @@ describe("OpenAICompatibleAdapter TLS pinning", () => {
     expect(upstream.requests).toHaveLength(0);
   });
 
-  test("a renewal on the same key pair: chain mismatch once, then the re-probe re-arms the pin", async () => {
+  test("a renewal on the same key pair keeps the pinned path working — the pin binds the key", async () => {
     const renewed = startTlsUpstream("pinned-test-cert.pem"); // serves the original cert
     tlsServers.push(renewed);
     const port = Number(new URL(renewed.baseUrl).port);
     const { adapter } = makeAdapter(renewed.baseUrl, PIN_CERT);
 
-    // first request primes the leaf cache with the original certificate
-    const first = await adapter.forward(proxyRequest());
-    expect(first.status).toBe(200);
+    const before = await adapter.forward(proxyRequest());
+    expect(before.status).toBe(200);
 
-    // the upstream renews its certificate — same key pair, new certificate
+    // the upstream renews its certificate — same key pair, new certificate.
+    // No cached anchor exists to break: every request checks the pin of the
+    // freshly served certificate, and the SPKI is unchanged
     renewed.stop();
     const rotated = startTlsUpstreamOnPort(port, "pinned-test-cert-rotated.pem");
     tlsServers.push(rotated);
 
-    // the served chain no longer terminates at the cached leaf: fail closed…
-    const mismatch = await adapter.forward(proxyRequest());
-    expect(mismatch.status).toBe(502);
-    const body = (await mismatch.json()) as { error: { code: string } };
-    expect(body.error.code).toBe("upstream_tls_error");
-
-    // …the cache is invalidated, the next probe sees the renewed certificate
-    // whose SPKI still matches the pin, and the pinned path re-arms itself
-    const reArmed = await adapter.forward(proxyRequest());
-    expect(reArmed.status).toBe(200);
+    const after = await adapter.forward(proxyRequest());
+    expect(after.status).toBe(200);
+    await expect(after.json()).resolves.toEqual({ choices: [{ message: { content: "ok" } }] });
   });
 });
 

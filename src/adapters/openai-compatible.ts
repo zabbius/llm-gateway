@@ -20,11 +20,11 @@
  */
 import type pino from "pino";
 import type { Adapter, AdapterConfig, ModelEntry, ProxyRequest } from "./adapter.ts";
-import { isTlsFailure, pinnedTlsOptions, probePinnedLeaf } from "./tls-pinning.ts";
+import { isTlsFailure, pinnedUpstreamRequest } from "./tls-pinning.ts";
 
 /** The `listModels()` probe inside `connect()` (startup; non-fatal on expiry). */
 export const CONNECT_PROBE_TIMEOUT_MS = 10_000;
-/** The bare TLS handshake that pins an upstream before its first request (ADR-005). */
+/** The pinned TLS handshake budget of one upstream connection (ADR-005). */
 export const PIN_PROBE_TIMEOUT_MS = 10_000;
 /** Non-streaming `forward()` end-to-end; for streams — until response headers arrive. */
 export const FORWARD_TIMEOUT_MS = 120_000;
@@ -79,8 +79,6 @@ export class OpenAICompatibleAdapter implements Adapter {
   private readonly apiKey: string;
   /** Non-empty config pin (ADR-005); undefined — and never enforced — when absent/empty. */
   private readonly tlsFingerprint: string | undefined;
-  /** Probed leaf certificate PEM cache; invalidated on any TLS failure (re-probe next request). */
-  private pinnedLeaf: { pem: string; pin: string } | undefined;
   private readonly logger: pino.Logger;
   private readonly timeouts: Required<OpenAICompatibleTimeouts>;
 
@@ -287,33 +285,19 @@ export class OpenAICompatibleAdapter implements Adapter {
 
   /**
    * The adapter's only upstream fetch. Without a pin it is plain `fetch`;
-   * with a pin (ADR-005) it first ensures a probed leaf certificate — a
-   * bare TLS handshake whose SPKI pin matched the config, cached until a
-   * TLS failure invalidates it — and opens the request with that leaf as
-   * the only trust anchor plus a pin-only `checkServerIdentity`.
+   * with a pin (ADR-005) the request runs over a connection the pinning
+   * module verifies itself (`pinnedUpstreamRequest`): fetch's TLS layer
+   * cannot express pin-only semantics, so the socket is opened there, its
+   * certificate's SPKI pin is checked before any byte — hence any
+   * credential — is written, and the verified socket carries the request.
    */
-  private async upstreamFetch(url: string, init: UpstreamRequestInit): Promise<Response> {
+  private upstreamFetch(url: string, init: UpstreamRequestInit): Promise<Response> {
     const pin = this.tlsFingerprint;
-    if (pin === undefined) {
+    // a pin on a plain-http baseUrl stays valid config but is inert (ADR-005)
+    if (pin === undefined || !url.startsWith("https:")) {
       return fetch(url, init);
     }
-    let leaf = this.pinnedLeaf;
-    if (leaf === undefined) {
-      leaf = await probePinnedLeaf(url, this.timeouts.pinProbeMs, pin, init.signal);
-      this.pinnedLeaf = leaf;
-    }
-    try {
-      return await fetch(url, { ...init, tls: pinnedTlsOptions(leaf.pem, pin) } as RequestInit);
-    } catch (error) {
-      // the served certificate stopped matching the pin (rotation, MITM):
-      // drop the cached leaf so the next request re-probes — a renewal with
-      // the same key pair matches the pin again on that probe
-      if (isTlsFailure(error)) {
-        this.pinnedLeaf = undefined;
-        this.logger.warn({ reason: describe(error) }, "pinned upstream TLS verification failed — leaf cache invalidated");
-      }
-      throw error;
-    }
+    return pinnedUpstreamRequest(url, init, pin, this.timeouts.pinProbeMs);
   }
 
   /** Upstream TLS verification failed → synthesized `502 upstream_tls_error`. */

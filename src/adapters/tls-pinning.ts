@@ -6,38 +6,43 @@
  * behavior (system CA pool) untouched. There is deliberately no mode that
  * accepts an arbitrary certificate: every mismatch fails closed.
  *
- * Enforcement on Bun (verified empirically on 1.4.4): `fetch`'s
- * `tls.checkServerIdentity` never runs when the certificate chain fails to
- * verify, so pinning a self-signed upstream needs the chain to pass first.
- * The module therefore
+ * Enforcement on Bun (verified empirically on 1.4.4): the TLS layer inside
+ * `fetch` cannot express "accept the pinned key and nothing else". Its
+ * `tls.checkServerIdentity` never runs when chain verification fails, and a
+ * non-self-signed leaf passed as `tls.ca` cannot anchor its own chain — an
+ * upstream that presents its leaf without a full chain (the common
+ * internal-PKI deployment) is unpinnable through fetch no matter what the
+ * config says. The pinned path therefore bypasses fetch's TLS layer:
  *
- *   1. probes the upstream with a bare TLS handshake
- *      (`node:tls.connect`, `rejectUnauthorized: false` — no HTTP request is
- *      sent, no credential is involved; the fingerprint IS what is fetched),
- *      computes the pin, and refuses the leaf when it does not match the
- *      configured pin;
- *   2. hands the probed leaf certificate to `fetch` as its `tls.ca`, so the
- *      chain of the actually-served certificate must terminate at exactly
- *      that leaf — a rotated certificate fails closed;
- *   3. installs a pin-only `tls.checkServerIdentity` on the same fetch —
- *      it runs after the chain verified, re-checks the SPKI pin per
- *      connection, and (being a custom callback) replaces the built-in
- *      hostname check entirely: the pin is the only identity requirement.
+ *   1. the upstream connection is opened here (`node:tls.connect`,
+ *      `rejectUnauthorized: false` — a pinned chain need not be publicly
+ *      trusted), the served leaf certificate is read, and the connection is
+ *      refused unless its pin matches the configuration — before any
+ *      request byte, hence any credential, is written;
+ *   2. the verified socket then carries a plain `node:http` request
+ *      (`createConnection`), whose response is surfaced as the same
+ *      `Response` the unpinned fetch path returns — relay semantics,
+ *      SSE streaming included, are unchanged.
  *
- * The probed leaf PEM is cached on the caller's side as an optimization; a
- * TLS failure invalidates the cache (`isTlsFailure`) so the next request
- * re-probes — a certificate renewed with the same key pair keeps matching
- * the pin, a key change fails closed on the probe.
+ * Every pinned request verifies its own connection: a certificate renewed
+ * with the same key pair keeps matching the pin, a key change fails closed
+ * on the next request. Nothing is cached between requests.
+ *
+ * The bare-handshake probe (`fetchLeafCertificate`, `probePinnedLeaf`)
+ * remains for the `tools/tls-fingerprint.ts` CLI — it fetches exactly the
+ * pin: no HTTP request, no credentials.
  */
 import crypto from "node:crypto";
+import http from "node:http";
 import { isIP } from "node:net";
+import { Readable } from "node:stream";
 import tls from "node:tls";
 
 /**
- * A TLS verification failure on the pinned path: the probe's pin check, the
- * per-connection `checkServerIdentity` veto, or a chain that does not
- * terminate at the pinned leaf. The adapter maps this class to the
- * `upstream_tls_error` envelope; anything else stays "unreachable" (504).
+ * A TLS verification failure on the pinned path: a pin decision (mismatch,
+ * missing or unparsable certificate) or a pin on a plain-http endpoint.
+ * The adapter maps this class to the `upstream_tls_error` envelope;
+ * anything else stays "unreachable" (504).
  */
 export class UpstreamTlsPinError extends Error {
   constructor(message: string) {
@@ -45,6 +50,9 @@ export class UpstreamTlsPinError extends Error {
     this.name = "UpstreamTlsPinError";
   }
 }
+
+/** The pin-mismatch fact — no certificate bytes, subject, or DNS names (ADR-005). */
+export const PIN_MISMATCH_MESSAGE = "upstream TLS certificate pin mismatch";
 
 /**
  * Compute the pin of one certificate — accepted as an `X509Certificate` or
@@ -58,6 +66,26 @@ export function computeSpkiPin(certificate: crypto.X509Certificate | Buffer | Ui
   return crypto.createHash("sha256").update(spki).digest("base64");
 }
 
+/**
+ * The fail-closed pin decision for one served certificate: accept only the
+ * configured key, refuse anything else — and the absence or unparsability
+ * of a certificate — with the fact of the refusal and nothing else.
+ */
+export function assertPinnedCertificate(raw: Buffer | undefined, expectedPin: string): void {
+  if (raw === undefined || raw.length === 0) {
+    throw new UpstreamTlsPinError("the upstream presented no certificate to pin");
+  }
+  let actual: string;
+  try {
+    actual = computeSpkiPin(raw);
+  } catch {
+    throw new UpstreamTlsPinError("the upstream TLS certificate could not be parsed");
+  }
+  if (actual !== expectedPin) {
+    throw new UpstreamTlsPinError(PIN_MISMATCH_MESSAGE);
+  }
+}
+
 /** Wrap DER bytes as a PEM CERTIFICATE block (64-character base64 lines). */
 function pemFromDer(raw: Buffer): string {
   const body = raw.toString("base64").replace(/(.{64})/g, "$1\n");
@@ -65,9 +93,9 @@ function pemFromDer(raw: Buffer): string {
 }
 
 /**
- * True when an upstream failure is a TLS verification failure (pin veto,
- * certificate chain) rather than plain unreachability — the cache
- * invalidation and the error mapping both branch on this.
+ * True when an upstream failure is a TLS verification failure (a pin
+ * decision, a plain-http pin) rather than plain unreachability — the
+ * adapter's error mapping branches on this.
  */
 export function isTlsFailure(error: unknown): boolean {
   if (error instanceof UpstreamTlsPinError) return true;
@@ -76,43 +104,10 @@ export function isTlsFailure(error: unknown): boolean {
 }
 
 export interface PinnedLeaf {
-  /** PEM of the probed leaf certificate (the fetch `ca` anchor). */
+  /** PEM of the served leaf certificate. */
   pem: string;
   /** The leaf's pin — `base64(SHA-256(SPKI DER))`. */
   pin: string;
-}
-
-/**
- * The fetch `tls` options for one pinned upstream: the probed leaf as the
- * only trust anchor, plus a pin-only `checkServerIdentity` (which, as a
- * custom callback, replaces the built-in hostname check — the pin is the
- * only identity requirement, per ADR-005).
- */
-export function pinnedTlsOptions(pem: string, expectedPin: string): {
-  ca: string;
-  checkServerIdentity: (hostname: string, certificate: { raw?: Buffer }) => Error | undefined;
-} {
-  return {
-    ca: pem,
-    checkServerIdentity: (_hostname, certificate) => {
-      const raw = certificate.raw;
-      if (raw === undefined) {
-        return new UpstreamTlsPinError("upstream TLS certificate pin mismatch: the server presented no certificate");
-      }
-      let actual: string;
-      try {
-        actual = computeSpkiPin(raw);
-      } catch {
-        return new UpstreamTlsPinError("upstream TLS certificate pin mismatch: the certificate could not be parsed");
-      }
-      if (actual !== expectedPin) {
-        // the fact of the mismatch and nothing else — no certificate bytes,
-        // no subject, no DNS names (ADR-005)
-        return new UpstreamTlsPinError("upstream TLS certificate pin mismatch");
-      }
-      return undefined;
-    },
-  };
 }
 
 /**
@@ -179,8 +174,7 @@ export function fetchLeafCertificate(url: string, timeoutMs: number, signal?: Ab
 
 /**
  * The served leaf certificate, ACCEPTED ONLY WHEN its pin matches
- * `expectedPin` — the fail-closed probe the pinned adapter path uses before
- * its first request.
+ * `expectedPin` — the fail-closed check the pin-fingerprint CLI uses.
  */
 export async function probePinnedLeaf(
   url: string,
@@ -190,9 +184,160 @@ export async function probePinnedLeaf(
 ): Promise<PinnedLeaf> {
   const leaf = await fetchLeafCertificate(url, timeoutMs, signal);
   if (leaf.pin !== expectedPin) {
-    // the fact of the mismatch and nothing else — no certificate bytes,
-    // no subject, no DNS names (ADR-005)
-    throw new UpstreamTlsPinError("upstream TLS certificate pin mismatch");
+    throw new UpstreamTlsPinError(PIN_MISMATCH_MESSAGE);
   }
   return leaf;
+}
+
+/**
+ * One upstream request over a pinned connection (ADR-005): the TLS socket is
+ * opened here and accepted only when the served certificate's SPKI pin
+ * matches `expectedPin` — checked before any request byte is written, so
+ * credentials never reach a mismatching upstream. The verified socket then
+ * carries the HTTP request; the response is surfaced as a standard
+ * `Response` (streaming body, SSE included).
+ *
+ * Timeouts, aborts, and network failures surface as plain errors
+ * (unreachable/timeout semantics); only pin decisions throw
+ * `UpstreamTlsPinError`.
+ */
+export async function pinnedUpstreamRequest(
+  url: string,
+  init: {
+    method: string;
+    headers: Record<string, string>;
+    body?: ReadableStream<Uint8Array>;
+    signal: AbortSignal;
+  },
+  expectedPin: string,
+  handshakeTimeoutMs: number,
+): Promise<Response> {
+  if (init.signal.aborted) {
+    throw new Error("the upstream request was aborted before it started");
+  }
+  let target: URL;
+  try {
+    target = new URL(url);
+  } catch {
+    throw new UpstreamTlsPinError(`cannot enforce a TLS pin: "${url}" is not a valid URL`);
+  }
+  if (target.protocol !== "https:") {
+    throw new UpstreamTlsPinError("cannot enforce a TLS pin on a plain-http endpoint");
+  }
+  const host = target.hostname.replace(/^\[|\]$/g, ""); // unwrap IPv6 literals
+  const port = target.port === "" ? 443 : Number(target.port);
+  // SNI carries hostnames, never IP literals (node:tls rejects an IP servername)
+  const servername = isIP(host) === 0 ? host : undefined;
+
+  const socket = await openPinnedSocket({ host, port, servername }, expectedPin, handshakeTimeoutMs, init.signal);
+
+  return await new Promise<Response>((resolve, reject) => {
+    const request = http.request(
+      {
+        host,
+        port,
+        path: `${target.pathname}${target.search}`,
+        method: init.method,
+        // the explicit Host mirrors what fetch would send (bracketed IPv6
+        // literals included); node's own Host would miss the brackets.
+        // No `agent: false` here: Bun's node:http hangs up a createConnection
+        // request when agent is disabled — the default agent is consumed
+        // once per socket anyway
+        headers: { ...init.headers, host: target.host },
+        createConnection: () => socket,
+      },
+      (upstream) => {
+        const headers = new Headers();
+        // framing headers are re-derived for the relayed body
+        const skip = new Set(["connection", "keep-alive", "transfer-encoding", "content-length"]);
+        for (let i = 0; i + 1 < upstream.rawHeaders.length; i += 2) {
+          const name = upstream.rawHeaders[i] ?? "";
+          if (!skip.has(name.toLowerCase())) {
+            headers.append(name, upstream.rawHeaders[i + 1] ?? "");
+          }
+        }
+        resolve(
+          new Response(Readable.toWeb(upstream) as unknown as ReadableStream<Uint8Array>, {
+            status: upstream.statusCode ?? 502,
+            statusText: upstream.statusMessage ?? "",
+            headers,
+          }),
+        );
+      },
+    );
+    request.on("error", reject);
+    const onAbort = (): void => {
+      socket.destroy(new Error("the upstream request was aborted"));
+    };
+    init.signal.addEventListener("abort", onAbort, { once: true });
+    socket.once("close", () => init.signal.removeEventListener("abort", onAbort));
+
+    const body = init.body;
+    if (body === undefined) {
+      request.end();
+      return;
+    }
+    void (async (): Promise<void> => {
+      const reader = body.getReader();
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value !== undefined && !request.write(value)) {
+            await new Promise<void>((resume) => request.once("drain", resume));
+          }
+        }
+        request.end();
+      } catch (error) {
+        socket.destroy(error instanceof Error ? error : new Error("the upstream request body failed"));
+      }
+    })();
+  });
+}
+
+/**
+ * Open the pinned upstream TLS connection and enforce the pin on it — the
+ * connection is refused unless the served certificate's pin matches, before
+ * any request data flows over it. Plain errors for timeouts, aborts, and
+ * network failures (unreachable semantics); `UpstreamTlsPinError` only for
+ * pin decisions.
+ */
+function openPinnedSocket(
+  endpoint: { host: string; port: number; servername?: string },
+  expectedPin: string,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<tls.TLSSocket> {
+  return new Promise((resolve, reject) => {
+    const socket = tls.connect({ ...endpoint, rejectUnauthorized: false });
+    const timer = setTimeout(() => {
+      fail(new Error("the upstream handshake timed out"));
+    }, timeoutMs);
+    timer.unref();
+    const onAbort = (): void => {
+      fail(new Error("the upstream request was aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    function fail(error: Error): void {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      socket.destroy();
+      reject(error);
+    }
+
+    socket.once("error", (error: Error) => fail(error));
+    socket.once("secureConnect", () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      try {
+        assertPinnedCertificate(socket.getPeerCertificate()?.raw, expectedPin);
+      } catch (error) {
+        socket.destroy();
+        reject(error instanceof Error ? error : new UpstreamTlsPinError(PIN_MISMATCH_MESSAGE));
+        return;
+      }
+      resolve(socket);
+    });
+  });
 }

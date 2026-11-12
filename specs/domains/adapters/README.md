@@ -9,7 +9,7 @@ Owns the connections to upstream LLM providers. The gateway instantiates one ada
 - `src/adapters/adapter.ts` — the `Adapter` interface, `AdapterConfig`, `AdapterType`, `ProxyRequest`, `ModelEntry`
 - `src/adapters/registry.ts` — `AdapterRegistry`: builds instances from config (the `type` → factory dispatch lives here; the factory map is injected by the entry point), id-keyed lookup, aggregated model listing
 - `src/adapters/openai-compatible.ts` — the MVP `openai-compatible` adapter (pure HTTP proxy)
-- `src/adapters/tls-pinning.ts` — TLS SPKI pinning shared by the pinned adapter path: bare-handshake probe, pin computation (`computeSpkiPin`), pin-only `tls` options, `UpstreamTlsPinError`
+- `src/adapters/tls-pinning.ts` — TLS SPKI pinning shared by the pinned adapter path: the per-request pinned connection (`pinnedUpstreamRequest`), pin decisions (`assertPinnedCertificate`, `computeSpkiPin`), the bare-handshake probe for the fingerprint CLI, `UpstreamTlsPinError`
 - `tools/tls-fingerprint.ts` — CLI that prints (or fail-closed verifies with `--expect`) the pin for an adapter's `tlsFingerprint`
 
 ## Core Types

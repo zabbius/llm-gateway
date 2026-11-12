@@ -89,13 +89,14 @@ bun tools/tls-fingerprint.ts https://llm.lan:8443/v1
 # → K4vmDE8v8SKXajayPc4yMc49GIvJEHyUF8mRo7bu/EM=
 ```
 
-With a pin set, the adapter accepts **only** the pinned key — a fail-closed handshake probe,
-the probed leaf as the sole chain anchor, and a per-connection pin check in place of the
-hostname check. Self-signed and internal-PKI certificates work, and the pin survives
-certificate renewal on the same key pair. A TLS verification failure surfaces to clients as
-`502 upstream_tls_error`; the field is inert on a plain-http `baseUrl`, and without it the
-default system-CA verification applies. `--expect` verifies a configured pin against the
-live endpoint (exit non-zero on mismatch):
+With a pin set, the adapter accepts **only** the pinned key: every pinned request opens its
+own TLS connection, checks the served certificate's SPKI pin before any byte — hence any
+credential — is written, and refuses the connection on a mismatch. No certificate chain is
+required: self-signed and internal-PKI certificates work even when the server presents its
+leaf without intermediates, and the pin survives certificate renewal on the same key pair.
+A pin mismatch surfaces to clients as `502 upstream_tls_error`; the field is inert on a
+plain-http `baseUrl`, and without it the default system-CA verification applies. `--expect`
+verifies a configured pin against the live endpoint (exit non-zero on mismatch):
 
 ```sh
 bun tools/tls-fingerprint.ts --expect 'K4vmDE8v8SKXajayPc4yMc49GIvJEHyUF8mRo7bu/EM=' https://llm.lan:8443/v1

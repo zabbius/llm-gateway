@@ -50,7 +50,7 @@ stderr (fd 2) ──► environment's log collection (out of gateway scope)
 | `trace` | per-request internals: prefix parse, resolved upstream URL, header decisions |
 | `debug` | request received (method, path), adapter resolved, upstream status + duration, models aggregated (count) |
 | `info` | startup: config loaded, adapter probe results (connected / degraded), listening address; shutdown |
-| `warning` | degraded but continuing: client aborted mid-stream, upstream answered slowly, startup probe failed (adapter degraded), pinned upstream TLS verification failed and the leaf cache was invalidated (re-probe on the next request) |
+| `warning` | degraded but continuing: client aborted mid-stream, upstream answered slowly, startup probe failed (adapter degraded) |
 | `error` | request failed (upstream unreachable/timeout → `504 upstream_timeout`; non-JSON upstream → `502 upstream_error`; TLS pin verification failed on a pinned upstream → `502 upstream_tls_error`), unhandled exception, startup validation failure |
 | `none` | nothing — the logger is silent |
 

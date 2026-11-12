@@ -7,7 +7,7 @@ The MVP provider adapter: a pure HTTP proxy in front of any upstream that speaks
 ## Key Files
 
 - `src/adapters/openai-compatible.ts` — `OpenAICompatibleAdapter`: proxying, header policy, timeouts, model mapping, the pinned upstream path (`upstreamFetch`)
-- `src/adapters/tls-pinning.ts` — the TLS SPKI pinning module it enforces the pin with: `probePinnedLeaf`, `pinnedTlsOptions`, `computeSpkiPin`, `UpstreamTlsPinError`
+- `src/adapters/tls-pinning.ts` — the TLS SPKI pinning module it enforces the pin with: `pinnedUpstreamRequest`, `assertPinnedCertificate`, `computeSpkiPin`, the bare-handshake probe for the fingerprint CLI (`fetchLeafCertificate`, `probePinnedLeaf`), `UpstreamTlsPinError`
 
 ## Behavior
 
@@ -41,23 +41,30 @@ When the upstream response has `Content-Type: text/event-stream`:
 A non-empty `tlsFingerprint` on the config entry switches the adapter's only upstream fetch (`upstreamFetch` — shared by `forward()` and `fetchModels()`) to the pinned path; `http` baseUrls and absent/empty pins keep the plain fetch:
 
 ```
-upstreamFetch on a pinned upstream
-  cached leaf? ──no──► probePinnedLeaf: bare TLS handshake (no HTTP, no credentials),
-      │                SPKI pin compared to the config — mismatch fails closed
-      │yes                          │ match ──► cache {pem, pin}
-      ▼                             ▼
-      fetch(..., tls: pinnedTlsOptions(leaf.pem, pin))
-        chain must terminate at the pinned leaf (`ca` anchor) +
-        pin-only `checkServerIdentity` (replaces the hostname check)
-      │ any TLS failure ──► invalidate the cached leaf (warn logged)
-      ▼                    the next request re-probes
-  relay / mapped failure (upstream_tls_error on the pinned path)
+upstreamFetch on a pinned upstream (https baseUrl) — pinnedUpstreamRequest:
+  open the TLS connection (rejectUnauthorized: false — a pinned chain
+      │           need not be publicly trusted)
+      │ secureConnect
+      ▼
+  assertPinnedCertificate: SPKI pin vs config — a mismatch fails closed,
+      │           BEFORE any request byte (credentials never reach a
+      │           mismatching upstream)
+      │ match
+      ▼
+  node:http request over the verified socket (createConnection)
+      │ response
+      ▼
+  standard Response (streaming body, SSE included)
+      │
+      ▼
+  relay / mapped failure (upstream_tls_error on a pin decision)
 ```
 
 Properties that hold on this path:
 
-- The pin is `base64(SHA-256(SPKI DER))` — the certificate key is the identity; hostname and CA web-of-trust play no role, so self-signed and internal-PKI upstreams work. A certificate renewed with the same key pair keeps matching; a key change fails closed on the re-probe.
-- The probe never retries within a failed request: one attempt per client request, cached leaf reused while healthy.
+- The pin is `base64(SHA-256(SPKI DER))` — the certificate key is the identity; hostname, CA web-of-trust, and the rest of the certificate chain play no role, so self-signed and internal-PKI upstreams work even when the server presents its leaf without intermediates. A certificate renewed with the same key pair keeps matching; a key change fails closed.
+- Every pinned request verifies its own connection and nothing is cached between requests: the next request always checks the certificate the upstream serves right now.
+- The pinned path does not pool connections — each request pays its own TLS handshake.
 - A pin on a plain-http `baseUrl` stays valid config but is never enforced.
 
 ### Timeouts
@@ -65,7 +72,7 @@ Properties that hold on this path:
 | Constant | Default | Applies to |
 | -------- | ------- | ---------- |
 | `CONNECT_PROBE_TIMEOUT_MS` | `10 000` | the `listModels()` probe inside `connect()` |
-| `PIN_PROBE_TIMEOUT_MS` | `10 000` | the bare TLS handshake that pins a pinned upstream before its first request |
+| `PIN_PROBE_TIMEOUT_MS` | `10 000` | the TLS handshake budget of one pinned upstream connection |
 | `FORWARD_TIMEOUT_MS` | `120 000` | non-streaming `forward()` end-to-end; for streams — until upstream response headers arrive |
 | `STREAM_IDLE_TIMEOUT_MS` | `300 000` | once streaming: maximum silence between chunks (no total cap) |
 
@@ -92,7 +99,7 @@ Forward timeout expiry maps to the upstream-unreachable error path (`504`, `code
              "code": "upstream_tls_error" } }
 ```
 
-  The message states the fact of the pin mismatch and never certificate bytes, subject, or DNS names; the failure is logged at error level (code + reason), and the cached leaf is invalidated so the next request re-probes. Without a pin, a TLS failure keeps the pre-existing mapping — unreachable upstream, `504 upstream_timeout`.
+  The message states the fact of the pin mismatch and never certificate bytes, subject, or DNS names; the failure is logged at error level (code + reason). Without a pin, a TLS failure keeps the pre-existing mapping — unreachable upstream, `504 upstream_timeout`.
 
 - The adapter performs a single attempt per client request — no retries in the MVP (retry policy is future work).
 
@@ -102,8 +109,7 @@ Forward timeout expiry maps to the upstream-unreachable error path (`504`, `code
 - `apiKey` never appears in logs or in any response returned to a client.
 - SSE bodies reach the client byte-for-byte in arrival order; a streaming response never waits for the full body before relaying its first byte.
 - Upstream error responses are relayed with their original status code.
-- A configured `tlsFingerprint` always fails closed: a probe mismatch, a chain that does not terminate at the pinned leaf, or a per-connection pin veto each surface as `502 upstream_tls_error` and never as a relayed response or a degraded-verification success ([ADR-005](../../decisions/005-per-adapter-tls-pinning.md)).
-- A TLS failure on a pinned upstream always invalidates the cached leaf certificate; the next request re-probes against the live endpoint.
+- A configured `tlsFingerprint` always fails closed: a pin mismatch — checked on every pinned connection before any request byte is written — surfaces as `502 upstream_tls_error` and never as a relayed response or a degraded-verification success ([ADR-005](../../decisions/005-per-adapter-tls-pinning.md)).
 - At most one upstream attempt happens per client request.
 
 ## Related Specs
