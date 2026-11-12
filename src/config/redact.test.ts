@@ -6,8 +6,7 @@
  * through verbatim, and neither mutates nor shares objects with the config.
  */
 import { describe, expect, test } from "bun:test";
-import { REDACT_CENSOR } from "../logging/logger.ts";
-import { redactedConfigView } from "./redact.ts";
+import { CONFIGURED_MASK, redactedConfigView } from "./redact.ts";
 import type { NormalizedGatewayConfig, UpstreamConfig } from "./schema.ts";
 
 /** Distinctive key/pin material that must never surface in the view. */
@@ -33,17 +32,17 @@ describe("redactedConfigView", () => {
   test("an entry with a tlsFingerprint: apiKey and tlsFingerprint are both the fixed mask", () => {
     const view = redactedConfigView(normalized(entry({ tlsFingerprint: SECRET_PIN })));
 
-    expect(view.upstreams[0]?.apiKey).toBe(REDACT_CENSOR);
-    expect(view.upstreams[0]?.tlsFingerprint).toBe(REDACT_CENSOR);
-    // the exact censor literal the contract pins ([Redacted], src/logging/logger.ts)
-    expect(view.upstreams[0]?.apiKey).toBe("[Redacted]");
-    expect(view.upstreams[0]?.tlsFingerprint).toBe("[Redacted]");
+    expect(view.upstreams[0]?.apiKey).toBe(CONFIGURED_MASK);
+    expect(view.upstreams[0]?.tlsFingerprint).toBe(CONFIGURED_MASK);
+    // the exact mask literal the contract pins ([Configured], src/config/redact.ts)
+    expect(view.upstreams[0]?.apiKey).toBe("[Configured]");
+    expect(view.upstreams[0]?.tlsFingerprint).toBe("[Configured]");
   });
 
   test("an entry without a tlsFingerprint: null, never the mask, never a value", () => {
     const view = redactedConfigView(normalized(entry()));
 
-    expect(view.upstreams[0]?.apiKey).toBe(REDACT_CENSOR);
+    expect(view.upstreams[0]?.apiKey).toBe(CONFIGURED_MASK);
     expect(view.upstreams[0]?.tlsFingerprint).toBeNull();
   });
 
@@ -73,7 +72,7 @@ describe("redactedConfigView", () => {
     expect(raw).not.toContain(SECRET_KEY);
     expect(raw).not.toContain(SECRET_PIN);
     expect(raw).not.toContain("sk-live");
-    expect(raw).toContain(REDACT_CENSOR);
+    expect(raw).toContain(CONFIGURED_MASK);
   });
 
   test("the view neither mutates nor shares objects with the config", () => {

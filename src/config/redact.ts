@@ -7,14 +7,17 @@
  * `apiKey` is always the fixed mask, a configured `tlsFingerprint` becomes
  * the same mask, an absent one becomes `null`. The real key and pin values
  * are simply not copied, so no handler downstream of this function can
- * serialize them. The mask is the logging layer's censor (`REDACT_CENSOR`,
- * src/logging/logger.ts) — one shared literal, so presence (a key is
- * configured) stays visible while the value never is
- * (specs/architecture/security-model.md).
+ * serialize them. The mask is the view's own literal `[Configured]`,
+ * deliberately distinct from the logging layer's censor (`[Redacted]`,
+ * src/logging/logger.ts): the view marks "a credential is configured here",
+ * while the censor stands for any redacted value in a log line, including
+ * client-supplied ones (specs/architecture/security-model.md).
  */
 import type { LogLevel } from "../types.ts";
-import { REDACT_CENSOR } from "../logging/logger.ts";
 import type { NormalizedGatewayConfig, UpstreamType } from "./schema.ts";
+
+/** The fixed mask replacing every credential in the management view. */
+export const CONFIGURED_MASK = "[Configured]";
 
 /** One upstream entry of the redacted view — credentials replaced by the mask. */
 export interface RedactedUpstreamConfig {
@@ -53,8 +56,8 @@ export function redactedConfigView(config: NormalizedGatewayConfig): RedactedGat
       type: entry.type,
       id: entry.id,
       baseUrl: entry.baseUrl,
-      apiKey: REDACT_CENSOR,
-      tlsFingerprint: entry.tlsFingerprint !== undefined ? REDACT_CENSOR : null,
+      apiKey: CONFIGURED_MASK,
+      tlsFingerprint: entry.tlsFingerprint !== undefined ? CONFIGURED_MASK : null,
     })),
   };
 }

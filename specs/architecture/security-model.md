@@ -53,7 +53,7 @@ The gateway is a credential custodian: it holds provider API keys that clients m
 6. While gateway-auth is unimplemented, the listener binds only to loopback or a private interface.
 7. Startup logging names upstreams (id, type) but never prints key material or the raw config.
 8. A configured `tlsFingerprint` always fails closed on a pin mismatch — a pinned upstream that presents any other key surfaces as `502 upstream_tls_error`, never as a relayed response or a warning-and-continue ([ADR-005](../decisions/005-per-upstream-tls-pinning.md)).
-9. The management configuration view (`GET /api/configuration`) carries masked values only: `redactedConfigView` (`src/config/redact.ts`) replaces every `apiKey` with the fixed mask `[Redacted]` and a configured `tlsFingerprint` with the same mask — `null` when absent — at the entry point, before the view enters the HTTP layer; the raw config never does ([gateway-management.md](../contracts/gateway-management.md), [configuration.md](../domains/configuration.md)).
+9. The management configuration view (`GET /api/configuration`) carries masked values only: `redactedConfigView` (`src/config/redact.ts`) replaces every `apiKey` with the fixed mask `[Configured]` and a configured `tlsFingerprint` with the same mask — `null` when absent — at the entry point, before the view enters the HTTP layer; the raw config never does ([gateway-management.md](../contracts/gateway-management.md), [configuration.md](../domains/configuration.md)).
 
 ## Anti-Patterns
 

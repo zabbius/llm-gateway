@@ -37,14 +37,14 @@ The management API is a strictly read-only observation surface mounted at `/api/
       "type": "openai-compatible",
       "id": "openai-main",
       "baseUrl": "https://api.openai.com/v1",
-      "apiKey": "[Redacted]",
-      "tlsFingerprint": "[Redacted]"
+      "apiKey": "[Configured]",
+      "tlsFingerprint": "[Configured]"
     }
   ]
 }
 ```
 
-- `apiKey` is always the fixed mask literal `"[Redacted]"` — the same censor the logging layer uses (`REDACT_CENSOR`, `src/logging/logger.ts`) — so presence (a key is configured) is visible while the value never is.
+- `apiKey` is always the fixed mask literal `"[Configured]"` — the view's own constant (`CONFIGURED_MASK`, `src/config/redact.ts`), deliberately distinct from the logging layer's censor (`"[Redacted]"`, `REDACT_CENSOR`, `src/logging/logger.ts`) — so presence (a key is configured) is visible while the value never is.
 - `tlsFingerprint` is the fixed mask when configured, `null` when absent; `baseUrl` is returned verbatim (it is not secret — every client request already carries it).
 
 ## Initialization
@@ -74,7 +74,7 @@ Gateway-generated errors on this boundary use the OpenAI error envelope, produce
 Derived from the actual coupling of this boundary:
 
 1. **Response shapes** (`upstreams[]` field names, the `probe` enum `"ok" | "failed"`, the `reason` presence rule, the `listen` / `logLevel` keys) — the SPA and every external consumer parse them. Any field add/rename/reshape updates this contract and the SPA consumers in the same change.
-2. **The masking rule** (`apiKey` always the fixed mask `"[Redacted]"`; `tlsFingerprint` mask-or-`null`) — weakening it in any way (partial reveal, conditional omission of the mask) exposes credential material and contradicts the security model ([security-model.md](../architecture/security-model.md)); it requires an ADR plus a security-model update, never a silent change.
+2. **The masking rule** (`apiKey` always the fixed mask `"[Configured]"`; `tlsFingerprint` mask-or-`null`) — weakening it in any way (partial reveal, conditional omission of the mask) exposes credential material and contradicts the security model ([security-model.md](../architecture/security-model.md)); it requires an ADR plus a security-model update, never a silent change.
 3. **The read-only boundary rule** — adding a mutating endpoint (`POST`/`PUT`/`DELETE` on `/api/*`) changes the trust posture of the whole prefix: it requires an ADR and updates to [security-model.md](../architecture/security-model.md) and [data-flow.md](../architecture/data-flow.md) before implementation.
 4. **The `/api/*` prefix itself** — fixed by [ADR-006](../decisions/006-gateway-surface-namespace.md); moving or re-prefixing it re-cuts every consumer and requires a new ADR first.
 5. **New management endpoints** extend this contract first — the API spec leads, the UI follows ([frontend.md](../domains/frontend.md)) — and are mounted before static serving so the SPA never shadows them.

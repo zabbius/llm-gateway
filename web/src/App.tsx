@@ -1,6 +1,7 @@
 /**
- * The SPA shell: a flex row with the active section as the main content and
- * the dock as a sticky right aside (border-start). The dock header is the
+ * The SPA shell: a flex row with the dock as a sticky left aside
+ * (border-end) leading and the active section as the main content following.
+ * The dock header is the
  * brand — the glyph mark inlined so it inherits currentColor — above the
  * section nav; the dock nav is the only navigation surface. Routing is
  * client-side over /ui/* (router.tsx, ADR-006): "/ui" and "/ui/" replace to
@@ -82,11 +83,8 @@ export function App(): ReactNode {
   return (
     <div className="container-fluid">
       <div className="row">
-        <main className="col py-4 px-4">
-          <SectionBody section={section} />
-        </main>
         <aside
-          className="col-auto border-start sticky-top align-self-start py-4 px-4"
+          className="col-auto border-end sticky-top align-self-start py-4 px-4"
           style={{ minWidth: "14rem" }}
         >
           <div className="d-flex align-items-center gap-2 text-body-emphasis">
@@ -106,6 +104,9 @@ export function App(): ReactNode {
             ))}
           </nav>
         </aside>
+        <main className="col py-4 px-4">
+          <SectionBody section={section} />
+        </main>
       </div>
     </div>
   );

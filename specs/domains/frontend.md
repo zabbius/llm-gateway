@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The operator-facing SPA served under `/ui/*` (namespace: [ADR-006](../decisions/006-gateway-surface-namespace.md)): a single-page shell whose right dock switches between the three MVP sections — Status (upstream health), Configuration (sanitized effective config), About (static overview) — over the read-only management API. Built with React + Bootstrap only; the gateway serves pre-built static assets and never executes UI code server-side.
+The operator-facing SPA served under `/ui/*` (namespace: [ADR-006](../decisions/006-gateway-surface-namespace.md)): a single-page shell whose left dock switches between the three MVP sections — Status (upstream health), Configuration (sanitized effective config), About (static overview) — over the read-only management API. Built with React + Bootstrap only; the gateway serves pre-built static assets and never executes UI code server-side.
 
 ## Key Files
 
@@ -12,7 +12,7 @@ The operator-facing SPA served under `/ui/*` (namespace: [ADR-006](../decisions/
 - `web/src/main.tsx` — React mount point (StrictMode, the Bootstrap CSS import)
 - `web/src/router.tsx` — minimal history-API router: `usePath()` (popstate + in-app navigation listener, strips the `/ui` base), `navigate()` / `replace()` (pushState/replaceState through the base), the `Link` component (real `/ui/*` hrefs, intercepts plain clicks only), the `SectionId` set, and `sectionForPath()` (unknown paths fall back to the default section)
 - `web/src/api.ts` — typed fetch helpers for the management surface (`GET /api/status`, `GET /api/configuration`) mirroring the contract shapes; the only gateway calls the SPA makes
-- `web/src/App.tsx` — the shell: a flex row of main content plus the right dock (sticky aside, `border-start`); the dock header is the brand (the glyph inlined so it inherits `currentColor`) above the section nav (Bootstrap `nav-pills flex-column`, active highlight); it also canonicalizes `/ui` and `/ui/` to the default section via client-side replaceState
+- `web/src/App.tsx` — the shell: a flex row with the left dock leading (sticky aside, `border-end`) and the main content following; the dock header is the brand (the glyph inlined so it inherits `currentColor`) above the section nav (Bootstrap `nav-pills flex-column`, active highlight); it also canonicalizes `/ui` and `/ui/` to the default section via client-side replaceState
 - `web/src/sections/Status.tsx` — Status section: fetches `GET /api/status` on mount plus a manual refresh button; Bootstrap table (`id`, `type`, probe badge `ok`/`failed`, `reason`); loading spinner and error alert states
 - `web/src/sections/Configuration.tsx` — Configuration section: fetches `GET /api/configuration`; the `listen` / `logLevel` summary and the upstream table with masked secrets rendered as returned
 - `web/src/sections/About.tsx` — static About section: what llm-gateway is, the stack, the OpenAI-client baseURL hint (`<host>/llm/v1`), pointers to `README.md` and `specs/`
@@ -41,7 +41,7 @@ export interface GatewayStatus {
 export interface GatewayConfiguration {
   readonly listen: string;
   readonly logLevel: LogLevel; // "trace" | "debug" | "info" | "warning" | "error" | "none"
-  readonly upstreams: readonly RedactedUpstreamConfig[]; // { type, id, baseUrl, apiKey: "[Redacted]", tlsFingerprint: string | null }
+  readonly upstreams: readonly RedactedUpstreamConfig[]; // { type, id, baseUrl, apiKey: "[Configured]", tlsFingerprint: string | null }
 }
 ```
 

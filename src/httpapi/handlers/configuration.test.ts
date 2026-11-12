@@ -72,9 +72,9 @@ describe("handleConfiguration (GET /api/configuration)", () => {
 
     expect(body.listen).toBe("127.0.0.1:8080");
     expect(body.logLevel).toBe("info");
-    expect(body.upstreams[0]?.apiKey).toBe("[Redacted]");
-    expect(body.upstreams[0]?.tlsFingerprint).toBe("[Redacted]");
-    expect(body.upstreams[1]?.apiKey).toBe("[Redacted]");
+    expect(body.upstreams[0]?.apiKey).toBe("[Configured]");
+    expect(body.upstreams[0]?.tlsFingerprint).toBe("[Configured]");
+    expect(body.upstreams[1]?.apiKey).toBe("[Configured]");
     expect(body.upstreams[1]?.tlsFingerprint).toBeNull();
   });
 
@@ -85,7 +85,7 @@ describe("handleConfiguration (GET /api/configuration)", () => {
     expect(raw).not.toContain(SECRET_KEY);
     expect(raw).not.toContain(SECRET_PIN);
     expect(raw).not.toContain("sk-super-secret");
-    expect(raw).toContain("[Redacted]");
+    expect(raw).toContain("[Configured]");
     expect(raw).toContain('"tlsFingerprint":null'); // absent → JSON null, not omission
   });
 });

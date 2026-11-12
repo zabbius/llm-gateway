@@ -536,14 +536,14 @@ describe("GET /api/configuration", () => {
       type: "openai-compatible",
       id: "openai-main",
       baseUrl: "https://openai-main.example/v1",
-      apiKey: "[Redacted]",
-      tlsFingerprint: "[Redacted]",
+      apiKey: "[Configured]",
+      tlsFingerprint: "[Configured]",
     });
     expect(body.upstreams[1]).toEqual({
       type: "openai-compatible",
       id: "vllm-local",
       baseUrl: "https://vllm-local.example/v1",
-      apiKey: "[Redacted]",
+      apiKey: "[Configured]",
       tlsFingerprint: null,
     });
   });
@@ -565,7 +565,7 @@ describe("GET /api/configuration", () => {
     const raw = JSON.stringify(await response.json());
     expect(raw).not.toContain("sk-live-CONFIG-test-key");
     expect(raw).not.toContain("AAkBS7Y8xgDdCPe0bPq0WE1cR4m5jXKzlvJNUdBtTR0=");
-    expect(raw).toContain("[Redacted]");
+    expect(raw).toContain("[Configured]");
   });
 });
 

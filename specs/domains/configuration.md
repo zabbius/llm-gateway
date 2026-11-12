@@ -51,8 +51,8 @@ interface GatewayConfig {
  * served by `GET /api/configuration` (gateway-management.md). The entry point
  * builds it from the normalized config and hands the plain value to
  * `createApp` — the raw config never crosses into the HTTP layer.
- * `apiKey` is always the fixed mask `[Redacted]` (the logging layer's censor,
- * src/logging/logger.ts); `tlsFingerprint` is the mask when configured,
+ * `apiKey` is always the fixed mask `[Configured]` (`CONFIGURED_MASK`,
+ * src/config/redact.ts); `tlsFingerprint` is the mask when configured,
  * `null` when absent; `baseUrl` is verbatim (not secret). The view is built
  * field by field — the real credential values are never copied into it.
  */
@@ -63,8 +63,8 @@ interface RedactedGatewayConfig {
     type: UpstreamType;
     id: string;
     baseUrl: string;
-    apiKey: string; // always "[Redacted]"
-    tlsFingerprint: string | null; // "[Redacted]" | null
+    apiKey: string; // always "[Configured]"
+    tlsFingerprint: string | null; // "[Configured]" | null
   }>;
 }
 ```
@@ -91,7 +91,7 @@ startup
 - Upstream ids are unique across the whole `upstreams` array, independent of `type`.
 - The default `listen` binds loopback only; a public interface is a deliberate config choice and stays discouraged while gateway-auth is unimplemented.
 - `apiKey` values live in memory only and never appear in logs.
-- The management configuration view never carries credential values: `redactedConfigView` (`src/config/redact.ts`) replaces every `apiKey` with the fixed mask `[Redacted]` and a configured `tlsFingerprint` with the same mask — `null` when absent — building the view field by field so the real values are never copied; the entry point builds the view and the raw config never crosses into the HTTP layer ([security-model.md](../architecture/security-model.md), [gateway-management.md](../contracts/gateway-management.md)).
+- The management configuration view never carries credential values: `redactedConfigView` (`src/config/redact.ts`) replaces every `apiKey` with the fixed mask `[Configured]` and a configured `tlsFingerprint` with the same mask — `null` when absent — building the view field by field so the real values are never copied; the entry point builds the view and the raw config never crosses into the HTTP layer ([security-model.md](../architecture/security-model.md), [gateway-management.md](../contracts/gateway-management.md)).
 - `tlsFingerprint` values are validated with apiKey-grade output care: a validation problem names the rule without echoing the configured pin (a pin is not a secret, but typo diagnosis never needs the value).
 - `config.example.json` always validates against the schema and includes every supported option at its documented default.
 
