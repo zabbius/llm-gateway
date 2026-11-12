@@ -10,6 +10,8 @@ A deliberately thin placeholder SPA pinned to the React + Bootstrap stack. The M
 - `web/index.html` — SPA entry document
 - `web/src/main.tsx` — React mount point
 - `web/src/App.tsx` — root component: the MVP stub page
+- `web/public/icon.svg` — brand icon (tile + white mark); served as the favicon via a `<link rel="icon">` in `web/index.html`
+- `web/public/glyph.svg` — monochrome variant of the same mark, stroked with `currentColor` and a tight viewBox, for future in-app use (inline SVG); `public/*` is copied verbatim into the build output
 
 ## Core Types
 
