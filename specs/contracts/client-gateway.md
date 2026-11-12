@@ -8,11 +8,11 @@ External clients depend only on the gateway's OpenAI-compatible HTTP surface; th
 
 | Interface | Package | Consumed By | Purpose |
 | --------- | ------- | ----------- | ------- |
-| `GET /v1/models` (HTTP) | `src/httpapi/` <!-- TODO: verify --> | OpenAI-protocol clients | Aggregated flat model list: entries from every adapter, each `id` rewritten to `<adapterId>/<model>`, `owned_by` set to `adapterId` |
-| `POST /v1/chat/completions` (HTTP) | `src/httpapi/` <!-- TODO: verify --> | OpenAI-protocol clients | Chat completions; JSON body, or SSE stream when `"stream": true` |
-| `POST /v1/completions` (HTTP) | `src/httpapi/` <!-- TODO: verify --> | OpenAI-protocol clients | Legacy completions; same body/stream rules as chat completions |
-| OpenAI error envelope (JSON schema) | `src/httpapi/errors.ts` <!-- TODO: verify --> | OpenAI-protocol clients | Single error shape for every gateway-generated failure (unknown model, unknown adapter, upstream unreachable) |
-| `handleModels` / `handleChatCompletions` / `handleCompletions` (route handlers) | `src/httpapi/` <!-- TODO: verify --> | HTTP router (internal) | Parse and validate the OpenAI request, delegate to the router + adapter registry, map errors per Error Propagation |
+| `GET /v1/models` (HTTP) | `src/httpapi/handlers/models.ts` | OpenAI-protocol clients | Aggregated flat model list: entries from every adapter, each `id` rewritten to `<adapterId>/<model>`, `owned_by` set to `adapterId` |
+| `POST /v1/chat/completions` (HTTP) | `src/httpapi/handlers/completions.ts` | OpenAI-protocol clients | Chat completions; JSON body, or SSE stream when `"stream": true` |
+| `POST /v1/completions` (HTTP) | `src/httpapi/handlers/completions.ts` | OpenAI-protocol clients | Legacy completions; same body/stream rules as chat completions |
+| OpenAI error envelope (JSON schema) | `src/httpapi/errors.ts` | OpenAI-protocol clients | Single error shape for every gateway-generated failure (unknown model, unknown adapter, upstream unreachable) |
+| `handleModels` / `handleChatCompletions` / `handleCompletions` (route handlers) | `src/httpapi/handlers/` | HTTP router (internal) | Parse and validate the OpenAI request, delegate to the router + adapter registry, map errors per Error Propagation |
 
 ### Model id scheme (prefix)
 
@@ -115,7 +115,7 @@ Derived from the actual coupling of this boundary:
 
 1. **Prefix scheme (`<adapterId>/<model>`)** is coupled to `GET /v1/models` aggregation, model lookup in the router, and every doc/config example. Changing the separator or the id grammar requires updating this contract, [gateway-upstream.md](gateway-upstream.md) (de-prefix rule), [routing.md](../domains/routing.md), and README/config examples. The scheme is effectively irreversible once clients persist prefixed ids — changing it passes the ADR bar (see META.md Update Protocol) and requires an ADR first.
 2. **Endpoint set and paths (`/v1/models`, `/v1/chat/completions`, `/v1/completions`)** — OpenAI clients hardcode them. Adding/removing/renaming endpoints requires a versioning decision (ADR) plus updates to [data-flow.md](../architecture/data-flow.md) and this contract.
-3. **Error envelope fields (`error.message` / `error.type` / `error.param` / `error.code`) and the status mapping table** — clients parse them; any change breaks every client and must update `src/httpapi/errors.ts` <!-- TODO: verify --> and this contract together.
+3. **Error envelope fields (`error.message` / `error.type` / `error.param` / `error.code`) and the status mapping table** — clients parse them; any change breaks every client and must update `src/httpapi/errors.ts` and this contract together.
 4. **Authorization policy** (client header dropped at the edge; upstream auth is the adapter's config `apiKey`) — introducing gateway-side client authentication, or changing which credentials reach upstreams, changes the security posture: update [security-model.md](../architecture/security-model.md) and [gateway-upstream.md](gateway-upstream.md) in the same change.
 5. **Streaming pass-through rule** (no parsing, no buffering, verbatim bytes, disconnect aborts upstream) — replacing it with parsed/re-serialized streaming changes latency and backpressure behavior; update [openai-compatible.md](../domains/adapters/openai-compatible.md) and this contract together.
 6. **Response-body pass-through rule** (no `model` rewrite in responses) — introducing response transformations is a contract change: update this contract before implementing.

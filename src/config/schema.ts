@@ -1,0 +1,243 @@
+/**
+ * The gateway config file's schema and validation rules
+ * (specs/domains/configuration.md).
+ *
+ * Validation and normalization live in exactly one place — here. A new
+ * adapter `type` extends this module with its own required per-type fields
+ * and their checks; the loading/reporting machinery in `src/config/load.ts`
+ * never grows per-field knowledge.
+ *
+ * The schema is strict: unknown top-level keys and unknown per-adapter keys
+ * are rejected, so typos fail loudly at startup. Validation is total — every
+ * problem of one config is collected and reported together, never the first
+ * one only.
+ */
+import type { LogLevel } from "../types.ts";
+
+/**
+ * Registered adapter types — one per implemented adapter module
+ * (specs/domains/adapters/README.md). A new adapter module adds its type
+ * string here and its validation to `validateGatewayConfig`.
+ */
+export const ADAPTER_TYPES = ["openai-compatible"] as const;
+
+export type AdapterType = (typeof ADAPTER_TYPES)[number];
+
+/**
+ * Adapter id grammar: lowercase letters, digits and hyphens, starting with a
+ * letter or digit. The grammar excludes "/" (the model-id prefix separator,
+ * ADR-002), "_" and uppercase, so an id can never collide with the public
+ * `<adapterId>/<model>` scheme.
+ */
+export const ADAPTER_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+/** The gateway log-level vocabulary (also `LogLevel` in src/types.ts). */
+export const LOG_LEVELS = ["trace", "debug", "info", "warning", "error", "none"] as const;
+
+export const DEFAULT_LISTEN = "127.0.0.1:8080";
+export const DEFAULT_LOG_LEVEL: LogLevel = "info";
+
+/** One provider connection entry of the `adapters` array. */
+export interface AdapterConfig {
+  type: AdapterType;
+  /** ^[a-z0-9][a-z0-9-]*$ — unique across the config; never contains "/" */
+  id: string;
+  /** absolute http(s) URL including the API root with /v1 (e.g. https://api.openai.com/v1) */
+  baseUrl: string;
+  /** non-empty; sent upstream as the Bearer credential only */
+  apiKey: string;
+}
+
+/** The config file shape as parsed from JSON. */
+export interface GatewayConfig {
+  /** "host:port"; omitted → "127.0.0.1:8080" (loopback until gateway-auth lands) */
+  listen?: string;
+  /** omitted → "info" */
+  logLevel?: LogLevel;
+  /** at least one entry; ids unique across the array */
+  adapters: AdapterConfig[];
+}
+
+/** A validated config with every optional field defaulted and baseUrl normalized. */
+export interface NormalizedGatewayConfig extends GatewayConfig {
+  listen: string;
+  logLevel: LogLevel;
+  adapters: AdapterConfig[];
+}
+
+export type ValidatedConfig =
+  | { ok: true; config: NormalizedGatewayConfig }
+  | { ok: false; problems: string[] };
+
+/**
+ * `listen` grammar: `host:port` — a hostname label/IPv4 address (no colons,
+ * no whitespace) or a bracketed IPv6 literal, plus a decimal port. The port
+ * range is checked numerically by `isListen`.
+ */
+const LISTEN_PATTERN =
+  /^(\[[0-9A-Fa-f:.]+\]|[0-9A-Za-z]([0-9A-Za-z-]*[0-9A-Za-z])?(\.[0-9A-Za-z]([0-9A-Za-z-]*[0-9A-Za-z])?)*):(?<port>[0-9]{1,5})$/;
+
+const TOP_LEVEL_KEYS: readonly string[] = ["listen", "logLevel", "adapters"];
+const ADAPTER_KEYS: readonly string[] = ["type", "id", "baseUrl", "apiKey"];
+
+/** True when `value` is one of the six config log levels. */
+export function isValidLogLevel(value: unknown): value is LogLevel {
+  return typeof value === "string" && (LOG_LEVELS as readonly string[]).includes(value);
+}
+
+/** True when `value` is a `"host:port"` string with a port in 1–65535. */
+export function isListen(value: string): boolean {
+  const match = LISTEN_PATTERN.exec(value);
+  if (!match) return false;
+  const port = Number(match.groups?.port ?? Number.NaN);
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+/** True when `value` parses as an absolute http(s) URL. */
+export function isHttpUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return url.protocol === "http:" || url.protocol === "https:";
+}
+
+/**
+ * Strip a single trailing slash from a baseUrl (a spec-level normalization:
+ * upstream URLs are built as `baseUrl + "/" + path`, and one trailing slash
+ * would produce a double slash). `"…/v1/"` → `"…/v1"`; `"…/v1//"` → `"…/v1/"`.
+ */
+export function normalizeBaseUrl(url: string): string {
+  return url.endsWith("/") ? url.slice(0, -1) : url;
+}
+
+/**
+ * Validate and normalize a parsed config value. Collects every problem —
+ * unknown keys, grammar violations, missing keys, duplicate ids — into one
+ * `problems` list in a stable order (top level first, then adapter entries
+ * by index); returns the normalized config only when the list stays empty.
+ */
+export function validateGatewayConfig(value: unknown): ValidatedConfig {
+  const problems: string[] = [];
+
+  if (!isPlainObject(value)) {
+    return { ok: false, problems: ["config root must be a JSON object"] };
+  }
+
+  for (const key of Object.keys(value)) {
+    if (!TOP_LEVEL_KEYS.includes(key)) {
+      problems.push(`unknown top-level key "${key}" (valid keys: ${TOP_LEVEL_KEYS.join(", ")})`);
+    }
+  }
+
+  const listen = value.listen;
+  if (listen !== undefined && (typeof listen !== "string" || !isListen(listen))) {
+    problems.push(`listen must be a "host:port" string with a port in 1-65535 (got ${shown(listen)})`);
+  }
+
+  const logLevel = value.logLevel;
+  if (logLevel !== undefined && !isValidLogLevel(logLevel)) {
+    problems.push(`logLevel must be one of: ${LOG_LEVELS.join(", ")} (got ${shown(logLevel)})`);
+  }
+
+  const adapters = value.adapters;
+  if (!Array.isArray(adapters) || adapters.length === 0) {
+    problems.push("adapters must be an array with at least one adapter entry");
+    return { ok: false, problems };
+  }
+
+  const seenIds = new Map<string, number[]>();
+
+  adapters.forEach((entry, index) => {
+    if (!isPlainObject(entry)) {
+      problems.push(`adapters[${index}] must be a JSON object`);
+      return;
+    }
+
+    for (const key of Object.keys(entry)) {
+      if (!ADAPTER_KEYS.includes(key)) {
+        problems.push(`adapters[${index}]: unknown key "${key}" (valid keys: ${ADAPTER_KEYS.join(", ")})`);
+      }
+    }
+
+    const type = entry.type;
+    if (type === undefined) {
+      problems.push(
+        `adapters[${index}]: missing required key "type" (registered adapter types: ${ADAPTER_TYPES.join(", ")})`,
+      );
+    } else if (!(ADAPTER_TYPES as readonly unknown[]).includes(type)) {
+      problems.push(
+        `adapters[${index}]: unknown adapter type ${shown(type)} (registered adapter types: ${ADAPTER_TYPES.join(", ")})`,
+      );
+    }
+
+    const id = entry.id;
+    if (id === undefined) {
+      problems.push(`adapters[${index}]: missing required key "id"`);
+    } else if (typeof id !== "string" || !ADAPTER_ID_PATTERN.test(id)) {
+      problems.push(
+        `adapters[${index}]: adapter id ${shown(id)} must match ^[a-z0-9][a-z0-9-]*$ (lowercase letters, digits, hyphens; never "/")`,
+      );
+    } else {
+      const indexes = seenIds.get(id);
+      if (indexes === undefined) {
+        seenIds.set(id, [index]);
+      } else {
+        indexes.push(index);
+      }
+    }
+
+    const baseUrl = entry.baseUrl;
+    if (baseUrl === undefined) {
+      problems.push(`adapters[${index}]: missing required key "baseUrl"`);
+    } else if (typeof baseUrl !== "string" || !isHttpUrl(baseUrl)) {
+      problems.push(
+        `adapters[${index}]: baseUrl ${shown(baseUrl)} must be an absolute http(s) URL including the API root with "/v1"`,
+      );
+    }
+
+    // The apiKey value is never echoed into a problem line — it must never
+    // reach stderr or any log (specs/architecture/security-model.md).
+    const apiKey = entry.apiKey;
+    if (apiKey === undefined) {
+      problems.push(`adapters[${index}]: missing required key "apiKey"`);
+    } else if (typeof apiKey !== "string" || apiKey.length === 0) {
+      problems.push(`adapters[${index}]: apiKey must be a non-empty string`);
+    }
+  });
+
+  for (const [id, indexes] of seenIds) {
+    if (indexes.length > 1) {
+      problems.push(`duplicate adapter id "${id}" (entries ${indexes.join(", ")})`);
+    }
+  }
+
+  if (problems.length > 0) {
+    return { ok: false, problems };
+  }
+
+  return {
+    ok: true,
+    config: {
+      listen: typeof listen === "string" ? listen : DEFAULT_LISTEN,
+      logLevel: isValidLogLevel(logLevel) ? logLevel : DEFAULT_LOG_LEVEL,
+      adapters: (adapters as Record<string, unknown>[]).map((entry) => ({
+        type: entry.type as AdapterType,
+        id: entry.id as string,
+        baseUrl: normalizeBaseUrl(entry.baseUrl as string),
+        apiKey: entry.apiKey as string,
+      })),
+    },
+  };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Render a rejected value for a problem line; strings are quoted. */
+function shown(value: unknown): string {
+  return typeof value === "string" ? `"${value}"` : String(value);
+}

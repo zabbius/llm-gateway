@@ -6,8 +6,8 @@ Defines the interface every provider adapter implements and the `connect → ser
 
 ## Key Files
 
-- `src/adapters/adapter.ts` — the `Adapter` interface and its request/response types <!-- TODO: verify -->
-- `src/adapters/registry.ts` — drives the lifecycle: constructs adapters (factory dispatch on `type`) and calls `connect()` at startup <!-- TODO: verify -->
+- `src/adapters/adapter.ts` — the `Adapter` interface and its request/response types
+- `src/adapters/registry.ts` — drives the lifecycle: constructs adapters (factory dispatch on `type` through the entry-point-injected factory map) and calls `connect()` at startup
 
 ## Behavior
 
@@ -50,8 +50,9 @@ interface ProxyRequest {
    AdapterRegistry.create()
            │  per config entry (type, id)
            ▼
-    factory.create(type, id, baseUrl, apiKey)
-           │
+    factory(entry, logger)   — the entry point injects the
+           │                   `type` → factory map (layers.md);
+           │                   the registry dispatches on `type`
            ▼
 ╔═══════════════════════════════════════╗
 ║ connect()  — once                     ║

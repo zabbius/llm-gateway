@@ -8,13 +8,13 @@ Adapters make one-way outbound calls to provider HTTP APIs; providers are extern
 
 | Interface | Package | Consumed By | Purpose |
 | --------- | ------- | ----------- | ------- |
-| `Adapter` (TS interface) | `src/adapters/adapter.ts` <!-- TODO: verify --> | gateway core: router, adapter registry | Uniform surface: `connect()`, `listModels()`, `forward()` — see planned shape below |
-| `OpenAICompatibleAdapter` (TS class) | `src/adapters/openai-compatible.ts` <!-- TODO: verify --> | adapter registry (constructed from config `type: "openai-compatible"`) | openai-compatible implementation: `baseUrl` (with `/v1`) + Bearer `apiKey`, pure proxy |
+| `Adapter` (TS interface) | `src/adapters/adapter.ts` | gateway core: router, adapter registry | Uniform surface: `connect()`, `listModels()`, `forward()` — shape below |
+| `OpenAICompatibleAdapter` (TS class) | `src/adapters/openai-compatible.ts` | adapter registry (constructed from config `type: "openai-compatible"`) | openai-compatible implementation: `baseUrl` (with `/v1`) + Bearer `apiKey`, pure proxy |
 | `POST {baseUrl}/chat/completions` (provider HTTP) | provider API | `OpenAICompatibleAdapter` | chat completions upstream call (JSON or SSE response) |
 | `POST {baseUrl}/completions` (provider HTTP) | provider API | `OpenAICompatibleAdapter` | legacy completions upstream call (JSON or SSE response) |
 | `GET {baseUrl}/models` (provider HTTP) | provider API | `OpenAICompatibleAdapter.listModels()` | provider model discovery for the aggregated `/v1/models` list |
 
-Planned shape of the uniform adapter surface (design contract — verified when code lands):
+Shape of the uniform adapter surface as landed in `src/adapters/adapter.ts`:
 
 ```typescript
 interface Adapter {
@@ -26,7 +26,9 @@ interface Adapter {
 }
 
 interface ProxyRequest {
-  path: "chat/completions" | "completions" | "models";  // appended to baseUrl (which includes /v1)
+  path: string;                                  // appended to baseUrl (which includes /v1);
+                                                 // the router passes only the fixed paths —
+                                                 // MVP: "chat/completions", "completions"
   method: "GET" | "POST";
   body?: ReadableStream<Uint8Array>;             // client body relayed as received;
                                                  // `model` already de-prefixed by the router
@@ -41,7 +43,7 @@ The gateway generates exactly three upstream paths on this boundary — the prov
 
 At startup the process reads the JSON config, then wires this boundary:
 
-1. For each entry of the `adapters[]` array, construct an adapter instance selected by the `type` field (`"openai-compatible"` → `OpenAiCompatibleAdapter`).
+1. For each entry of the `adapters[]` array, construct an adapter instance selected by the `type` field (`"openai-compatible"` → `OpenAICompatibleAdapter`); the `type` → factory map is injected by the entry point, and the registry performs the dispatch (see [layers.md](../architecture/layers.md)).
 2. Register every instance in the adapter registry keyed by its unique `id`; the router resolves `<adapterId>/` prefixes through this registry (see [routing.md](../domains/routing.md)).
 3. Abort startup on invalid config: unknown `type`, duplicate `id`, or `id` not matching `[a-z0-9][a-z0-9-]*` — a gateway with an invalid config never listens (see [security-model.md](../architecture/security-model.md)).
 4. Probe each adapter once (`connect()` → `listModels()`, 10-second budget): the outcome is logged with the adapter id; a failed probe is **not fatal** — the adapter stays registered, and its unavailability surfaces per request. The gateway starts even with unreachable upstreams (see [data-flow.md](../architecture/data-flow.md)).

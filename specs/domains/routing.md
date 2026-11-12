@@ -6,9 +6,9 @@ Maps OpenAI-protocol requests onto the adapter registry. The model namespace is 
 
 ## Key Files
 
-- `src/gateway/router.ts` — model-id prefix parsing and adapter resolution (`resolveModel`) <!-- TODO: verify -->
-- `src/httpapi/handlers/models.ts` — `GET /v1/models` aggregation handler <!-- TODO: verify -->
-- `src/httpapi/handlers/completions.ts` — `POST /v1/chat/completions` and `POST /v1/completions` dispatch handlers <!-- TODO: verify -->
+- `src/gateway/router.ts` — model-id prefix parsing and adapter resolution (`resolveModel`)
+- `src/httpapi/handlers/models.ts` — `GET /v1/models` aggregation handler
+- `src/httpapi/handlers/completions.ts` — `POST /v1/chat/completions` and `POST /v1/completions` dispatch handlers
 
 ## Core Types
 
@@ -22,15 +22,20 @@ interface RouteResolution {
   upstreamModel: string;  // prefix stripped; what upstream receives in body.model
 }
 
-/** "openai/gpt-4o" → { adapter: registry entry "openai", upstreamModel: "gpt-4o" } */
-declare function resolveModel(model: PrefixedModelId, registry: AdapterRegistry): RouteResolution;
+/** "openai/gpt-4o" → { adapter: registry entry "openai", upstreamModel: "gpt-4o" };
+    null when the id does not resolve — the dispatch handler then answers
+    404 model_not_found without any upstream contact. */
+declare function resolveModel(model: PrefixedModelId, registry: AdapterRegistry): RouteResolution | null;
 
-/** Envelope for gateway-generated errors (dispatch failures only) — OpenAI-native. */
+/** Envelope for gateway-generated errors — OpenAI-native; constructed in
+    `src/httpapi/errors.ts` (see also the Error Propagation table in
+    contracts/client-gateway.md). */
 interface GatewayError {
   error: {
     message: string;
     type: "invalid_request_error" | "api_error";
-    code: "model_not_found" | "upstream_error" | "upstream_timeout";
+    param?: string;   // "model" on model_not_found
+    code?: "model_not_found" | "upstream_error" | "upstream_timeout";  // absent on 400
   };
 }
 ```
@@ -39,7 +44,7 @@ Resolution rules:
 
 - no `/` in the model id, or an empty half → `404` `model_not_found`;
 - prefix is not a registered adapter id → `404` `model_not_found`;
-- upstream unreachable / timed out (raised by the adapter) → `504` `upstream_timeout`; a non-JSON upstream error body → `502` `upstream_error`;
+- upstream unreachable / timed out → `504` `upstream_timeout`; a non-JSON upstream error body → `502` `upstream_error` — both synthesized by the adapter as a `Response` (`forward()` never rejects; specs/contracts/gateway-upstream.md). An unexpected rejection maps through the app's error middleware to a `502` `api_error` envelope;
 - an unknown *model* under a known adapter is not a gateway error — the request is forwarded and the upstream owns the verdict.
 
 Endpoint map:
@@ -71,7 +76,7 @@ Client                          Gateway                                   Upstre
 Aggregation on `GET /v1/models`:
 
 ```
-registry.all() ─► Promise.all(adapters.map(a => a.listModels()))
+registry.all() ─► Promise.allSettled(adapters.map(a => a.listModels()))
                        │  each adapter returns provider-native ids (unprefixed);
                        │  a failed adapter contributes no entries (warning logged)
                        ▼

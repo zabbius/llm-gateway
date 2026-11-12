@@ -6,7 +6,7 @@ The MVP provider adapter: a pure HTTP proxy in front of any upstream that speaks
 
 ## Key Files
 
-- `src/adapters/openai-compatible/adapter.ts` — `OpenAICompatibleAdapter`: proxying, header policy, timeouts, model mapping <!-- TODO: verify -->
+- `src/adapters/openai-compatible.ts` — `OpenAICompatibleAdapter`: proxying, header policy, timeouts, model mapping
 
 ## Behavior
 

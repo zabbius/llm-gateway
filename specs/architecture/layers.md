@@ -6,22 +6,20 @@ llm-gateway is an OpenAI-protocol proxy: clients speak the OpenAI API, and the g
 
 Stack on MVP: TypeScript on Bun, Hono as the HTTP framework, JSON configuration.
 
-Source paths below are planned paths under the Greenfield Rule — see [META.md](../META.md#greenfield-rule).
-
 ## Layer Hierarchy
 
-| Layer | Planned location | Responsibility |
+| Layer | Location | Responsibility |
 | ----- | ---------------- | -------------- |
-| entry point | `src/index.ts` <!-- TODO: verify --> | reads config, constructs adapters, wires the registry, builds the app, starts the listener |
-| Hono app | `src/httpapi/app.ts` <!-- TODO: verify --> | HTTP concerns only: middleware (request logging, error mapping), route mounting |
-| gateway router | `src/gateway/router.ts` <!-- TODO: verify --> | OpenAI-protocol endpoints: aggregates `GET /v1/models`, dispatches `POST /v1/chat/completions` by adapter-id prefix |
-| adapter registry | `src/adapters/registry.ts` <!-- TODO: verify --> | holds adapter instances keyed by adapter id; exact-match lookup; populated once at startup |
-| adapters | `src/adapters/*` <!-- TODO: verify --> | speak one upstream provider dialect each; the openai-compatible adapter is a pure pass-through proxy |
+| entry point | `src/index.ts` | reads config, constructs adapters, wires the registry, builds the app, starts the listener |
+| Hono app | `src/httpapi/app.ts` | HTTP concerns only: middleware (request logging, error mapping), route mounting |
+| gateway router | `src/gateway/router.ts` | OpenAI-protocol endpoints: aggregates `GET /v1/models`, dispatches `POST /v1/chat/completions` by adapter-id prefix |
+| adapter registry | `src/adapters/registry.ts` | holds adapter instances keyed by adapter id; exact-match lookup; populated once at startup |
+| adapters | `src/adapters/*` | speak one upstream provider dialect each; the openai-compatible adapter is a pure pass-through proxy |
 
 Cross-cutting modules importable by every layer:
 
-- shared protocol types: `src/types.ts` <!-- TODO: verify -->
-- leveled logging (trace/debug/info/warning/error/none, stderr): `src/logging/logger.ts` <!-- TODO: verify -->
+- shared protocol types: `src/types.ts`
+- leveled logging (trace/debug/info/warning/error/none, stderr): `src/logging/logger.ts`
 
 ## Dependency Diagram
 
@@ -65,26 +63,24 @@ Cross-cutting modules importable by every layer:
 +--------------------------------------------------------------------+
 ```
 
-All source paths in this diagram are planned paths pending verification (Greenfield Rule).
-
 ## Invariants
 
 Import rules (the dependency contract of the gateway):
 
 1. Dependencies point strictly downward: entry point → Hono app → gateway core → adapters. A layer imports only layers below it plus cross-cutting modules; upward imports and import cycles never occur.
-2. Only the entry point reads the config file and names concrete adapter classes. Every other layer receives already-constructed instances or interfaces; concrete adapter imports live in exactly one place — the startup wiring in `src/index.ts` <!-- TODO: verify -->.
-3. The Hono app (`src/httpapi/app.ts` <!-- TODO: verify -->) imports the gateway core only; it never imports the registry or any adapter.
-4. The gateway core and the registry reference adapters exclusively through the adapter interface (`src/adapters/adapter.ts` <!-- TODO: verify -->); a concrete adapter name never appears in core code.
+2. Only the entry point reads the config file and names concrete adapter classes. Every other layer receives already-constructed instances or interfaces; concrete adapter imports live in exactly one place — the startup wiring in `src/index.ts`.
+3. The Hono app (`src/httpapi/app.ts`) imports the gateway core only; it never imports the registry or any adapter.
+4. The gateway core and the registry reference adapters exclusively through the adapter interface (`src/adapters/adapter.ts`); a concrete adapter name never appears in core code.
 5. Adapters import only the adapter interface and cross-cutting modules (shared types, logging); they never import the HTTP layer, the router, the registry, or the config loader.
 6. The adapter interface sits at the bottom of the graph: it imports only shared types, and both the core and the adapters depend on it.
-7. Cross-cutting modules (`src/types.ts`, `src/logging/logger.ts` <!-- TODO: verify -->) are imported by any layer and import no project module except shared types.
+7. Cross-cutting modules (`src/types.ts`, `src/logging/logger.ts`) are imported by any layer and import no project module except shared types.
 
 Structural invariants:
 
 - The process has exactly one entry point; all wiring happens there.
 - The registry is the only holder of adapter instances; it is written exclusively during startup and read without mutation at request time.
 - The Hono app is the only place that maps errors to HTTP status codes.
-- The adapter interface is the only adapter shape visible outside `src/adapters/` <!-- TODO: verify -->.
+- The adapter interface is the only adapter shape visible outside `src/adapters/`.
 
 ## Anti-Patterns
 

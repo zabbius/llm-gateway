@@ -6,8 +6,8 @@ Defines the gateway's config file: where it lives, its JSON schema (`listen`, `l
 
 ## Key Files
 
-- `src/config/schema.ts` — `GatewayConfig` types and validation rules, including per-type adapter fields <!-- TODO: verify -->
-- `src/config/load.ts` — file discovery, read, parse, error aggregation, normalized config out <!-- TODO: verify -->
+- `src/config/schema.ts` — `GatewayConfig` types and validation rules, including per-type adapter fields
+- `src/config/load.ts` — file discovery, read, parse, error aggregation, normalized config out
 
 ## Core Types
 
@@ -113,7 +113,7 @@ All problems for one start are printed to stderr, one error line each (via the l
 
 ## Extension Points
 
-- A new adapter `type` extends the schema with its own required fields inside `src/config/schema.ts` <!-- TODO: verify -->; validation stays in one place.
+- A new adapter `type` extends the schema with its own required fields inside `src/config/schema.ts`; validation stays in one place.
 - Future: environment-variable interpolation of secrets (`apiKey`) — the file format does not change.
 
 ## Related Specs

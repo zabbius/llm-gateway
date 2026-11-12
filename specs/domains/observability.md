@@ -6,7 +6,7 @@ Leveled logging for the whole gateway: exactly one process-wide logger (pino), w
 
 ## Key Files
 
-- `src/logging/logger.ts` — pino bootstrap: level mapping, stderr destination, child-logger factory <!-- TODO: verify -->
+- `src/logging/logger.ts` — pino bootstrap: level mapping, stderr destination, child-logger factory
 
 ## Core Types
 
@@ -74,7 +74,7 @@ Config uses the gateway vocabulary (`warning`, `none`); the mapping to pino's `w
 
 - Per-request correlation: a request id enters as a child-logger binding when request logging lands — call sites stay unchanged.
 - Per-adapter log isolation already works via `component: "adapter:<id>"` children.
-- Swapping the transport (e.g. a future OpenTelemetry bridge) touches only `src/logging/logger.ts` <!-- TODO: verify -->, not call sites.
+- Swapping the transport (e.g. a future OpenTelemetry bridge) touches only `src/logging/logger.ts`, not call sites.
 
 ## Related Specs
 

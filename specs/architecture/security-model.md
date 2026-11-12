@@ -38,7 +38,7 @@ The gateway is a credential custodian: it holds provider API keys that clients m
 
 ## Redaction in Logs
 
-- Logging is leveled (trace/debug/info/warning/error/none) and writes to stderr. The logging layer redacts a fixed set of sensitive fields (authorization, x-api-key, api-key, cookie, token) before emitting any line, at every level including trace. <!-- TODO: verify once the logging layer is implemented (library chosen: pino, ADR-004) -->
+- Logging is leveled (trace/debug/info/warning/error/none) and writes to stderr. The logging layer redacts a fixed set of sensitive fields (authorization, x-api-key, api-key, cookie, token) before emitting any line, at every level including trace.
 - Startup logs adapter ids and types; the raw config is never dumped, and key material never reaches a log line.
 - Adapters log upstream interactions as metadata (method, host, status, byte counts). Request and response bodies appear only at trace/debug and only after redaction.
 - Upstream error text is redacted before logging: provider error payloads sometimes echo request headers.

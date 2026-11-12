@@ -6,10 +6,10 @@ A deliberately thin placeholder SPA pinned to the React + Bootstrap stack. The M
 
 ## Key Files
 
-- `web/package.json` — React, Bootstrap, Vite (dev server + build) <!-- TODO: verify -->
-- `web/index.html` — SPA entry document <!-- TODO: verify -->
-- `web/src/main.tsx` — React mount point <!-- TODO: verify -->
-- `web/src/App.tsx` — root component: the MVP stub page <!-- TODO: verify -->
+- `web/package.json` — React, Bootstrap, Vite (dev server + build)
+- `web/index.html` — SPA entry document
+- `web/src/main.tsx` — React mount point
+- `web/src/App.tsx` — root component: the MVP stub page
 
 ## Core Types
 

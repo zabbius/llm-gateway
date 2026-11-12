@@ -6,9 +6,9 @@ Owns the connections to upstream LLM providers. The gateway instantiates one ada
 
 ## Key Files
 
-- `src/adapters/adapter.ts` — the `Adapter` interface, `AdapterConfig`, `AdapterType`, `ProxyRequest`, `ModelEntry` <!-- TODO: verify -->
-- `src/adapters/registry.ts` — `AdapterRegistry`: builds instances from config (the `type` → constructor dispatch lives here), id-keyed lookup, aggregated model listing <!-- TODO: verify -->
-- `src/adapters/openai-compatible.ts` — the MVP `openai-compatible` adapter (pure HTTP proxy) <!-- TODO: verify -->
+- `src/adapters/adapter.ts` — the `Adapter` interface, `AdapterConfig`, `AdapterType`, `ProxyRequest`, `ModelEntry`
+- `src/adapters/registry.ts` — `AdapterRegistry`: builds instances from config (the `type` → factory dispatch lives here; the factory map is injected by the entry point), id-keyed lookup, aggregated model listing
+- `src/adapters/openai-compatible.ts` — the MVP `openai-compatible` adapter (pure HTTP proxy)
 
 ## Core Types
 
@@ -28,6 +28,7 @@ interface ModelEntry {
   object: "model";
   created: number;     // passed through from upstream
   owned_by: string;    // rewritten by the aggregation to the adapter id
+  [field: string]: unknown;  // provider-native extras ride along unchanged
 }
 
 interface Adapter {
@@ -37,15 +38,24 @@ interface Adapter {
   listModels(): Promise<ModelEntry[]>;                 // provider-native ids, unprefixed
   forward(request: ProxyRequest): Promise<Response>;   // pure pass-through
 }
+
+/**
+ * Constructor of one adapter implementation, selected by the config entry's
+ * `type`. The `type` → factory map is injected by the entry point (the only
+ * place concrete adapter classes are named — layers.md invariant 2); the
+ * registry performs the dispatch on `type`.
+ */
+type AdapterFactory = (entry: AdapterConfig, logger: pino.Logger) => Adapter;
 ```
 
 The registry is the domain's aggregate root:
 
 ```ts
 class AdapterRegistry {
-  static create(config: GatewayConfig): Promise<AdapterRegistry>;
-  find(id: string): Adapter | undefined; // keyed by adapter id
-  all(): Adapter[];                      // config order, feeds aggregation
+  static create(entries: readonly AdapterConfig[], factories: AdapterFactories,
+                logger: pino.Logger): Promise<AdapterRegistry>;
+  find(id: string): Adapter | undefined; // exact-id lookup
+  all(): readonly Adapter[];             // config order, feeds aggregation
 }
 ```
 

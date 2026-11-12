@@ -37,11 +37,9 @@ process start (bun src/index.ts)
 ready -- a client can chat with an LLM through the gateway
 ```
 
-All source paths in this diagram are planned paths pending verification (Greenfield Rule).
-
 Notes:
 
-- After construction every adapter runs a one-shot startup probe (`connect()` → `listModels()`, 10-second budget): the outcome is logged (a failure logs a warning naming the adapter id), and startup continues — the gateway comes up even with unreachable upstreams; their unavailability surfaces per request. <!-- TODO: verify -->
+- After construction every adapter runs a one-shot startup probe (`connect()` → `listModels()`, 10-second budget): the outcome is logged (a failure logs a warning naming the adapter id), and startup continues — the gateway comes up even with unreachable upstreams; their unavailability surfaces per request.
 - The listener starts only after every probe finished (ok or logged).
 
 ## Request Lifecycle: Chat Completion
@@ -82,8 +80,6 @@ log one line at the configured level to stderr
 (adapter id, status, duration; no key material -- security-model.md)
 ```
 
-All source paths in this diagram are planned paths pending verification (Greenfield Rule).
-
 ## Request Lifecycle: Models List
 
 ```
@@ -107,10 +103,10 @@ flat aggregated list in the OpenAI list shape -> client
 
 ## Errors Along the Flow
 
-- Upstream failure: the adapter raises; the app's error middleware maps it to an HTTP status (upstream status preserved where available) and logs at warning or error.
+- Upstream failure: the adapter never raises — it relays the upstream status and body, or synthesizes a 502 upstream_error / 504 upstream_timeout envelope (gateway-upstream.md); the app's error middleware maps only unexpected gateway-side exceptions to a 502 upstream_error envelope, and logs at warning or error.
 - Routing failures (unprefixed model, unknown adapter id) never reach an adapter — they are answered at stages [3] and [4].
 - Chat requests are single-adapter by construction, so one provider being down never blocks requests targeting other providers.
-- Models aggregation degrades: an adapter that fails or times out contributes no entries; the rest of the list still returns with status 200, and the failure is logged as a warning naming the adapter id. <!-- TODO: verify -->
+- Models aggregation degrades: an adapter that fails or times out contributes no entries; the rest of the list still returns with status 200, and the failure is logged as a warning naming the adapter id.
 
 ## Invariants
 
