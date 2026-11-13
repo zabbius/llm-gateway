@@ -26,6 +26,7 @@ request/response transformation beyond the model-id rewrite.
 ## Requirements
 
 - [Bun](https://bun.sh) (the gateway and the `web/` build)
+- `openssl` on PATH — only for `tools/generate-tls-cert.sh` (self-signed TLS pair generation)
 
 ## Quick start
 
@@ -70,9 +71,15 @@ request/response transformation beyond the model-id rewrite.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `listen` | `"host:port"` | `127.0.0.1:8080` | Bind address; IPv6 written as `[::1]:8080` |
+| `server.listen` | `"host:port"` | `127.0.0.1:8080` | Bind address; IPv6 written as `[::1]:8080` |
+| `server.tls` | object | — (no `tls` block → plain HTTP) | Listener TLS: `enabled` (boolean, required in the block), `cert` / `key` (PEM file paths, required when enabled) — see "TLS listener" below |
 | `logLevel` | `trace`, `debug`, `info`, `warning`, `error`, `none` | `info` | `none` silences logging entirely |
 | `upstreams` | array | — (required) | At least one entry; `id` unique, `^[a-z0-9][a-z0-9-]*$` — never `/` |
+
+Migration: the listener address moved under `server` — a config carrying top-level
+`listen` is rejected as an unknown key; write `"server": { "listen": "127.0.0.1:8080" }`
+instead ([ADR-007](specs/decisions/007-tls-listener-server-block.md): a pre-release hard
+cut, no alias).
 
 Each upstream entry: `type` (registered: `openai-compatible`), `id`, `baseUrl` (absolute
 http(s) URL including the API root, e.g. `https://api.openai.com/v1`; one trailing slash
@@ -104,6 +111,39 @@ bun tools/tls-fingerprint.ts --expect 'K4vmDE8v8SKXajayPc4yMc49GIvJEHyUF8mRo7bu/
 
 Details: `specs/decisions/005-per-upstream-tls-pinning.md` (ADR-005),
 `specs/domains/upstreams/openai-compatible.md`.
+
+### TLS listener (HTTPS)
+
+The gateway serves plain HTTP by default. HTTPS is switched on explicitly, with a PEM pair
+on disk ([ADR-007](specs/decisions/007-tls-listener-server-block.md)):
+
+```json
+{
+  "server": {
+    "listen": "127.0.0.1:8080",
+    "tls": { "enabled": true, "cert": "./tls/cert.pem", "key": "./tls/key.pem" }
+  }
+}
+```
+
+`tools/generate-tls-cert.sh` generates a matching self-signed pair (server-auth
+certificate, unencrypted `600`-mode key):
+
+```sh
+tools/generate-tls-cert.sh                       # → ./tls/cert.pem + ./tls/key.pem (localhost)
+tools/generate-tls-cert.sh --hostname llm.lan --san 10.0.0.5 --out-dir ./tls
+```
+
+A TLS-enabled gateway never falls back to plain HTTP: both PEM files are read at startup,
+before the port binds — a missing or unreadable file exits with code 1. TLS encrypts the
+transport only; it is not client authentication (still a no-op in the MVP — keep the
+loopback bind). Details: `specs/architecture/security-model.md`.
+
+A self-signed certificate needs the usual client-side flag:
+
+```sh
+curl -k https://127.0.0.1:8080/llm/v1/models
+```
 
 Validation is total: every problem of one config is reported to stderr (one line each)
 and the process exits with code 1 before any port is bound. Unknown keys are rejected,
@@ -157,6 +197,7 @@ src/
   httpapi/      — Hono app, routes, the OpenAI error envelope, handlers
 tools/
   tls-fingerprint.ts — prints (or with --expect verifies) the tlsFingerprint SPKI pin
+  generate-tls-cert.sh — self-signed TLS pair for the listener (`server.tls`): cert.pem + key.pem
 web/            — static SPA served at / (React 19, Bootstrap 5, Vite)
 specs/          — design contracts; start at specs/INDEX.md
 ```

@@ -2,14 +2,14 @@
 
 ## Boundary Rule
 
-The management API is a strictly read-only observation surface mounted at `/api/*` (namespace: [ADR-006](../decisions/006-gateway-surface-namespace.md)): it reports gateway state (upstream probe outcomes, sanitized configuration) and never mutates it — no endpoint on this boundary writes config, restarts upstreams, or triggers any action. No key material ever crosses this boundary: `apiKey` and `tlsFingerprint` values are replaced by a fixed mask before serialization, and no request header, body, or query parameter can widen what is returned. The boundary serves any HTTP client in plain JSON — the SPA and alternative non-browser clients (curl, monitoring, scripts) consume it identically; there are no sessions and no browser-only affordances. Not allowed: write operations, credential exposure, provider (LLM) traffic on this prefix, or a second error format.
+The management API is a strictly read-only observation surface mounted at `/api/*` (namespace: [ADR-006](../decisions/006-gateway-surface-namespace.md)): it reports gateway state (upstream probe outcomes, sanitized configuration) and never mutates it — no endpoint on this boundary writes config, restarts upstreams, or triggers any action. No key material ever crosses this boundary: `apiKey` and `tlsFingerprint` values are replaced by a fixed mask before serialization (the `server.tls` PEM paths pass verbatim — a path is not secret), and no request header, body, or query parameter can widen what is returned. The boundary serves any HTTP client in plain JSON — the SPA and alternative non-browser clients (curl, monitoring, scripts) consume it identically; there are no sessions and no browser-only affordances. Not allowed: write operations, credential exposure, provider (LLM) traffic on this prefix, or a second error format.
 
 ## Interfaces
 
 | Interface | Package | Consumed By | Purpose |
 | --------- | ------- | ----------- | ------- |
 | `GET /api/status` (HTTP) | `src/httpapi/handlers/status.ts` | SPA, operators, non-browser clients | Upstream health snapshot: every configured upstream with its startup-probe outcome, in config order |
-| `GET /api/configuration` (HTTP) | `src/httpapi/handlers/configuration.ts` | SPA, operators, non-browser clients | Sanitized effective configuration: `listen`, `logLevel`, upstream entries with credentials masked |
+| `GET /api/configuration` (HTTP) | `src/httpapi/handlers/configuration.ts` | SPA, operators, non-browser clients | Sanitized effective configuration: the `server` block (`listen`, `tls`), `logLevel`, upstream entries with credentials masked |
 | OpenAI error envelope (JSON schema) | `src/httpapi/errors.ts` | every client of this boundary | Single error shape for gateway-generated failures — the same mapper the LLM surface uses (see Error Propagation) |
 
 `GET /api/status` → `200`:
@@ -30,7 +30,10 @@ The management API is a strictly read-only observation surface mounted at `/api/
 
 ```json
 {
-  "listen": "127.0.0.1:8080",
+  "server": {
+    "listen": "127.0.0.1:8080",
+    "tls": { "enabled": true, "cert": "./tls/cert.pem", "key": "./tls/key.pem" }
+  },
   "logLevel": "info",
   "upstreams": [
     {
@@ -46,6 +49,7 @@ The management API is a strictly read-only observation surface mounted at `/api/
 
 - `apiKey` is always the fixed mask literal `"[Configured]"` — the view's own constant (`CONFIGURED_MASK`, `src/config/redact.ts`), deliberately distinct from the logging layer's censor (`"[Redacted]"`, `REDACT_CENSOR`, `src/logging/logger.ts`) — so presence (a key is configured) is visible while the value never is.
 - `tlsFingerprint` is the fixed mask when configured, `null` when absent; `baseUrl` is returned verbatim (it is not secret — every client request already carries it).
+- `server.listen` is the effective listener address after startup normalization; `server.tls` mirrors the config's `server.tls` block verbatim (`enabled`, PEM paths) and is JSON `null` when the config carries no `tls` block — paths are not secret ([ADR-007](../decisions/007-tls-listener-server-block.md)).
 
 ## Initialization
 
@@ -62,7 +66,7 @@ client ◀─ 200 {"upstreams": [...]} ─── gateway
 
 client ── GET /api/configuration ─────▶ gateway
 gateway   redacted view built at the entry point (credentials masked in the config domain)
-client ◀─ 200 {"listen", "logLevel", "upstreams": [...]} ─ gateway
+client ◀─ 200 {"server", "logLevel", "upstreams": [...]} ─ gateway
 ```
 
 ## Error Propagation
@@ -73,7 +77,7 @@ Gateway-generated errors on this boundary use the OpenAI error envelope, produce
 
 Derived from the actual coupling of this boundary:
 
-1. **Response shapes** (`upstreams[]` field names, the `probe` enum `"ok" | "failed"`, the `reason` presence rule, the `listen` / `logLevel` keys) — the SPA and every external consumer parse them. Any field add/rename/reshape updates this contract and the SPA consumers in the same change.
+1. **Response shapes** (`upstreams[]` field names, the `probe` enum `"ok" | "failed"`, the `reason` presence rule, the `server` / `logLevel` keys) — the SPA and every external consumer parse them. Any field add/rename/reshape updates this contract and the SPA consumers in the same change.
 2. **The masking rule** (`apiKey` always the fixed mask `"[Configured]"`; `tlsFingerprint` mask-or-`null`) — weakening it in any way (partial reveal, conditional omission of the mask) exposes credential material and contradicts the security model ([security-model.md](../architecture/security-model.md)); it requires an ADR plus a security-model update, never a silent change.
 3. **The read-only boundary rule** — adding a mutating endpoint (`POST`/`PUT`/`DELETE` on `/api/*`) changes the trust posture of the whole prefix: it requires an ADR and updates to [security-model.md](../architecture/security-model.md) and [data-flow.md](../architecture/data-flow.md) before implementation.
 4. **The `/api/*` prefix itself** — fixed by [ADR-006](../decisions/006-gateway-surface-namespace.md); moving or re-prefixing it re-cuts every consumer and requires a new ADR first.

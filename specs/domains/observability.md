@@ -49,9 +49,9 @@ stderr (fd 2) ──► environment's log collection (out of gateway scope)
 | ----- | --------------- |
 | `trace` | per-request internals; in the MVP only the auth-stage placeholder emits a trace line (method, path) |
 | `debug` | request handled (method, path, status, duration, resolved upstream id), upstream resolved on completions dispatch (upstream id, upstream model, upstream path), models aggregated (count) |
-| `info` | startup: config loaded, upstream probe results (connected / degraded), listening address; shutdown |
+| `info` | startup: config loaded, upstream probe results (connected / degraded), listening address with the TLS fact (`tls: true|false` — never PEM contents); shutdown |
 | `warning` | degraded but continuing: startup probe failed (upstream degraded, startup continues), model list failed for one upstream (its entries drop out, the list still answers 200) |
-| `error` | request failed (upstream unreachable/timeout → `504 upstream_timeout`; non-JSON upstream → `502 upstream_error`; TLS pin verification failed on a pinned upstream → `502 upstream_tls_error`), unhandled exception, startup validation failure, listen bind failure (process exits) |
+| `error` | request failed (upstream unreachable/timeout → `504 upstream_timeout`; non-JSON upstream → `502 upstream_error`; TLS pin verification failed on a pinned upstream → `502 upstream_tls_error`), unhandled exception, startup validation failure, TLS certificate/key file missing or unreadable (before the port binds; the path is named, its contents never logged), listen bind failure (process exits) |
 | `none` | nothing — the logger is silent |
 
 Config uses the gateway vocabulary (`warning`, `none`); the mapping to pino's `warn`/`silent` spellings lives in exactly one place — the level table above.

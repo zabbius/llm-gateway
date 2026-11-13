@@ -19,7 +19,7 @@ const SECRET_PIN = "AAkBS7Y8xgDdCPe0bPq0WE1cR4m5jXKzlvJNUdBtTR0=";
 /** A normalized config: one pinned upstream, one unpinned. */
 function config(): NormalizedGatewayConfig {
   return {
-    listen: "127.0.0.1:8080",
+    server: { listen: "127.0.0.1:8080", tls: { enabled: true, cert: "./tls/cert.pem", key: "./tls/key.pem" } },
     logLevel: "info",
     upstreams: [
       {
@@ -47,7 +47,7 @@ function appWith(): Hono<GatewayEnv> {
 }
 
 interface ConfigurationBody {
-  listen: string;
+  server: { listen: string; tls: { enabled: boolean; cert: string | null; key: string | null } | null };
   logLevel: string;
   upstreams: Array<{ type: string; id: string; baseUrl: string; apiKey: string; tlsFingerprint: string | null }>;
 }
@@ -70,7 +70,8 @@ describe("handleConfiguration (GET /api/configuration)", () => {
     const response = await appWith().request("/api/configuration");
     const body = (await response.json()) as ConfigurationBody;
 
-    expect(body.listen).toBe("127.0.0.1:8080");
+    expect(body.server.listen).toBe("127.0.0.1:8080");
+    expect(body.server.tls).toEqual({ enabled: true, cert: "./tls/cert.pem", key: "./tls/key.pem" });
     expect(body.logLevel).toBe("info");
     expect(body.upstreams[0]?.apiKey).toBe("[Configured]");
     expect(body.upstreams[0]?.tlsFingerprint).toBe("[Configured]");
@@ -87,5 +88,14 @@ describe("handleConfiguration (GET /api/configuration)", () => {
     expect(raw).not.toContain("sk-super-secret");
     expect(raw).toContain("[Configured]");
     expect(raw).toContain('"tlsFingerprint":null'); // absent → JSON null, not omission
+  });
+
+  test("a config without a tls block serializes server.tls as null", async () => {
+    const view = redactedConfigView({ ...config(), server: { listen: "127.0.0.1:8080" } });
+    const app = new Hono<GatewayEnv>();
+    app.get("/api/configuration", handleConfiguration(view));
+
+    const raw = await (await app.request("/api/configuration")).text();
+    expect(raw).toContain('"tls":null'); // absent tls block → JSON null, not omission
   });
 });

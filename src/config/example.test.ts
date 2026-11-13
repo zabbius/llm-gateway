@@ -16,6 +16,8 @@ import {
   UPSTREAM_KEYS,
   UPSTREAM_TYPES,
   TOP_LEVEL_KEYS,
+  SERVER_KEYS,
+  TLS_KEYS,
   validateGatewayConfig,
 } from "./schema.ts";
 
@@ -31,7 +33,7 @@ describe("config.example.json", () => {
     const validated = validateGatewayConfig(readExample());
     expect(validated.ok).toBe(true);
     if (!validated.ok) return; // narrowing; the real failure list is asserted above
-    expect(validated.config.listen).toBe("127.0.0.1:8080");
+    expect(validated.config.server.listen).toBe("127.0.0.1:8080");
     expect(validated.config.logLevel).toBe("info");
     expect(validated.config.upstreams.length).toBeGreaterThanOrEqual(1);
   });
@@ -39,6 +41,16 @@ describe("config.example.json", () => {
   test("covers every supported top-level key exactly", () => {
     const example = readExample() as Record<string, unknown>;
     expect(Object.keys(example).sort()).toEqual([...TOP_LEVEL_KEYS].sort());
+  });
+
+  test("the server block covers every supported server key exactly", () => {
+    const { server } = readExample() as { server: Record<string, unknown> };
+    expect(Object.keys(server).sort()).toEqual([...SERVER_KEYS].sort());
+  });
+
+  test("the tls block covers every supported tls key exactly", () => {
+    const { server } = readExample() as { server: { tls: Record<string, unknown> } };
+    expect(Object.keys(server.tls).sort()).toEqual([...TLS_KEYS].sort());
   });
 
   test("every upstream entry covers every supported upstream key exactly", () => {

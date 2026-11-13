@@ -1,5 +1,12 @@
 {
-  "listen": "127.0.0.1:8080",
+  "server": {
+    "listen": "127.0.0.1:8080",
+    "tls": {
+      "enabled": false,
+      "cert": "./tls/cert.pem",
+      "key": "./tls/key.pem"
+    }
+  },
   "logLevel": "info",
   "upstreams": [
     {

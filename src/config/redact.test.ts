@@ -2,8 +2,9 @@
  * The `redactedConfigView` contract (specs/contracts/gateway-management.md,
  * specs/architecture/security-model.md): the view carries the fixed mask in
  * place of every credential — never the configured values — for entries with
- * and without a `tlsFingerprint`, passes `listen` / `logLevel` / `baseUrl`
- * through verbatim, and neither mutates nor shares objects with the config.
+ * and without a `tlsFingerprint`, passes `server` (the `tls` block becoming
+ * `null` when absent) / `logLevel` / `baseUrl` through verbatim, and neither
+ * mutates nor shares objects with the config.
  */
 import { describe, expect, test } from "bun:test";
 import { CONFIGURED_MASK, redactedConfigView } from "./redact.ts";
@@ -14,8 +15,11 @@ const SECRET_KEY = "sk-live-super-secret-key";
 const SECRET_PIN = "ChVe2KjfNPYd8xw7nslGJTBuGOiOq2cQ0CpI1Fh2WhM=";
 
 /** A normalized config holding exactly one upstream entry. */
-function normalized(entry: UpstreamConfig): NormalizedGatewayConfig {
-  return { listen: "127.0.0.1:9090", logLevel: "debug", upstreams: [entry] };
+function normalized(
+  entry: UpstreamConfig,
+  tls?: NormalizedGatewayConfig["server"]["tls"],
+): NormalizedGatewayConfig {
+  return { server: { listen: "127.0.0.1:9090", tls }, logLevel: "debug", upstreams: [entry] };
 }
 
 function entry(overrides: Partial<UpstreamConfig> = {}): UpstreamConfig {
@@ -46,9 +50,21 @@ describe("redactedConfigView", () => {
     expect(view.upstreams[0]?.tlsFingerprint).toBeNull();
   });
 
-  test("listen, logLevel, baseUrl, type and id pass through verbatim; config order preserved", () => {
+  test("a tls block is mirrored field by field: enabled and the PEM paths", () => {
+    const view = redactedConfigView(normalized(entry(), { enabled: true, cert: "./tls/cert.pem", key: "./tls/key.pem" }));
+
+    expect(view.server.tls).toEqual({ enabled: true, cert: "./tls/cert.pem", key: "./tls/key.pem" });
+  });
+
+  test("a tls block without cert/key reports null paths, keeping enabled", () => {
+    const view = redactedConfigView(normalized(entry(), { enabled: false }));
+
+    expect(view.server.tls).toEqual({ enabled: false, cert: null, key: null });
+  });
+
+  test("server, logLevel, baseUrl, type and id pass through verbatim; config order preserved", () => {
     const config: NormalizedGatewayConfig = {
-      listen: "127.0.0.1:9090",
+      server: { listen: "127.0.0.1:9090" },
       logLevel: "debug",
       upstreams: [
         entry({ id: "alpha", baseUrl: "https://alpha.example/v1" }),
@@ -57,7 +73,8 @@ describe("redactedConfigView", () => {
     };
 
     const view = redactedConfigView(config);
-    expect(view.listen).toBe("127.0.0.1:9090");
+    expect(view.server.listen).toBe("127.0.0.1:9090");
+    expect(view.server.tls).toBeNull();
     expect(view.logLevel).toBe("debug");
     expect(view.upstreams.map((upstream) => upstream.id)).toEqual(["alpha", "beta"]);
     expect(view.upstreams[0]?.type).toBe("openai-compatible");
@@ -82,6 +99,8 @@ describe("redactedConfigView", () => {
     expect(config.upstreams[0]?.apiKey).toBe(SECRET_KEY); // config untouched
     expect(config.upstreams[0]?.tlsFingerprint).toBe(SECRET_PIN);
     expect(view.upstreams[0]).not.toBe(config.upstreams[0]); // no shared object
+    expect(view.server).not.toBe(config.server); // no shared server block
+    expect(view.server.tls).not.toBe(config.server.tls); // no shared tls block
     expect(view).toEqual(redactedConfigView(config)); // deterministic
   });
 });

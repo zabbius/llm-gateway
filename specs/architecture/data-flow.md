@@ -15,7 +15,8 @@ process start (bun src/index.ts)
      v
 [2] validate config:
       upstream entries (id, type, baseUrl, apiKey, optional tlsFingerprint pin),
-      listen host:port, log level
+      server.listen host:port, server.tls (enabled + cert/key paths
+      when enabled), log level
      |            invalid -> error to stderr, exit non-zero
      v
 [3] construct one upstream per entry
@@ -33,7 +34,10 @@ process start (bun src/index.ts)
       SPA static serving at /ui/*, root / -> 302 redirect to /ui
      |
      v
-[7] listen on the configured host:port (Bun.serve)
+[7] listen on the configured host:port (Bun.serve)  src/index.ts
+      tls enabled -> both PEM files (cert, key) are read first:
+      missing or unreadable -> error naming the path, exit non-zero;
+      Bun.serve receives the PEM contents under `tls`
      |
      v
 ready -- a client can chat with an LLM through the gateway
@@ -43,6 +47,7 @@ Notes:
 
 - After construction every upstream runs a one-shot startup probe (`connect()` → `listModels()`, 10-second budget): the outcome is logged (a failure logs a warning naming the upstream id), and startup continues — the gateway comes up even with unreachable upstreams; their unavailability surfaces per request. The probe outcome is retained by the registry and is what `GET /api/status` later reports ([gateway-management.md](../contracts/gateway-management.md)).
 - The listener starts only after every probe finished (ok or logged).
+- When TLS is enabled ([ADR-007](../decisions/007-tls-listener-server-block.md)), both PEM files are read right before the bind — after validation and app wiring, before any port is bound: a missing or unreadable file is a fatal startup error, so a TLS-enabled gateway never falls back to plain HTTP.
 
 ## Request Lifecycle: Chat Completion
 

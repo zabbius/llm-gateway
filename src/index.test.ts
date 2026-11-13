@@ -11,6 +11,9 @@
  *   stderr (config loaded, probe result, listening), stdout stays empty, key
  *   material never appears, SIGTERM shuts down cleanly.
  * - invalid config: every problem on stderr, exit code 1, no port bound.
+ * - TLS: https e2e with a throwaway self-signed cert (skipped when openssl is
+ *   absent); tls enabled but a PEM file missing → clear stderr line, exit 1,
+ *   no port bound.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -98,7 +101,7 @@ function fakeFactories(
 }
 
 function configJson(listen: string, upstreams: UpstreamConfig[]): Record<string, unknown> {
-  return { listen, logLevel: "none", upstreams };
+  return { server: { listen }, logLevel: "none", upstreams };
 }
 
 function entry(id: string, baseUrl = "https://upstream.example/v1"): UpstreamConfig {
@@ -251,7 +254,34 @@ describe("startGateway (subprocess, real process)", () => {
     return stream;
   }
 
-  async function waitUntilReady(url: string, proc: ReturnType<typeof Bun.spawn>, timeoutMs: number): Promise<void> {
+  /** Path of openssl, or null when the system has none (the https e2e skips). */
+  const OPENSSL = Bun.which("openssl");
+
+  /**
+   * Generate a throwaway self-signed certificate/key pair with openssl into
+   * `dir` (test-only material; the caller deletes the directory). Returns the
+   * two file paths the config references.
+   */
+  async function selfSignedCert(dir: string): Promise<{ cert: string; key: string }> {
+    const cert = join(dir, "cert.pem");
+    const key = join(dir, "key.pem");
+    const proc = Bun.spawnSync(
+      ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key, "-out", cert, "-days", "2", "-nodes", "-subj", "/CN=127.0.0.1"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    if (proc.exitCode !== 0) {
+      const stderr = proc.stderr instanceof ReadableStream ? await new Response(proc.stderr).text() : "";
+      throw new Error(`openssl failed (code ${proc.exitCode}):\n${stderr}`);
+    }
+    return { cert, key };
+  }
+
+  async function waitUntilReady(
+    url: string,
+    proc: ReturnType<typeof Bun.spawn>,
+    timeoutMs: number,
+    init: BunFetchRequestInit = {},
+  ): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (proc.exitCode !== null) {
@@ -259,7 +289,7 @@ describe("startGateway (subprocess, real process)", () => {
         throw new Error(`gateway process exited early (code ${proc.exitCode}):\n${stderr}`);
       }
       try {
-        const response = await fetch(url);
+        const response = await fetch(url, init);
         if (response.ok) return;
       } catch {
         // not listening yet — poll again
@@ -274,7 +304,7 @@ describe("startGateway (subprocess, real process)", () => {
     const upstream = mockUpstream();
     const port = freePort();
     const path = tempConfig({
-      listen: `127.0.0.1:${port}`,
+      server: { listen: `127.0.0.1:${port}` },
       logLevel: "info",
       upstreams: [
         { type: "openai-compatible", id: "mock", baseUrl: `http://127.0.0.1:${upstream.port}/v1`, apiKey },
@@ -341,7 +371,7 @@ describe("startGateway (subprocess, real process)", () => {
   test("invalid config: every problem on stderr, exit 1, no port bound", async () => {
     const port = freePort(); // the listen the config WOULD have used
     const path = tempConfig({
-      listen: `127.0.0.1:${port}`,
+      server: { listen: `127.0.0.1:${port}` },
       logLevel: "info",
       upstreams: [{ type: "nonexistent-type", id: "x", baseUrl: "http://127.0.0.1:1/v1", apiKey: "k" }],
     });
@@ -353,6 +383,94 @@ describe("startGateway (subprocess, real process)", () => {
       const stderr = await stderrText;
       expect(stderr).toContain("unknown upstream type");
       expect(stderr).toContain("upstreams[0]");
+      expect(stderr).not.toContain('"gateway listening"');
+
+      await expect(fetch(`http://127.0.0.1:${port}/llm/v1/models`)).rejects.toThrow();
+    } finally {
+      proc.kill();
+      cleanupConfig(path);
+    }
+  }, 15_000);
+
+  // Graceful degradation: without openssl the https surface is skipped, not
+  // failed — the rest of the suite still verifies the gateway.
+  test.skipIf(OPENSSL === null)("end-to-end over TLS: https models list through the started process", async () => {
+    const apiKey = "sk-tls-secret-value";
+    const upstream = mockUpstream();
+    const port = freePort();
+    const dir = mkdtempSync(join(tmpdir(), "gw-index-tls-"));
+    const { cert, key } = await selfSignedCert(dir);
+    const path = tempConfig({
+      server: { listen: `127.0.0.1:${port}`, tls: { enabled: true, cert, key } },
+      logLevel: "info",
+      upstreams: [
+        { type: "openai-compatible", id: "mock", baseUrl: `http://127.0.0.1:${upstream.port}/v1`, apiKey },
+      ],
+    });
+    const proc = spawnGateway(path);
+    const stderrText = new Response(piped(proc.stderr)).text();
+    try {
+      // The test client accepts the self-signed certificate — the fetch-side
+      // equivalent of curl -k, scoped to these requests only. Verification
+      // stays fully on everywhere else.
+      const insecure: BunFetchRequestInit = { tls: { rejectUnauthorized: false } };
+      const url = `https://127.0.0.1:${port}/llm/v1/models`;
+      await waitUntilReady(url, proc, 15_000, insecure);
+
+      const modelsResponse = await fetch(url, insecure);
+      expect(modelsResponse.status).toBe(200);
+      const models = (await modelsResponse.json()) as {
+        object: string;
+        data: Array<{ id: string; owned_by: string; object: string; created: number }>;
+      };
+      expect(models.object).toBe("list");
+      expect(models.data).toEqual([{ id: "mock/test-model", object: "model", created: 1, owned_by: "mock" }]);
+
+      proc.kill();
+      expect(await proc.exited).toBe(0);
+
+      const stderr = await stderrText;
+      expect(stderr).toContain('"gateway listening"');
+      // The listening line carries the fact of TLS — never the PEM contents
+      // (security-model.md invariant 7).
+      expect(stderr).toContain('"tls":true');
+      expect(stderr).not.toContain("BEGIN CERTIFICATE");
+      expect(stderr).not.toContain("PRIVATE KEY");
+      expect(stderr).not.toContain(apiKey);
+    } finally {
+      proc.kill();
+      await proc.exited.catch(() => undefined);
+      upstream.stop();
+      cleanupConfig(path);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("tls enabled but the certificate file is missing: clear stderr line, exit 1, no port bound", async () => {
+    const port = freePort(); // the listen the config WOULD have used
+    const dir = mkdtempSync(join(tmpdir(), "gw-index-tls-missing-"));
+    const certPath = join(dir, "cert.pem"); // never created
+    const keyPath = join(dir, "key.pem"); // never created
+    const path = join(dir, "config.json");
+    writeFileSync(
+      path,
+      JSON.stringify(
+        {
+          server: { listen: `127.0.0.1:${port}`, tls: { enabled: true, cert: certPath, key: keyPath } },
+          logLevel: "info",
+          upstreams: [{ type: "openai-compatible", id: "mock", baseUrl: "http://127.0.0.1:1/v1", apiKey: "k" }],
+        },
+        null,
+        2,
+      ),
+    );
+    const proc = spawnGateway(path);
+    const stderrText = new Response(piped(proc.stderr)).text();
+    try {
+      expect(await proc.exited).toBe(1);
+
+      const stderr = await stderrText;
+      expect(stderr).toContain(`tls certificate file not found/readable: ${certPath}`);
       expect(stderr).not.toContain('"gateway listening"');
 
       await expect(fetch(`http://127.0.0.1:${port}/llm/v1/models`)).rejects.toThrow();

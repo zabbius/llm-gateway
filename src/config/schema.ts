@@ -7,10 +7,10 @@
  * and their checks; the loading/reporting machinery in `src/config/load.ts`
  * never grows per-field knowledge.
  *
- * The schema is strict: unknown top-level keys and unknown per-upstream keys
- * are rejected, so typos fail loudly at startup. Validation is total — every
- * problem of one config is collected and reported together, never the first
- * one only.
+ * The schema is strict: unknown keys are rejected at every level — root,
+ * `server`, `server.tls`, per-upstream — so typos fail loudly at startup.
+ * Validation is total — every problem of one config is collected and
+ * reported together, never the first one only.
  */
 import type { LogLevel } from "../types.ts";
 
@@ -56,19 +56,45 @@ export interface UpstreamConfig {
   tlsFingerprint?: string;
 }
 
-/** The config file shape as parsed from JSON. */
-export interface GatewayConfig {
+/** TLS options of the gateway's own listener (`server.tls` in the config file). */
+export interface TlsConfig {
+  /**
+   * Required whenever the `tls` block is present: TLS is either explicitly
+   * on or explicitly off — the block without `enabled` never validates.
+   */
+  enabled: boolean;
+  /** PEM certificate-chain path; required when `enabled` is true */
+  cert?: string;
+  /** PEM private-key path; required when `enabled` is true */
+  key?: string;
+}
+
+/** The gateway listener block (`server` in the config file). */
+export interface ServerConfig {
   /** "host:port"; omitted → "127.0.0.1:8080" (loopback until gateway-auth lands) */
   listen?: string;
+  /** omitted → the listener serves plain HTTP */
+  tls?: TlsConfig;
+}
+
+/** The config file shape as parsed from JSON. */
+export interface GatewayConfig {
+  /** listener options; an omitted `server` block means every default */
+  server?: ServerConfig;
   /** omitted → "info" */
   logLevel?: LogLevel;
   /** at least one entry; ids unique across the array */
   upstreams: UpstreamConfig[];
 }
 
+/** The `server` block after normalization: `listen` is always set. */
+export interface NormalizedServerConfig extends ServerConfig {
+  listen: string;
+}
+
 /** A validated config with every optional field defaulted and baseUrl normalized. */
 export interface NormalizedGatewayConfig extends GatewayConfig {
-  listen: string;
+  server: NormalizedServerConfig;
   logLevel: LogLevel;
   upstreams: UpstreamConfig[];
 }
@@ -91,7 +117,9 @@ const LISTEN_PATTERN =
  * with the schema (specs/domains/configuration.md "Example file"): when a
  * key is added or removed here, the example must follow in the same change.
  */
-export const TOP_LEVEL_KEYS: readonly string[] = ["listen", "logLevel", "upstreams"];
+export const TOP_LEVEL_KEYS: readonly string[] = ["server", "logLevel", "upstreams"];
+export const SERVER_KEYS: readonly string[] = ["listen", "tls"];
+export const TLS_KEYS: readonly string[] = ["enabled", "cert", "key"];
 export const UPSTREAM_KEYS: readonly string[] = ["type", "id", "baseUrl", "apiKey", "tlsFingerprint"];
 
 /**
@@ -156,8 +184,9 @@ export function normalizeBaseUrl(url: string): string {
 /**
  * Validate and normalize a parsed config value. Collects every problem —
  * unknown keys, grammar violations, missing keys, duplicate ids — into one
- * `problems` list in a stable order (top level first, then upstream entries
- * by index); returns the normalized config only when the list stays empty.
+ * `problems` list in a stable order (top level first, then the `server`
+ * block, then upstream entries by index); returns the normalized config
+ * only when the list stays empty.
  */
 export function validateGatewayConfig(value: unknown): ValidatedConfig {
   const problems: string[] = [];
@@ -172,9 +201,53 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     }
   }
 
-  const listen = value.listen;
-  if (listen !== undefined && (typeof listen !== "string" || !isListen(listen))) {
-    problems.push(`listen must be a "host:port" string with a port in 1-65535 (got ${shown(listen)})`);
+  const server = value.server;
+  if (server !== undefined && !isPlainObject(server)) {
+    problems.push("server must be a JSON object");
+  }
+
+  if (isPlainObject(server)) {
+    for (const key of Object.keys(server)) {
+      if (!SERVER_KEYS.includes(key)) {
+        problems.push(`server: unknown key "${key}" (valid keys: ${SERVER_KEYS.join(", ")})`);
+      }
+    }
+
+    const listen = server.listen;
+    if (listen !== undefined && (typeof listen !== "string" || !isListen(listen))) {
+      problems.push(`server.listen must be a "host:port" string with a port in 1-65535 (got ${shown(listen)})`);
+    }
+
+    const tls = server.tls;
+    if (isPlainObject(tls)) {
+      for (const key of Object.keys(tls)) {
+        if (!TLS_KEYS.includes(key)) {
+          problems.push(`server.tls: unknown key "${key}" (valid keys: ${TLS_KEYS.join(", ")})`);
+        }
+      }
+
+      const enabled = tls.enabled;
+      if (enabled === undefined) {
+        problems.push('server.tls: missing required key "enabled"');
+      } else if (typeof enabled !== "boolean") {
+        problems.push(`server.tls: enabled must be a boolean (got ${shown(enabled)})`);
+      }
+
+      // cert/key are PEM file paths, not file contents — a problem line names
+      // the key and the rule and never echoes the configured path value.
+      for (const field of ["cert", "key"] as const) {
+        const given = tls[field];
+        if (given === undefined) {
+          if (enabled === true) {
+            problems.push(`server.tls: ${field} is required when tls is enabled`);
+          }
+        } else if (typeof given !== "string" || given.length === 0) {
+          problems.push(`server.tls: ${field} must be a non-empty string path`);
+        }
+      }
+    } else if (tls !== undefined) {
+      problems.push("server.tls must be a JSON object");
+    }
   }
 
   const logLevel = value.logLevel;
@@ -275,10 +348,21 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     return { ok: false, problems };
   }
 
+  const serverBlock: NormalizedServerConfig = {
+    listen: isPlainObject(server) && typeof server.listen === "string" ? server.listen : DEFAULT_LISTEN,
+  };
+  if (isPlainObject(server) && isPlainObject(server.tls)) {
+    serverBlock.tls = {
+      enabled: server.tls.enabled as boolean,
+      ...(typeof server.tls.cert === "string" ? { cert: server.tls.cert } : {}),
+      ...(typeof server.tls.key === "string" ? { key: server.tls.key } : {}),
+    };
+  }
+
   return {
     ok: true,
     config: {
-      listen: typeof listen === "string" ? listen : DEFAULT_LISTEN,
+      server: serverBlock,
       logLevel: isValidLogLevel(logLevel) ? logLevel : DEFAULT_LOG_LEVEL,
       upstreams: (upstreams as Record<string, unknown>[]).map((entry) => ({
         type: entry.type as UpstreamType,

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Defines the gateway's config file: where it lives, its JSON schema (`listen`, `logLevel`, plus the `upstreams` array), how it is validated at startup, and how validation failures are reported. `config.example.json` is the canonical example of that schema and is kept in sync with `src/config/schema.ts`.
+Defines the gateway's config file: where it lives, its JSON schema (the `server` listener block — `listen`, `tls` — plus `logLevel` and the `upstreams` array), how it is validated at startup, and how validation failures are reported. `config.example.json` is the canonical example of that schema and is kept in sync with `src/config/schema.ts`.
 
 ## Key Files
 
@@ -37,9 +37,25 @@ interface UpstreamConfig {
   tlsFingerprint?: string;
 }
 
-interface GatewayConfig {
+interface ServerConfig {
   /** "host:port"; omitted → "127.0.0.1:8080" (loopback until gateway-auth lands) */
   listen?: string;
+  /** omitted → the listener serves plain HTTP */
+  tls?: TlsConfig;
+}
+
+interface TlsConfig {
+  /** required whenever the block is present: TLS is explicitly on or off (ADR-007) */
+  enabled: boolean;
+  /** PEM certificate-chain path; required when enabled is true */
+  cert?: string;
+  /** PEM private-key path; required when enabled is true */
+  key?: string;
+}
+
+interface GatewayConfig {
+  /** listener options; an omitted server block means every default */
+  server?: ServerConfig;
   /** omitted → "info" */
   logLevel?: LogLevel;
   /** at least one entry; ids unique across the array */
@@ -56,8 +72,17 @@ interface GatewayConfig {
  * `null` when absent; `baseUrl` is verbatim (not secret). The view is built
  * field by field — the real credential values are never copied into it.
  */
+interface RedactedTlsConfig {
+  enabled: boolean;
+  cert: string | null; // verbatim PEM path — not secret; null when absent
+  key: string | null; // verbatim PEM path — not secret; null when absent
+}
+
 interface RedactedGatewayConfig {
-  listen: string;
+  server: {
+    listen: string; // the effective value after startup normalization
+    tls: RedactedTlsConfig | null; // null when the config carries no tls block
+  };
   logLevel: LogLevel;
   upstreams: Array<{
     type: UpstreamType;
@@ -79,7 +104,7 @@ startup
                                                     │ ok
                                                     ▼
                                           validate(GatewayConfig)
-      ┌── problems ─► one error line each on stderr ─► exit 1 (no listen)
+      ┌── problems ─► one error line each on stderr ─► exit 1 (no port bound)
       └── clean ─► normalized GatewayConfig ─► logger + UpstreamRegistry
 ```
 
@@ -89,7 +114,9 @@ startup
 - A config that fails validation prevents the server from binding any port.
 - Every validation problem is reported in the same startup run — the gateway never fails on the first problem and hides the rest.
 - Upstream ids are unique across the whole `upstreams` array, independent of `type`.
-- The default `listen` binds loopback only; a public interface is a deliberate config choice and stays discouraged while gateway-auth is unimplemented.
+- The default `server.listen` binds loopback only; a public interface is a deliberate config choice and stays discouraged while gateway-auth is unimplemented.
+- A `server.tls` block always states `enabled` explicitly — the block without it never validates — and an enabled block requires both PEM paths ([ADR-007](../decisions/007-tls-listener-server-block.md)).
+- TLS certificate and key files are read at startup, before the port binds: a missing or unreadable PEM file is a fatal startup error — one stderr line naming the path and the reason, exit 1. The paths may appear in logs; the file contents never do ([security-model.md](../architecture/security-model.md)).
 - `apiKey` values live in memory only and never appear in logs.
 - The management configuration view never carries credential values: `redactedConfigView` (`src/config/redact.ts`) replaces every `apiKey` with the fixed mask `[Configured]` and a configured `tlsFingerprint` with the same mask — `null` when absent — building the view field by field so the real values are never copied; the entry point builds the view and the raw config never crosses into the HTTP layer ([security-model.md](../architecture/security-model.md), [gateway-management.md](../contracts/gateway-management.md)).
 - `tlsFingerprint` values are validated with apiKey-grade output care: a validation problem names the rule without echoing the configured pin (a pin is not a secret, but typo diagnosis never needs the value).
@@ -110,7 +137,12 @@ The canonical, always-current example lives in `config.example.json` at the repo
 
 | Field | Required | Rules | Description |
 | ----- | -------- | ----- | ----------- |
-| `listen` | no (default `"127.0.0.1:8080"`) | string `"host:port"`, valid host and port range | Host and port the listener binds; the default stays on loopback while gateway-auth is unimplemented |
+| `server` | no | JSON object; unknown keys rejected | Listener options — address and TLS; an omitted block means every default |
+| `server.listen` | no (default `"127.0.0.1:8080"`) | string `"host:port"`, valid host and port range | Host and port the listener binds; the default stays on loopback while gateway-auth is unimplemented |
+| `server.tls` | no | JSON object with required `enabled`; unknown keys rejected | TLS options of the gateway's own listener; omitted → the listener serves plain HTTP ([ADR-007](../decisions/007-tls-listener-server-block.md)) |
+| `server.tls.enabled` | yes (when `server.tls` is present) | boolean | The explicit TLS switch: `true` serves HTTPS, `false` plain HTTP — cert/key may stay configured while disabled |
+| `server.tls.cert` | required when `server.tls.enabled` is `true` | non-empty string — PEM certificate-chain path | Read once at startup, before the port binds |
+| `server.tls.key` | required when `server.tls.enabled` is `true` | non-empty string — PEM private-key path | Read once at startup, before the port binds; no passphrase support |
 | `logLevel` | no (default `info`) | one of `trace, debug, info, warning, error, none` | Verbosity of the pino logger; `none` silences log output |
 | `upstreams` | yes | array with at least one entry | The provider connections the gateway fronts; config order is preserved by the registry |
 | `upstreams[].type` | yes | a registered `UpstreamType` (MVP: `openai-compatible`) | Selects the upstream module that speaks the provider's dialect |
@@ -119,11 +151,11 @@ The canonical, always-current example lives in `config.example.json` at the repo
 | `upstreams[].apiKey` | yes | non-empty string | The secret sent upstream as the Bearer credential; never logged |
 | `upstreams[].tlsFingerprint` | no (default: absent) | optional; base64 (standard alphabet, optional padding) decoding to exactly 32 bytes — the SHA-256 digest of the upstream certificate's SPKI DER; surrounding whitespace tolerated, stripped at load | TLS SPKI pin: non-empty → the upstream accepts ONLY the pinned key, fail closed ([ADR-005](../decisions/005-per-upstream-tls-pinning.md)); absent/empty → the system CA pool verifies the upstream; inert on a plain-http `baseUrl`; compute with `tools/tls-fingerprint.ts` |
 
-Unknown top-level keys and unknown per-upstream keys are rejected — the schema is strict, so typos fail loudly at startup.
+Unknown keys are rejected at every level — root, `server`, `server.tls`, and per-upstream — so typos fail loudly at startup.
 
 ### Example file
 
-`config.example.json` (repo root, next to `README.md`) is the canonical example config and a copy-paste starting point: copying it to `config.json` yields a valid config. It contains every supported option — optional keys included, each upstream entry showing the optional `tlsFingerprint` as a syntactically valid placeholder pin to be replaced with the real value from `tools/tls-fingerprint.ts` — and one upstream entry per registered upstream `type`. The file is pure JSON — JSON comments and extra description keys would fail the strict validation, so field descriptions live in the schema table above.
+`config.example.json` (repo root, next to `README.md`) is the canonical example config and a copy-paste starting point: copying it to `config.json` yields a valid config. It contains every supported option — optional keys included, each upstream entry showing the optional `tlsFingerprint` as a syntactically valid placeholder pin to be replaced with the real value from `tools/tls-fingerprint.ts` — and one upstream entry per registered upstream `type`. The `tls` block ships `enabled: false` with placeholder `./tls/*.pem` paths (the pair `tools/generate-tls-cert.sh` writes), so the copied example still boots as plain HTTP. The file is pure JSON — JSON comments and extra description keys would fail the strict validation, so field descriptions live in the schema table above.
 
 The example is part of the schema contract and is updated in the same change as `src/config/schema.ts`:
 
@@ -138,13 +170,20 @@ All problems for one start are printed to stderr, one error line each (via the l
 - file missing or unreadable — names the path that was tried;
 - JSON parse error — names line/column when available;
 - `logLevel` invalid — lists the six valid values;
-- `listen` malformed — not a `"host:port"` string with a valid port;
+- unknown top-level key — the valid key set is listed;
+- `server` not a JSON object, or an unknown key inside `server` — the valid key set is listed;
+- `server.listen` malformed — not a `"host:port"` string with a valid port;
+- `server.tls` not a JSON object, or an unknown key inside `server.tls`;
+- `server.tls.enabled` missing (a `tls` block without it never validates) or not a boolean;
+- `server.tls.cert` / `server.tls.key` missing while TLS is enabled, or not a non-empty string path — a problem line names the field and the rule and never echoes the configured path;
 - `upstreams` empty or not an array;
 - unknown upstream `type` — lists the registered types;
 - `id` missing, malformed (grammar `^[a-z0-9][a-z0-9-]*$` — uppercase, `_`, or `/` rejected), or duplicated — duplicates are named;
 - `baseUrl` missing or not an absolute `http(s)` URL;
 - `apiKey` missing or empty;
 - `tlsFingerprint` not a string, or not base64 (standard alphabet) decoding to exactly 32 bytes — the problem line names the key and the rule (naming `tools/tls-fingerprint.ts` as the generator) but never echoes the configured value.
+
+TLS certificate and key files are read after validation, right before the listener binds ([data-flow.md](../architecture/data-flow.md)): a missing or unreadable PEM file is a separate fatal startup error — one stderr line naming the path and the reason, exit code 1, no port bound.
 
 ## Extension Points
 
@@ -157,3 +196,4 @@ All problems for one start are printed to stderr, one error line each (via the l
 - [OpenAI-compatible upstream](./upstreams/openai-compatible.md) — `baseUrl` / `apiKey` semantics, and how a configured `tlsFingerprint` is enforced
 - [Observability](./observability.md) — consumer of `logLevel`
 - [ADR-005: per-upstream TLS SPKI pinning](../decisions/005-per-upstream-tls-pinning.md) — the `tlsFingerprint` semantics this schema validates
+- [ADR-007: listener under a `server` block with explicit TLS](../decisions/007-tls-listener-server-block.md) — the hard break from top-level `listen` and the explicit `tls.enabled` switch this schema enforces

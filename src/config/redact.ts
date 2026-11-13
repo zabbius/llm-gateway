@@ -7,7 +7,8 @@
  * `apiKey` is always the fixed mask, a configured `tlsFingerprint` becomes
  * the same mask, an absent one becomes `null`. The real key and pin values
  * are simply not copied, so no handler downstream of this function can
- * serialize them. The mask is the view's own literal `[Configured]`,
+ * serialize them. `server` mirrors the config's listener block verbatim —
+ * `listen` and the `cert`/`key` PEM paths are not secret. The mask is the view's own literal `[Configured]`,
  * deliberately distinct from the logging layer's censor (`[Redacted]`,
  * src/logging/logger.ts): the view marks "a credential is configured here",
  * while the censor stands for any redacted value in a log line, including
@@ -32,10 +33,28 @@ export interface RedactedUpstreamConfig {
   tlsFingerprint: string | null;
 }
 
-/** The sanitized effective configuration served by `GET /api/configuration`. */
-export interface RedactedGatewayConfig {
+/** TLS options of the redacted view — paths verbatim, absent values as `null`. */
+export interface RedactedTlsConfig {
+  /** mirrors the config's `server.tls.enabled` */
+  enabled: boolean;
+  /** verbatim PEM certificate-chain path — not secret; `null` when absent */
+  cert: string | null;
+  /** verbatim PEM private-key path — not secret; `null` when absent */
+  key: string | null;
+}
+
+/** The redacted `server` block of the effective configuration. */
+export interface RedactedServerConfig {
   /** the effective `listen` value after startup normalization */
   listen: string;
+  /** `null` when the config carries no `tls` block */
+  tls: RedactedTlsConfig | null;
+}
+
+/** The sanitized effective configuration served by `GET /api/configuration`. */
+export interface RedactedGatewayConfig {
+  /** mirrors the config's `server` block with `listen` defaulted */
+  server: RedactedServerConfig;
   /** the effective log level after startup normalization */
   logLevel: LogLevel;
   /** config order preserved — the view mirrors the `upstreams` array */
@@ -49,8 +68,19 @@ export interface RedactedGatewayConfig {
  * `tlsFingerprint` values live on in the config domain only.
  */
 export function redactedConfigView(config: NormalizedGatewayConfig): RedactedGatewayConfig {
+  const tls = config.server.tls;
   return {
-    listen: config.listen,
+    server: {
+      listen: config.server.listen,
+      tls:
+        tls === undefined
+          ? null
+          : {
+              enabled: tls.enabled,
+              cert: tls.cert ?? null,
+              key: tls.key ?? null,
+            },
+    },
     logLevel: config.logLevel,
     upstreams: config.upstreams.map((entry) => ({
       type: entry.type,

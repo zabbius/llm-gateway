@@ -266,7 +266,7 @@ test("an unknown top-level key is rejected and valid keys are named", () => {
   expect(result.ok).toBe(false);
   if (result.ok) return;
   expect(result.problems).toEqual([
-    'unknown top-level key "listern" (valid keys: listen, logLevel, upstreams)',
+    'unknown top-level key "listern" (valid keys: server, logLevel, upstreams)',
   ]);
   expect(log.lines).toEqual(result.problems);
 });
@@ -284,10 +284,10 @@ test("an unknown per-upstream key is rejected and valid keys are named", () => {
 });
 
 // ---------------------------------------------------------------------------
-// listen
+// server block and listener
 // ---------------------------------------------------------------------------
 
-test("malformed listen values are rejected with the host:port rule", () => {
+test("malformed server.listen values are rejected with the host:port rule", () => {
   for (const listen of [
     "localhost",
     "127.0.0.1",
@@ -301,27 +301,197 @@ test("malformed listen values are rejected with the host:port rule", () => {
     "[::1",
   ]) {
     const result = loadConfig({
-      path: configFixture(validConfig([VALID_UPSTREAM], { listen })),
+      path: configFixture(validConfig([VALID_UPSTREAM], { server: { listen } })),
     });
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.problems).toEqual([
-      `listen must be a "host:port" string with a port in 1-65535 (got "${listen}")`,
+      `server.listen must be a "host:port" string with a port in 1-65535 (got "${listen}")`,
     ]);
   }
 });
 
-test("valid listen forms are accepted and kept in the normalized config", () => {
+test("valid server.listen forms are accepted and kept in the normalized config", () => {
   for (const listen of ["127.0.0.1:8080", "localhost:80", "0.0.0.0:65535", "my-host.example:9443", "[::1]:8080"]) {
     const result = loadConfig({
-      path: configFixture(validConfig([VALID_UPSTREAM], { listen })),
+      path: configFixture(validConfig([VALID_UPSTREAM], { server: { listen } })),
     });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.config.listen).toBe(listen);
+    expect(result.config.server.listen).toBe(listen);
   }
+});
+
+test("a top-level listen key is rejected as unknown — the listener lives under server", () => {
+  const result = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { listen: "127.0.0.1:8080" })),
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.problems).toEqual([
+    'unknown top-level key "listen" (valid keys: server, logLevel, upstreams)',
+  ]);
+});
+
+test("a non-object server block is rejected", () => {
+  for (const server of ["127.0.0.1:8080", 42, true, []]) {
+    const result = loadConfig({
+      path: configFixture(validConfig([VALID_UPSTREAM], { server })),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toEqual(["server must be a JSON object"]);
+  }
+});
+
+test("an unknown key inside server is rejected and valid keys are named", () => {
+  const result = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { server: { listen: "127.0.0.1:8080", port: 8080 } })),
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.problems).toEqual(['server: unknown key "port" (valid keys: listen, tls)']);
+});
+
+// ---------------------------------------------------------------------------
+// server.tls — listener TLS options
+// ---------------------------------------------------------------------------
+
+test("a non-object server.tls is rejected", () => {
+  for (const tls of ["yes", 42, true, []]) {
+    const result = loadConfig({
+      path: configFixture(validConfig([VALID_UPSTREAM], { server: { tls } })),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toEqual(["server.tls must be a JSON object"]);
+  }
+});
+
+test("an unknown key inside server.tls is rejected and valid keys are named", () => {
+  const result = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { server: { tls: { enabled: false, verify: true } } })),
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.problems).toEqual(['server.tls: unknown key "verify" (valid keys: enabled, cert, key)']);
+});
+
+test("server.tls without enabled is rejected — TLS is on or off, never inferred", () => {
+  const result = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { server: { tls: { cert: "./tls/cert.pem" } } })),
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.problems).toEqual(['server.tls: missing required key "enabled"']);
+});
+
+test("a non-boolean server.tls.enabled is rejected", () => {
+  for (const [enabled, rendered] of [
+    ["true", '"true"'],
+    [1, "1"],
+    [null, "null"],
+  ] as const) {
+    const result = loadConfig({
+      path: configFixture(validConfig([VALID_UPSTREAM], { server: { tls: { enabled } } })),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toEqual([`server.tls: enabled must be a boolean (got ${rendered})`]);
+  }
+});
+
+test("tls enabled without cert or key names the missing key", () => {
+  const result = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { server: { tls: { enabled: true } } })),
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.problems).toEqual([
+    "server.tls: cert is required when tls is enabled",
+    "server.tls: key is required when tls is enabled",
+  ]);
+
+  for (const [tls, missing] of [
+    [{ enabled: true, cert: "./tls/cert.pem" }, "key"],
+    [{ enabled: true, key: "./tls/key.pem" }, "cert"],
+  ] as const) {
+    const partial = loadConfig({
+      path: configFixture(validConfig([VALID_UPSTREAM], { server: { tls } })),
+    });
+
+    expect(partial.ok).toBe(false);
+    if (partial.ok) return;
+    expect(partial.problems).toEqual([`server.tls: ${missing} is required when tls is enabled`]);
+  }
+});
+
+test("tls enabled with an empty or non-string cert/key path is rejected without echoing the value", () => {
+  for (const given of ["", 42, null]) {
+    for (const field of ["cert", "key"] as const) {
+      // the sibling path is valid, so the only problem is the malformed one
+      const tls = field === "cert"
+        ? { enabled: true, cert: given, key: "./tls/key.pem" }
+        : { enabled: true, cert: "./tls/cert.pem", key: given };
+      const result = loadConfig({
+        path: configFixture(validConfig([VALID_UPSTREAM], { server: { tls } })),
+      });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.problems).toEqual([`server.tls: ${field} must be a non-empty string path`]);
+    }
+  }
+});
+
+test("tls disabled accepts optional cert/key placeholder paths and mirrors them", () => {
+  const tls = { enabled: false, cert: "./tls/cert.pem", key: "./tls/key.pem" };
+  const result = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { server: { tls } })),
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) return;
+  expect(result.config.server.tls).toEqual(tls);
+});
+
+test("tls disabled without cert/key validates; a missing tls block stays absent", () => {
+  const disabledOnly = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { server: { tls: { enabled: false } } })),
+  });
+
+  expect(disabledOnly.ok).toBe(true);
+  if (!disabledOnly.ok) return;
+  expect(disabledOnly.config.server.tls).toEqual({ enabled: false });
+
+  const noTls = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { server: { listen: "127.0.0.1:8080" } })),
+  });
+
+  expect(noTls.ok).toBe(true);
+  if (!noTls.ok) return;
+  expect(noTls.config.server.tls).toBeUndefined();
+});
+
+test("a fully specified tls block is accepted and mirrored into the normalized config", () => {
+  const tls = { enabled: true, cert: "./tls/cert.pem", key: "./tls/key.pem" };
+  const result = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { server: { listen: "0.0.0.0:8443", tls } })),
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) return;
+  expect(result.config.server).toEqual({ listen: "0.0.0.0:8443", tls });
 });
 
 // ---------------------------------------------------------------------------
@@ -606,7 +776,7 @@ test("all problems of one config are collected, printed, and returned together",
   const body = JSON.stringify({
     listern: "typo-key", // unknown top-level key
     logLevel: "loud", // invalid logLevel
-    listen: "localhost", // malformed listen
+    server: { listen: "localhost" }, // malformed server.listen
     upstreams: [
       // unknown key, unknown type, bad id, bad baseUrl, empty apiKey
       { type: "azure", id: "Bad_ID", baseUrl: "ftp://x/v1", apiKey: "", retry: true },
@@ -629,7 +799,7 @@ test("all problems of one config are collected, printed, and returned together",
 
   const all = result.problems.join("\n");
   expect(all).toContain('unknown top-level key "listern"');
-  expect(all).toContain('listen must be a "host:port" string');
+  expect(all).toContain('server.listen must be a "host:port" string');
   expect(all).toContain("logLevel must be one of: trace, debug, info, warning, error, none");
   expect(all).toContain('upstreams[0]: unknown key "retry"');
   expect(all).toContain('upstreams[0]: unknown upstream type "azure"');
@@ -650,13 +820,14 @@ test("all problems of one config are collected, printed, and returned together",
 // defaults and normalization
 // ---------------------------------------------------------------------------
 
-test("omitted listen and logLevel get their documented defaults", () => {
+test("omitted server.listen and logLevel get their documented defaults", () => {
   const result = loadConfig({ path: configFixture(validConfig()) });
 
   expect(result.ok).toBe(true);
   if (!result.ok) return;
-  expect(result.config.listen).toBe(DEFAULT_LISTEN);
-  expect(result.config.listen).toBe("127.0.0.1:8080");
+  expect(result.config.server.listen).toBe(DEFAULT_LISTEN);
+  expect(result.config.server.listen).toBe("127.0.0.1:8080");
+  expect(result.config.server.tls).toBeUndefined();
   expect(result.config.logLevel).toBe(DEFAULT_LOG_LEVEL);
   expect(result.config.logLevel).toBe("info");
   expect(result.config.upstreams).toEqual([
@@ -779,7 +950,7 @@ test("loadConfigOrExit returns the normalized config and prints nothing on succe
   expect(result.stderr).toBe(""); // success is silent — problems are the only pre-config output
   const reported = JSON.parse(result.stdout) as Record<string, unknown>;
   expect(reported).toEqual({
-    listen: "127.0.0.1:8080",
+    server: { listen: "127.0.0.1:8080" },
     logLevel: "info",
     upstreams: [
       { type: "openai-compatible", id: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "sk-valid-secret" },

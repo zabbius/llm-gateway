@@ -15,6 +15,7 @@ Navigation for the specification system. One glance to find the right document f
 | Add or change a management endpoint (`/api/*`: status, configuration) | [contracts/gateway-management.md](./contracts/gateway-management.md) | [decisions/006-gateway-surface-namespace.md](./decisions/006-gateway-surface-namespace.md), [architecture/data-flow.md](./architecture/data-flow.md) (startup mount), [contracts/client-gateway.md](./contracts/client-gateway.md) (shared error envelope), [architecture/security-model.md](./architecture/security-model.md) (credential masking) |
 | Change upstream interaction (paths, headers, timeouts, retries) | [contracts/gateway-upstream.md](./contracts/gateway-upstream.md) | [domains/upstreams/upstream-contract.md](./domains/upstreams/upstream-contract.md), [domains/upstreams/openai-compatible.md](./domains/upstreams/openai-compatible.md) |
 | Change the config file schema (add a field, new upstream type fields) | [domains/configuration.md](./domains/configuration.md) | [config.example.json](../config.example.json) (keep in sync — enforced by test), [architecture/data-flow.md](./architecture/data-flow.md) (startup), [contracts/gateway-upstream.md](./contracts/gateway-upstream.md) (upstream entries) |
+| Serve the gateway over TLS, or change listener options (address, TLS) | [decisions/007-tls-listener-server-block.md](./decisions/007-tls-listener-server-block.md) | [domains/configuration.md](./domains/configuration.md) (`server` schema), [architecture/data-flow.md](./architecture/data-flow.md) (PEM read before bind), [architecture/security-model.md](./architecture/security-model.md) (TLS ≠ authentication), `tools/generate-tls-cert.sh` |
 | Change log levels or logging behavior | [domains/observability.md](./domains/observability.md), [decisions/004-pino-stderr-logging.md](./decisions/004-pino-stderr-logging.md) | [domains/configuration.md](./domains/configuration.md) (`logLevel`) |
 | Change the startup / wiring sequence | [architecture/data-flow.md](./architecture/data-flow.md), [architecture/layers.md](./architecture/layers.md) | [domains/configuration.md](./domains/configuration.md) |
 | Touch credentials, key handling, or log redaction | [architecture/security-model.md](./architecture/security-model.md) | [domains/observability.md](./domains/observability.md), [contracts/gateway-upstream.md](./contracts/gateway-upstream.md) (Authorization policy) |
@@ -106,7 +107,8 @@ specs/
     ├── 003-hono-http-framework.md               Hono on Bun, edge-only handlers
     ├── 004-pino-stderr-logging.md               pino, JSON lines to stderr, no file logger
     ├── 005-per-upstream-tls-pinning.md          per-upstream TLS SPKI pinning via `tlsFingerprint`
-    └── 006-gateway-surface-namespace.md         surface namespace: LLM /llm/v1, management /api, SPA /ui
+    ├── 006-gateway-surface-namespace.md         surface namespace: LLM /llm/v1, management /api, SPA /ui
+    └── 007-tls-listener-server-block.md         listener under a `server` block, explicit TLS
 ```
 
-All 19 spec files (3 architecture + 7 domain + 3 contracts + 6 ADRs) are listed above, alongside META.md, this INDEX, and the ADR template. After adding or removing a spec file, update this listing — see [META.md](./META.md), Update Protocol.
+All 20 spec files (3 architecture + 7 domain + 3 contracts + 7 ADRs) are listed above, alongside META.md, this INDEX, and the ADR template. After adding or removing a spec file, update this listing — see [META.md](./META.md), Update Protocol.

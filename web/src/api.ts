@@ -35,9 +35,23 @@ export interface RedactedUpstreamConfig {
   readonly tlsFingerprint: string | null;
 }
 
+/** TLS options of the sanitized configuration — paths verbatim, absent values null. */
+export interface RedactedTlsConfig {
+  readonly enabled: boolean;
+  readonly cert: string | null;
+  readonly key: string | null;
+}
+
+/** The sanitized `server` block of the effective configuration. */
+export interface RedactedServerConfig {
+  readonly listen: string;
+  /** `null` when the gateway runs plain HTTP (no `tls` block in the config). */
+  readonly tls: RedactedTlsConfig | null;
+}
+
 /** The `GET /api/configuration` body — the sanitized effective configuration. */
 export interface GatewayConfiguration {
-  readonly listen: string;
+  readonly server: RedactedServerConfig;
   readonly logLevel: LogLevel;
   readonly upstreams: readonly RedactedUpstreamConfig[];
 }

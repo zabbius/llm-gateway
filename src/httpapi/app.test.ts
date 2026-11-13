@@ -134,7 +134,7 @@ async function gateway(specs: UpstreamSpec[], logger: pino.Logger, ui: UiServing
   // The entry point builds the redacted view from the same entries and hands
   // it to createApp — the raw config never crosses into the HTTP layer.
   const configuration = redactedConfigView({
-    listen: "127.0.0.1:8080",
+    server: { listen: "127.0.0.1:8080" },
     logLevel: "info",
     upstreams: entries,
   });
@@ -396,7 +396,7 @@ describe("gateway-generated errors", () => {
         { "openai-compatible": (entry, child) => new OpenAICompatibleUpstream(entry, child) },
         logger,
       );
-      const app = createApp(registry, logger, redactedConfigView({ listen: "127.0.0.1:8080", logLevel: "info", upstreams: entries }));
+      const app = createApp(registry, logger, redactedConfigView({ server: { listen: "127.0.0.1:8080" }, logLevel: "info", upstreams: entries }));
 
       const response = await app.request("/llm/v1/chat/completions", completionRequest("real/gpt-4o"));
       expect(response.status).toBe(502);
@@ -419,7 +419,7 @@ describe("gateway-generated errors", () => {
       { "openai-compatible": (entry, child) => new OpenAICompatibleUpstream(entry, child) },
       logger,
     );
-    const app = createApp(registry, logger, redactedConfigView({ listen: "127.0.0.1:8080", logLevel: "info", upstreams: entries }));
+    const app = createApp(registry, logger, redactedConfigView({ server: { listen: "127.0.0.1:8080" }, logLevel: "info", upstreams: entries }));
 
     const response = await app.request("/llm/v1/chat/completions", completionRequest("dead/gpt-4o"));
     expect(response.status).toBe(504);
@@ -500,7 +500,7 @@ describe("GET /api/status", () => {
 });
 
 describe("GET /api/configuration", () => {
-  test("serves the redacted view: credentials masked, listen/logLevel/baseUrl verbatim, config order", async () => {
+  test("serves the redacted view: credentials masked, server.listen/logLevel/baseUrl verbatim, config order", async () => {
     const { logger } = fakeLogger();
     const { app } = await gateway(
       [
@@ -518,7 +518,7 @@ describe("GET /api/configuration", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("application/json");
     const body = (await response.json()) as {
-      listen: string;
+      server: { listen: string; tls: { enabled: boolean; cert: string | null; key: string | null } | null };
       logLevel: string;
       upstreams: Array<{
         type: string;
@@ -528,7 +528,7 @@ describe("GET /api/configuration", () => {
         tlsFingerprint: string | null;
       }>;
     };
-    expect(body.listen).toBe("127.0.0.1:8080");
+    expect(body.server.listen).toBe("127.0.0.1:8080");
     expect(body.logLevel).toBe("info");
     // exact contract shape (specs/contracts/gateway-management.md): the mask
     // replaces key material; an absent pin serializes as null

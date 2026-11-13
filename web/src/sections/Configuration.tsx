@@ -1,13 +1,19 @@
 /**
  * Configuration section — the sanitized effective configuration
  * (`GET /api/configuration`, specs/contracts/gateway-management.md): the
- * `listen` / `logLevel` summary and the upstream table. Secrets are
- * rendered exactly as the API returns them — `apiKey` is always the fixed
- * mask literal, `tlsFingerprint` the mask or null — the SPA has no way to
- * unmask them and never sees the real values.
+ * `server` (`listen`, `tls`) / `logLevel` summary and the upstream table.
+ * Secrets are rendered exactly as the API returns them — `apiKey` is always
+ * the fixed mask literal, `tlsFingerprint` the mask or null — the SPA has no
+ * way to unmask them and never sees the real values.
  */
 import { useEffect, useState, type ReactNode } from "react";
 import { fetchConfiguration, type GatewayConfiguration } from "../api.ts";
+
+/** The tls summary line: "TLS: enabled — cert <путь>", "TLS: disabled", or "—" when the config carries no tls block. */
+function tlsLine(tls: GatewayConfiguration["server"]["tls"]): string {
+  if (tls === null) return "—";
+  return tls.enabled ? `TLS: enabled — cert ${tls.cert ?? "—"}` : "TLS: disabled";
+}
 
 export function ConfigurationSection(): ReactNode {
   const [configuration, setConfiguration] = useState<GatewayConfiguration | null>(null);
@@ -59,8 +65,10 @@ export function ConfigurationSection(): ReactNode {
           <dl className="row mb-4">
             <dt className="col-sm-2">listen</dt>
             <dd className="col-sm-10">
-              <code>{configuration.listen}</code>
+              <code>{configuration.server.listen}</code>
             </dd>
+            <dt className="col-sm-2">tls</dt>
+            <dd className="col-sm-10">{tlsLine(configuration.server.tls)}</dd>
             <dt className="col-sm-2">logLevel</dt>
             <dd className="col-sm-10">
               <code>{configuration.logLevel}</code>

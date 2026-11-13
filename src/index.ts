@@ -13,13 +13,14 @@
  *
  * Failure reporting: an invalid config has already been fully reported to
  * stderr (one error line per problem, via src/config/load.ts) by the time
- * `loadConfigOrExit` exits with code 1 — before any port is bound. A bind
- * failure (port taken) is logged and exits non-zero as well.
+ * `loadConfigOrExit` exits with code 1 — before any port is bound. A missing
+ * or unreadable TLS certificate/key file and a bind failure (port taken) are
+ * logged and exit non-zero as well — also before any port is bound.
  *
  * Startup logging (specs/domains/observability.md, security-model.md
  * invariant 7): config loaded (path + upstream id/type pairs), per-upstream
- * probe results, listening address, shutdown. The raw config and key
- * material are never logged.
+ * probe results, listening address (with the fact of TLS — never the PEM
+ * contents), shutdown. The raw config and key material are never logged.
  */
 import { loadConfigOrExit, resolveConfigPath } from "./config/load.ts";
 import type { NormalizedGatewayConfig } from "./config/schema.ts";
@@ -97,6 +98,30 @@ function flushAndExit(logger: pino.Logger, code: number): void {
 }
 
 /**
+ * Read one PEM file for the TLS listener (certificate or key) — its contents,
+ * not its path: Bun's `tls.cert` / `tls.key` expect the PEM text. Runs before
+ * the port is bound, so a missing or unreadable file is a fatal startup
+ * error: one clear stderr line (path + reason; the path is not secret, the
+ * file's contents never are) and exit code 1.
+ */
+async function readTlsFileOrExit(
+  logger: pino.Logger,
+  kind: "certificate" | "key",
+  path: string,
+): Promise<string> {
+  try {
+    return await Bun.file(path).text();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    logger.error({ path, reason }, `tls ${kind} file not found/readable: ${path} — exiting`);
+    flushAndExit(logger, 1);
+    // flushAndExit exits the process within milliseconds; this only satisfies
+    // control-flow analysis — and keeps a stuck flush a loud crash, not a hang.
+    throw new Error(`tls ${kind} file not found/readable: ${path}: ${reason}`);
+  }
+}
+
+/**
  * Wire and start the gateway: config → upstreams → registry (probes inside) →
  * app → listen. Returns the running handles; the listener accepts traffic
  * only after every probe has finished (ok or logged). Exits the process with
@@ -139,21 +164,46 @@ export async function startGateway(options: StartGatewayOptions = {}): Promise<G
   const app = createApp(registry, logger, redactedConfigView(config));
 
   // [7] Bind the configured address — loopback by default
-  // (specs/architecture/security-model.md invariant 6).
-  const { hostname, port } = parseListen(config.listen);
+  // (specs/architecture/security-model.md invariant 6). When TLS is enabled,
+  // both PEM files are read first, before anything is bound: a missing or
+  // unreadable file exits 1 with a clear stderr line. `Bun.serve` receives
+  // the PEM contents (`tls.cert` / `tls.key` take text, not paths); only the
+  // fact of TLS travels to logs, never the file contents
+  // (specs/architecture/security-model.md invariant 7).
+  const tlsConfig = config.server.tls;
+  let tlsOptions: { cert: string; key: string } | undefined;
+  if (tlsConfig?.enabled === true) {
+    const { cert, key } = tlsConfig;
+    if (cert === undefined || key === undefined) {
+      // Unreachable through loadConfigOrExit (the schema requires both paths
+      // when tls is enabled) — kept loud in case a future bypass skips it.
+      logger.error({}, "tls is enabled but cert/key paths are missing — exiting");
+      flushAndExit(logger, 1);
+      throw new Error("tls is enabled but cert/key paths are missing");
+    }
+    tlsOptions = {
+      cert: await readTlsFileOrExit(logger, "certificate", cert),
+      key: await readTlsFileOrExit(logger, "key", key),
+    };
+  }
+
+  const { hostname, port } = parseListen(config.server.listen);
   let server: GatewayServer;
   try {
-    server = Bun.serve({ hostname, port, fetch: app.fetch });
+    server =
+      tlsOptions === undefined
+        ? Bun.serve({ hostname, port, fetch: app.fetch })
+        : Bun.serve({ hostname, port, fetch: app.fetch, tls: tlsOptions });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    logger.error({ listen: config.listen, reason }, "failed to bind the configured address — exiting");
+    logger.error({ listen: config.server.listen, reason }, "failed to bind the configured address — exiting");
     flushAndExit(logger, 1);
     // flushAndExit exits the process within milliseconds; this only satisfies
     // control-flow analysis — and keeps a stuck flush a loud crash, not a hang.
-    throw new Error(`failed to bind ${config.listen}: ${reason}`);
+    throw new Error(`failed to bind ${config.server.listen}: ${reason}`);
   }
 
-  logger.info({ listen: config.listen }, "gateway listening");
+  logger.info({ listen: config.server.listen, tls: tlsOptions !== undefined }, "gateway listening");
 
   return {
     config,

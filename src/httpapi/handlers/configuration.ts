@@ -1,7 +1,8 @@
 /**
  * `GET /api/configuration` — the management surface's sanitized effective
- * configuration (specs/contracts/gateway-management.md): `listen`, `logLevel`,
- * and the upstream entries with credentials masked.
+ * configuration (specs/contracts/gateway-management.md): the `server` block
+ * (`listen`, `tls`), `logLevel`, and the upstream entries with credentials
+ * masked.
  *
  * The handler receives the redacted view built by the entry point
  * (`redactedConfigView`, src/config/redact.ts) as a plain value — the raw
