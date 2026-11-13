@@ -8,8 +8,8 @@
  * never grows per-field knowledge.
  *
  * The schema is strict: unknown keys are rejected at every level — root,
- * `server`, `server.tls`, per-upstream — so typos fail loudly at startup.
- * Validation is total — every problem of one config is collected and
+ * `server`, `server.tls`, `auth`, per-upstream — so typos fail loudly at
+ * startup. Validation is total — every problem of one config is collected and
  * reported together, never the first one only.
  */
 import type { LogLevel } from "../types.ts";
@@ -69,6 +69,31 @@ export interface TlsConfig {
   key?: string;
 }
 
+/**
+ * Management-surface auth options (`auth` in the config file, ADR-008):
+ * a single config-backed operator identity. The block mirrors the `tls`
+ * precedent — `enabled` is required whenever the block is present; the
+ * credential fields are required only while `enabled` is true but may stay
+ * configured (staged) while `enabled` is false. An absent block means no
+ * auth gate: the gateway behaves exactly as before ADR-008.
+ */
+export interface AuthConfig {
+  /**
+   * Required whenever the `auth` block is present: the auth gate is either
+   * explicitly on or explicitly off — the block without `enabled` never
+   * validates.
+   */
+  enabled: boolean;
+  /** operator login; required (non-empty string) when `enabled` is true */
+  user?: string;
+  /**
+   * argon2id PHC hash of the operator password, generated with
+   * `tools/hash-password.ts`; required when `enabled` is true. Verified with
+   * `Bun.password.verify` — the plain password never enters the config.
+   */
+  passwordHash?: string;
+}
+
 /** The gateway listener block (`server` in the config file). */
 export interface ServerConfig {
   /** "host:port"; omitted → "127.0.0.1:8080" (loopback until gateway-auth lands) */
@@ -83,6 +108,8 @@ export interface GatewayConfig {
   server?: ServerConfig;
   /** omitted → "info" */
   logLevel?: LogLevel;
+  /** omitted → the management surface is ungated (ADR-008) */
+  auth?: AuthConfig;
   /** at least one entry; ids unique across the array */
   upstreams: UpstreamConfig[];
 }
@@ -117,10 +144,30 @@ const LISTEN_PATTERN =
  * with the schema (specs/domains/configuration.md "Example file"): when a
  * key is added or removed here, the example must follow in the same change.
  */
-export const TOP_LEVEL_KEYS: readonly string[] = ["server", "logLevel", "upstreams"];
+export const TOP_LEVEL_KEYS: readonly string[] = ["server", "logLevel", "auth", "upstreams"];
 export const SERVER_KEYS: readonly string[] = ["listen", "tls"];
 export const TLS_KEYS: readonly string[] = ["enabled", "cert", "key"];
+export const AUTH_KEYS: readonly string[] = ["enabled", "user", "passwordHash"];
 export const UPSTREAM_KEYS: readonly string[] = ["type", "id", "baseUrl", "apiKey", "tlsFingerprint"];
+
+/**
+ * A PHC-format password hash prefix (ADR-008): `$argon2id$…` / `$argon2i$…` /
+ * `$argon2d$…` (Bun's default) or `$2a$…` / `$2b$…` / `$2y$…` (bcrypt). The
+ * startup check is prefix-level only — the deep check happens at the first
+ * verify; the tools/hash-password.ts generator always produces a matching
+ * string.
+ */
+const PASSWORD_HASH_PATTERN = /^\$(?:argon2(?:id|i|d)|2[aby])\$/;
+
+/**
+ * True when `value` looks like a PHC-format password hash the runtime can
+ * verify (`Bun.password.verify` auto-detects the format). A syntactically
+ * wrong hash fails config validation — typos fail loudly at startup, never
+ * at the first login attempt (specs/domains/configuration.md).
+ */
+export function isValidPasswordHash(value: string): boolean {
+  return value.length > 0 && PASSWORD_HASH_PATTERN.test(value);
+}
 
 /**
  * A TLS fingerprint pin: base64 (standard alphabet, optional padding) whose
@@ -185,8 +232,8 @@ export function normalizeBaseUrl(url: string): string {
  * Validate and normalize a parsed config value. Collects every problem —
  * unknown keys, grammar violations, missing keys, duplicate ids — into one
  * `problems` list in a stable order (top level first, then the `server`
- * block, then upstream entries by index); returns the normalized config
- * only when the list stays empty.
+ * block, then the `auth` block, then upstream entries by index); returns the
+ * normalized config only when the list stays empty.
  */
 export function validateGatewayConfig(value: unknown): ValidatedConfig {
   const problems: string[] = [];
@@ -247,6 +294,50 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
       }
     } else if (tls !== undefined) {
       problems.push("server.tls must be a JSON object");
+    }
+  }
+
+  const auth = value.auth;
+  if (auth !== undefined && !isPlainObject(auth)) {
+    problems.push("auth must be a JSON object");
+  }
+
+  if (isPlainObject(auth)) {
+    for (const key of Object.keys(auth)) {
+      if (!AUTH_KEYS.includes(key)) {
+        problems.push(`auth: unknown key "${key}" (valid keys: ${AUTH_KEYS.join(", ")})`);
+      }
+    }
+
+    const enabled = auth.enabled;
+    if (enabled === undefined) {
+      problems.push('auth: missing required key "enabled"');
+    } else if (typeof enabled !== "boolean") {
+      problems.push(`auth: enabled must be a boolean (got ${shown(enabled)})`);
+    }
+
+    // user/passwordHash are required only while auth is enabled — a staged
+    // block (enabled: false) may carry them for later. The passwordHash value
+    // is never echoed into a problem line — it must never reach stderr or any
+    // log (specs/architecture/security-model.md, ADR-008).
+    const user = auth.user;
+    if (enabled === true && (user === undefined || typeof user !== "string" || user.length === 0)) {
+      problems.push("auth: user must be a non-empty string when auth is enabled");
+    }
+
+    const passwordHash = auth.passwordHash;
+    if (enabled === true) {
+      if (passwordHash === undefined) {
+        problems.push("auth: passwordHash is required when auth is enabled");
+      } else if (typeof passwordHash !== "string" || !isValidPasswordHash(passwordHash)) {
+        problems.push(
+          "auth: passwordHash must be a PHC-format hash (argon2id/bcrypt) — generate it with tools/hash-password.ts",
+        );
+      }
+    } else if (passwordHash !== undefined && (typeof passwordHash !== "string" || !isValidPasswordHash(passwordHash))) {
+      problems.push(
+        "auth: passwordHash must be a PHC-format hash (argon2id/bcrypt) — generate it with tools/hash-password.ts",
+      );
     }
   }
 
@@ -359,11 +450,20 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     };
   }
 
+  const authBlock: AuthConfig | undefined = isPlainObject(auth)
+    ? {
+        enabled: auth.enabled as boolean,
+        ...(typeof auth.user === "string" ? { user: auth.user } : {}),
+        ...(typeof auth.passwordHash === "string" ? { passwordHash: auth.passwordHash } : {}),
+      }
+    : undefined;
+
   return {
     ok: true,
     config: {
       server: serverBlock,
       logLevel: isValidLogLevel(logLevel) ? logLevel : DEFAULT_LOG_LEVEL,
+      ...(authBlock !== undefined ? { auth: authBlock } : {}),
       upstreams: (upstreams as Record<string, unknown>[]).map((entry) => ({
         type: entry.type as UpstreamType,
         id: entry.id as string,

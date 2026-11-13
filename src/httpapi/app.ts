@@ -1,9 +1,12 @@
 /**
  * The Hono app — HTTP concerns only (specs/architecture/layers.md):
  *
- *   [1] auth stage        — MVP no-op placeholder (D4): gateway-auth is a
- *                           documented TODO; the stage precedes routing and
- *                           no code path skips it (security-model.md).
+ *   [1] auth stage        — the request lifecycle's first stage
+ *                           (security-model.md): stage 1 (ADR-008) gates
+ *                           /api/* with the config-backed session when the
+ *                           auth block is enabled — middleware [1b] below;
+ *                           auth off (or /llm/v1, /ui, /) → the stage stays
+ *                           a pass-through placeholder (stage-2 TODO).
  *   [2] request logging   — ≥1 log line per request: method, path, upstream
  *                           id (when dispatch resolved one), status,
  *                           duration (data-flow.md request lifecycle).
@@ -40,19 +43,27 @@ import { join } from "node:path";
 import type pino from "pino";
 import { type UpstreamRegistry, type GatewayEnv } from "../gateway/router.ts";
 import type { RedactedGatewayConfig } from "../config/redact.ts";
+import type { AuthConfig } from "../config/schema.ts";
 import { handleModels } from "./handlers/models.ts";
 import { handleStatus } from "./handlers/status.ts";
 import { handleConfiguration } from "./handlers/configuration.ts";
 import { handleChatCompletions, handleCompletions } from "./handlers/completions.ts";
+import { createAuthGate } from "./auth.ts";
 import { notFoundResponse, upstreamErrorResponse } from "./errors.ts";
 
 /** Frontend build output served under /ui when present (specs/domains/frontend.md). */
 export const WEB_DIST_DIR = "web/dist";
 
-/** Injectable UI-serving knobs — tests point `webDistDir` at a fixture dir. */
+/** Injectable app knobs — tests point `webDistDir` at a fixture dir. */
 export interface UiServingOptions {
   /** Frontend build output directory; defaults to WEB_DIST_DIR. */
   webDistDir?: string;
+  /**
+   * The validated `auth` block from the config (real values — ADR-008): the
+   * only path by which the password hash reaches this layer. Undefined, or
+   * `enabled: false`, mounts no gate — behavior identical to before ADR-008.
+   */
+  auth?: AuthConfig;
 }
 
 /** Build the gateway app: routes mounted, middleware ordered, errors mapped.
@@ -68,10 +79,10 @@ export function createApp(
   const log = logger.child({ component: "http" });
   const app = new Hono<GatewayEnv>();
 
-  // [1] AUTH — no-op placeholder: gateway-auth is a documented TODO
-  // (specs/architecture/security-model.md). Runs before routing; the trace
-  // line makes the stage observable (specs/domains/observability.md —
-  // per-request internals).
+  // [1] AUTH — the stage-1 gate (ADR-008) mounts below, after the request
+  // log; when auth is off this trace line is the whole stage (the documented
+  // pass-through placeholder). Runs before routing; the trace line makes the
+  // stage observable (specs/domains/observability.md — per-request internals).
   app.use("*", async (c, next) => {
     log.trace(
       { method: c.req.method, path: c.req.path },
@@ -98,6 +109,34 @@ export function createApp(
       "request handled",
     );
   });
+
+  // [1b] AUTH GATE (ADR-008) — the stage-1 implementation of the auth stage:
+  // when the config enables auth, /api/* requires a valid session cookie
+  // (POST /api/login and POST /api/logout excepted); /llm/v1, /ui, and /
+  // pass ungated until the stage-2 Bearer contract. Mounted after the
+  // request-log middleware so 401 answers are logged like every request
+  // (≥1 line each), and before every route handler — the stage still
+  // precedes routing (specs/architecture/data-flow.md). With auth off
+  // nothing here mounts: behavior identical to before ADR-008, and the
+  // auth endpoints do not exist (unknown POST → envelope 404).
+  const authConfig = options.auth;
+  if (authConfig?.enabled === true) {
+    const gate = createAuthGate(
+      {
+        // The schema requires user + passwordHash whenever enabled is true
+        // (specs/domains/configuration.md); the fallbacks are unreachable in
+        // production and merely fail closed (an empty credential verifies
+        // against nothing).
+        user: authConfig.user ?? "",
+        passwordHash: authConfig.passwordHash ?? "",
+        secureCookies: configuration.server.tls?.enabled === true,
+      },
+      logger,
+    );
+    app.post("/api/login", gate.login);
+    app.post("/api/logout", gate.logout);
+    app.use("/api/*", gate.middleware);
+  }
 
   // [3] Error mapping — the single place a thrown error becomes an HTTP
   // status (specs/architecture/layers.md). Well-behaved upstreams never

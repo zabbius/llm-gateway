@@ -49,7 +49,8 @@ specs/
     ├── 004-pino-stderr-logging.md        pino, JSON lines to stderr, no file logger
     ├── 005-per-upstream-tls-pinning.md   per-upstream TLS SPKI pinning via `tlsFingerprint`
     ├── 006-gateway-surface-namespace.md  surface namespace: LLM /llm/v1, management /api, SPA /ui
-    └── 007-tls-listener-server-block.md  listener under a `server` block, explicit TLS
+    ├── 007-tls-listener-server-block.md  listener under a `server` block, explicit TLS
+    └── 008-management-cookie-auth.md     cookie-session auth for the management surface (stage 1)
 ```
 
 This tree is the canonical layout of the spec system: every spec file under `specs/` lands at the path shown here.

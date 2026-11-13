@@ -51,12 +51,24 @@ export interface RedactedServerConfig {
   tls: RedactedTlsConfig | null;
 }
 
+/** The redacted `auth` block of the effective configuration (ADR-008). */
+export interface RedactedAuthConfig {
+  /** mirrors the config's `auth.enabled` */
+  enabled: boolean;
+  /** verbatim operator login — it identifies, it does not authenticate; `null` when absent */
+  user: string | null;
+  /** the fixed mask when configured, `null` when absent — the hash never crosses into the view */
+  passwordHash: string | null;
+}
+
 /** The sanitized effective configuration served by `GET /api/configuration`. */
 export interface RedactedGatewayConfig {
   /** mirrors the config's `server` block with `listen` defaulted */
   server: RedactedServerConfig;
   /** the effective log level after startup normalization */
   logLevel: LogLevel;
+  /** `null` when the config carries no `auth` block */
+  auth: RedactedAuthConfig | null;
   /** config order preserved — the view mirrors the `upstreams` array */
   upstreams: RedactedUpstreamConfig[];
 }
@@ -69,6 +81,7 @@ export interface RedactedGatewayConfig {
  */
 export function redactedConfigView(config: NormalizedGatewayConfig): RedactedGatewayConfig {
   const tls = config.server.tls;
+  const auth = config.auth;
   return {
     server: {
       listen: config.server.listen,
@@ -82,6 +95,14 @@ export function redactedConfigView(config: NormalizedGatewayConfig): RedactedGat
             },
     },
     logLevel: config.logLevel,
+    auth:
+      auth === undefined
+        ? null
+        : {
+            enabled: auth.enabled,
+            user: auth.user ?? null,
+            passwordHash: auth.passwordHash !== undefined ? CONFIGURED_MASK : null,
+          },
     upstreams: config.upstreams.map((entry) => ({
       type: entry.type,
       id: entry.id,

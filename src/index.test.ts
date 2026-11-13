@@ -190,6 +190,67 @@ describe("startGateway (in-process wiring)", () => {
       cleanupConfig(path);
     }
   });
+  test("auth enabled: /api gated by the session cookie — /llm/v1 and the shell stay open", async () => {
+    const port = freePort();
+    const password = "operator-password";
+    const passwordHash = Bun.password.hashSync(password, { algorithm: "argon2id" });
+    const path = tempConfig({
+      ...configJson(`127.0.0.1:${port}`, [entry("alpha")]),
+      auth: { enabled: true, user: "admin", passwordHash },
+    });
+    let handles: GatewayHandles | undefined;
+    try {
+      handles = await startGateway({ configPath: path, factories: fakeFactories([]) });
+      const base = `http://127.0.0.1:${port}`;
+
+      // unauthenticated management read → 401 envelope, no native prompt
+      const gated = await fetch(`${base}/api/status`);
+      expect(gated.status).toBe(401);
+      expect(gated.headers.get("www-authenticate")).toBeNull();
+      const gatedBody = (await gated.json()) as { error: { type: string; code: string } };
+      expect(gatedBody.error.type).toBe("authentication_error");
+      expect(gatedBody.error.code).toBe("authentication_required");
+
+      // the LLM surface and the UI redirect stay open
+      expect((await fetch(`${base}/llm/v1/models`)).status).toBe(200);
+      expect((await fetch(`${base}/`, { redirect: "manual" })).status).toBe(302);
+
+      // login mints the cookie; the cookie admits
+      const login = await fetch(`${base}/api/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ user: "admin", password }),
+      });
+      expect(login.status).toBe(200);
+      const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+      expect(cookie.startsWith("llm_gateway_session=")).toBe(true);
+      expect((await fetch(`${base}/api/status`, { headers: { cookie } })).status).toBe(200);
+
+      // the sanitized view masks the hash and names the login
+      const configuration = (await (
+        await fetch(`${base}/api/configuration`, { headers: { cookie } })
+      ).json()) as { auth: { enabled: boolean; user: string; passwordHash: string | null } | null };
+      expect(configuration.auth).toEqual({ enabled: true, user: "admin", passwordHash: "[Configured]" });
+      expect(JSON.stringify(configuration)).not.toContain(passwordHash);
+
+      // logout revokes: the same cookie stops admitting
+      const logout = await fetch(`${base}/api/logout`, { method: "POST", headers: { cookie } });
+      expect(logout.status).toBe(200);
+      expect((await fetch(`${base}/api/status`, { headers: { cookie } })).status).toBe(401);
+
+      // wrong credentials: delayed 401 invalid_credentials
+      const bad = await fetch(`${base}/api/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ user: "admin", password: "wrong-password" }),
+      });
+      expect(bad.status).toBe(401);
+      expect(((await bad.json()) as { error: { code: string } }).error.code).toBe("invalid_credentials");
+    } finally {
+      handles?.stop();
+      cleanupConfig(path);
+    }
+  });
 });
 
 describe("startGateway (subprocess, real process)", () => {

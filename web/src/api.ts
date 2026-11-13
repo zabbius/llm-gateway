@@ -1,9 +1,12 @@
 /**
  * Typed access to the gateway's management surface (specs/contracts/
- * gateway-management.md) — the ONLY gateway calls the SPA makes: two
- * read-only GETs, plain JSON, no credentials in, no mutation. Response
- * shapes mirror the contract; error responses use the single OpenAI error
- * envelope the gateway serves on every gateway-generated failure.
+ * gateway-management.md) — the only gateway calls the SPA makes: two
+ * read-only GETs plus the auth actions (`POST /api/login`, `POST /api/logout`,
+ * ADR-008). Response shapes mirror the contract; the session cookie is
+ * HttpOnly and carried by same-origin fetches automatically; error responses
+ * use the single OpenAI error envelope the gateway serves on every
+ * gateway-generated failure — a `401` (session missing or expired) surfaces
+ * as ApiFetchError with `status === 401`.
  */
 
 /** A gateway log level (src/types.ts), as the configuration endpoint reports it. */
@@ -42,6 +45,15 @@ export interface RedactedTlsConfig {
   readonly key: string | null;
 }
 
+/** The sanitized `auth` block — enabled state verbatim, the login verbatim, the hash always masked. */
+export interface RedactedAuthConfig {
+  readonly enabled: boolean;
+  /** The operator login identifies, it does not authenticate. */
+  readonly user: string | null;
+  /** Always the fixed mask when configured, null when absent. */
+  readonly passwordHash: string | null;
+}
+
 /** The sanitized `server` block of the effective configuration. */
 export interface RedactedServerConfig {
   readonly listen: string;
@@ -53,6 +65,8 @@ export interface RedactedServerConfig {
 export interface GatewayConfiguration {
   readonly server: RedactedServerConfig;
   readonly logLevel: LogLevel;
+  /** `null` when the config carries no `auth` block (the surface is ungated). */
+  readonly auth: RedactedAuthConfig | null;
   readonly upstreams: readonly RedactedUpstreamConfig[];
 }
 
@@ -111,4 +125,37 @@ export function fetchStatus(): Promise<GatewayStatus> {
 /** Fetch the sanitized effective configuration (`GET /api/configuration`). */
 export function fetchConfiguration(): Promise<GatewayConfiguration> {
   return request<GatewayConfiguration>("/api/configuration");
+}
+
+/**
+ * Exchange credentials for a session cookie (`POST /api/login`). The cookie
+ * is HttpOnly — the SPA never sees the session token; same-origin fetches
+ * carry it automatically from here on. A `401` (wrong credentials) or `400`
+ * (malformed request) throws ApiFetchError with the envelope's message.
+ */
+export function login(user: string, password: string): Promise<{ authenticated: boolean }> {
+  return send<{ authenticated: boolean }>("/api/login", { user, password });
+}
+
+/** Revoke the session and expire the cookie (`POST /api/logout`); always 200. */
+export function logout(): Promise<{ authenticated: boolean }> {
+  return send<{ authenticated: boolean }>("/api/logout", {});
+}
+
+/** POST JSON to a management endpoint with the same failure handling as `request`. */
+async function send<T>(path: string, body: unknown): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (cause) {
+    throw new ApiFetchError(0, cause instanceof Error ? cause.message : String(cause));
+  }
+  if (!response.ok) {
+    throw new ApiFetchError(response.status, await failureMessage(response));
+  }
+  return (await response.json()) as T;
 }

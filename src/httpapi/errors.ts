@@ -9,6 +9,8 @@
  * contract's table:
  *
  *   400  invalid_request_error  provider-style message, no code
+ *   401  authentication_error    code "authentication_required" (ADR-008 gate)
+ *   401  authentication_error    code "invalid_credentials" (ADR-008 login)
  *   404  invalid_request_error  param "model", code "model_not_found"
  *   404  invalid_request_error  unmatched route (no code) — envelope rule
  *   502  api_error              code "upstream_error"
@@ -50,6 +52,37 @@ export function modelNotFoundResponse(model: string): Response {
 export function badRequestResponse(message: string): Response {
   return envelopeResponse(400, {
     error: { message, type: "invalid_request_error" },
+  });
+}
+
+/**
+ * Unauthenticated management request (ADR-008): `/api/*` without a valid
+ * session while auth is enabled — the gate's answer before routing. Sent
+ * with no `WWW-Authenticate` header: the SPA's login card is the only login
+ * affordance, and the message names the fact, never the reason why.
+ */
+export function authenticationRequiredResponse(): Response {
+  return envelopeResponse(401, {
+    error: {
+      message: "Authentication required: log in at POST /api/login",
+      type: "authentication_error",
+      code: "authentication_required",
+    },
+  });
+}
+
+/**
+ * Failed login (ADR-008): wrong user or wrong password — the answer is
+ * identical and delayed; it never reveals which credential half failed and
+ * never echoes the presented password.
+ */
+export function invalidCredentialsResponse(): Response {
+  return envelopeResponse(401, {
+    error: {
+      message: "Invalid credentials",
+      type: "authentication_error",
+      code: "invalid_credentials",
+    },
   });
 }
 

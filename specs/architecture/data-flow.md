@@ -30,8 +30,10 @@ process start (bun src/index.ts)
      |            failure -> warning logged (with upstream id), startup continues
      v
 [6] build the Hono app, mount the surfaces:                     src/httpapi/app.ts
-      LLM router at /llm/v1/*, management routes at /api/*,
-      SPA static serving at /ui/*, root / -> 302 redirect to /ui
+      LLM router at /llm/v1/*, management routes at /api/*
+      (+ the auth gate wired from the entry-point-injected
+      auth slice, ADR-008), SPA static serving at /ui/*,
+      root / -> 302 redirect to /ui
      |
      v
 [7] listen on the configured host:port (Bun.serve)  src/index.ts
@@ -56,12 +58,17 @@ client
    |  POST /llm/v1/chat/completions -- OpenAI body, model: "acme/gpt-4o"
    v
 [1] AUTH      the auth stage runs first                          security-model.md
-   |          MVP: gateway-auth is a TODO -- the stage is a no-op placeholder
+   |          stage 1 (ADR-008): when auth.enabled is true, /api/*
+   |          is gated by the config-backed session cookie --
+   |          POST /api/login and POST /api/logout excepted;
+   |          /llm/v1 and the /ui shell pass ungated (stage 2 TODO);
+   |          auth off -> the stage is a no-op placeholder
    v
 [2] ROUTE     the Hono app matches the endpoint                  src/httpapi/app.ts
    |          LLM surface: GET /llm/v1/models | POST /llm/v1/chat/completions
    |                      | POST /llm/v1/completions
    |          management: GET /api/status | GET /api/configuration
+   |                      | POST /api/login | POST /api/logout (ADR-008)
    |          unknown route -> 404
    v
 [3] PREFIX    model "acme/gpt-4o" splits on the first "/"
@@ -129,7 +136,7 @@ flat aggregated list in the OpenAI list shape -> client
 - The prefix is parsed once per request by the router for lookup; rewriting `body.model` (prefix strip) is the router's single body transformation — upstreams relay payload bytes untouched.
 - A chat-completion request touches exactly one upstream.
 - Streaming responses are forwarded incrementally; the gateway never buffers a full SSE stream before answering the client.
-- The auth stage precedes routing and upstream invocation; on MVP it is a no-op placeholder, and no code path skips it.
+- The auth stage precedes routing and upstream invocation; when auth is enabled it gates `/api/*` with the session check ([ADR-008](../decisions/008-management-cookie-auth.md)), when auth is off it stays a no-op placeholder — no code path skips it.
 - Request handling is logged to stderr — the request-handled summary at debug, failures at warning or error; nothing below the configured level is emitted.
 
 ## Anti-Patterns

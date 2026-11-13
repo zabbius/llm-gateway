@@ -160,8 +160,10 @@ export async function startGateway(options: StartGatewayOptions = {}): Promise<G
   // management configuration endpoint receives the redacted view — the mask
   // replaces key material here, at the entry point, before anything crosses
   // into the HTTP layer (specs/architecture/layers.md,
-  // specs/architecture/security-model.md).
-  const app = createApp(registry, logger, redactedConfigView(config));
+  // specs/architecture/security-model.md). The auth gate receives the
+  // validated auth slice separately (ADR-008) — the only path by which the
+  // password hash reaches the HTTP layer; the redacted view never carries it.
+  const app = createApp(registry, logger, redactedConfigView(config), { auth: config.auth });
 
   // [7] Bind the configured address — loopback by default
   // (specs/architecture/security-model.md invariant 6). When TLS is enabled,

@@ -15,6 +15,20 @@ function tlsLine(tls: GatewayConfiguration["server"]["tls"]): string {
   return tls.enabled ? `TLS: enabled — cert ${tls.cert ?? "—"}` : "TLS: disabled";
 }
 
+/** The auth summary line: "—" (ungated) or "enabled/disabled · user · passwordHash (mask)". */
+function authLine(auth: GatewayConfiguration["auth"]): ReactNode {
+  if (auth === null) return "—";
+  return (
+    <>
+      <code>{auth.enabled ? "enabled" : "disabled"}</code>
+      {" · user "}
+      <code>{auth.user ?? "—"}</code>
+      {" · passwordHash "}
+      <code>{auth.passwordHash ?? "—"}</code>
+    </>
+  );
+}
+
 export function ConfigurationSection(): ReactNode {
   const [configuration, setConfiguration] = useState<GatewayConfiguration | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +87,8 @@ export function ConfigurationSection(): ReactNode {
             <dd className="col-sm-10">
               <code>{configuration.logLevel}</code>
             </dd>
+            <dt className="col-sm-2">auth</dt>
+            <dd className="col-sm-10">{authLine(configuration.auth)}</dd>
           </dl>
 
           {configuration.upstreams.length === 0 ? (

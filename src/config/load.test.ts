@@ -266,7 +266,7 @@ test("an unknown top-level key is rejected and valid keys are named", () => {
   expect(result.ok).toBe(false);
   if (result.ok) return;
   expect(result.problems).toEqual([
-    'unknown top-level key "listern" (valid keys: server, logLevel, upstreams)',
+    'unknown top-level key "listern" (valid keys: server, logLevel, auth, upstreams)',
   ]);
   expect(log.lines).toEqual(result.problems);
 });
@@ -332,7 +332,7 @@ test("a top-level listen key is rejected as unknown — the listener lives under
   expect(result.ok).toBe(false);
   if (result.ok) return;
   expect(result.problems).toEqual([
-    'unknown top-level key "listen" (valid keys: server, logLevel, upstreams)',
+    'unknown top-level key "listen" (valid keys: server, logLevel, auth, upstreams)',
   ]);
 });
 
@@ -492,6 +492,158 @@ test("a fully specified tls block is accepted and mirrored into the normalized c
   expect(result.ok).toBe(true);
   if (!result.ok) return;
   expect(result.config.server).toEqual({ listen: "0.0.0.0:8443", tls });
+});
+
+// ---------------------------------------------------------------------------
+// auth block (ADR-008)
+// ---------------------------------------------------------------------------
+
+/** Syntactically valid argon2id PHC string (prefix-validated only at load). */
+const TEST_HASH = "$argon2id$v=19$m=65536,t=2,p=1$c2FsdHNhbHRzYWx0$cGFzc3dvcmRwYXNzd29yZGhlbGxv";
+
+test("an auth block that is not a JSON object is rejected", () => {
+  for (const auth of ["on", 42, [], true]) {
+    const result = loadConfig({
+      path: configFixture(validConfig([VALID_UPSTREAM], { auth })),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toEqual(["auth must be a JSON object"]);
+  }
+});
+
+test("an unknown key inside auth is rejected and valid keys are named", () => {
+  const result = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { auth: { enabled: false, users: [] } })),
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.problems).toEqual(['auth: unknown key "users" (valid keys: enabled, user, passwordHash)']);
+});
+
+test("auth without enabled is rejected — the gate is on or off, never inferred", () => {
+  const result = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { auth: { user: "admin" } })),
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.problems).toEqual(['auth: missing required key "enabled"']);
+});
+
+test("a non-boolean auth.enabled is rejected", () => {
+  for (const [enabled, rendered] of [
+    ["true", '"true"'],
+    [1, "1"],
+    [null, "null"],
+  ] as const) {
+    const result = loadConfig({
+      path: configFixture(validConfig([VALID_UPSTREAM], { auth: { enabled } })),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toEqual([`auth: enabled must be a boolean (got ${rendered})`]);
+  }
+});
+
+test("auth enabled without user or passwordHash names the missing key", () => {
+  const enabledOnly = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { auth: { enabled: true } })),
+  });
+
+  expect(enabledOnly.ok).toBe(false);
+  if (enabledOnly.ok) return;
+  expect(enabledOnly.problems).toEqual([
+    "auth: user must be a non-empty string when auth is enabled",
+    "auth: passwordHash is required when auth is enabled",
+  ]);
+
+  for (const [auth, problem] of [
+    [{ enabled: true, user: "", passwordHash: TEST_HASH }, "auth: user must be a non-empty string when auth is enabled"],
+    [{ enabled: true, user: 42, passwordHash: TEST_HASH }, "auth: user must be a non-empty string when auth is enabled"],
+    [{ enabled: true, user: "admin" }, "auth: passwordHash is required when auth is enabled"],
+  ] as const) {
+    const result = loadConfig({
+      path: configFixture(validConfig([VALID_UPSTREAM], { auth })),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toEqual([problem]);
+  }
+});
+
+test("a malformed passwordHash is rejected without echoing the value", () => {
+  for (const passwordHash of ["hunter2", "$bcrypt$abc", "$argon2x$abc", "", "$", 42, null]) {
+    const result = loadConfig({
+      path: configFixture(validConfig([VALID_UPSTREAM], { auth: { enabled: true, user: "admin", passwordHash } })),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toHaveLength(1);
+    expect(result.problems[0]).toContain("auth: passwordHash must be a PHC-format hash");
+    expect(result.problems[0]).toContain("tools/hash-password.ts");
+    // the configured value never reaches a problem line
+    if (typeof passwordHash === "string" && passwordHash.length > 0) {
+      expect(result.problems[0]).not.toContain(passwordHash);
+    }
+  }
+});
+
+test("a passwordHash with a valid PHC prefix is accepted for every supported format", () => {
+  for (const passwordHash of [
+    "$argon2id$v=19$m=65536,t=2,p=1$c2FsdA$aGFzaA",
+    "$argon2i$v=19$m=65536,t=2,p=1$salt$hash",
+    "$argon2d$v=19$m=65536,t=2,p=1$salt$hash",
+    "$2a$12$abcdefghijklmnopqrstuv",
+    "$2b$12$abcdefghijklmnopqrstuv",
+    "$2y$12$abcdefghijklmnopqrstuv",
+  ]) {
+    const result = loadConfig({
+      path: configFixture(validConfig([VALID_UPSTREAM], { auth: { enabled: true, user: "admin", passwordHash } })),
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) return;
+  }
+});
+
+test("a fully specified enabled auth block is accepted and mirrored into the normalized config", () => {
+  const auth = { enabled: true, user: "admin", passwordHash: TEST_HASH };
+  const result = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { auth })),
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) return;
+  expect(result.config.auth).toEqual(auth);
+});
+
+test("auth disabled stages user/passwordHash without requiring them; absent fields stay absent", () => {
+  const staged = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { auth: { enabled: false, user: "admin", passwordHash: TEST_HASH } })),
+  });
+
+  expect(staged.ok).toBe(true);
+  if (!staged.ok) return;
+  expect(staged.config.auth).toEqual({ enabled: false, user: "admin", passwordHash: TEST_HASH });
+
+  const disabledOnly = loadConfig({
+    path: configFixture(validConfig([VALID_UPSTREAM], { auth: { enabled: false } })),
+  });
+
+  expect(disabledOnly.ok).toBe(true);
+  if (!disabledOnly.ok) return;
+  expect(disabledOnly.config.auth).toEqual({ enabled: false });
+
+  const noAuth = loadConfig({ path: configFixture(validConfig()) });
+  expect(noAuth.ok).toBe(true);
+  if (!noAuth.ok) return;
+  expect(noAuth.config.auth).toBeUndefined();
 });
 
 // ---------------------------------------------------------------------------

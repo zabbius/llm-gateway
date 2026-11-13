@@ -103,4 +103,27 @@ describe("redactedConfigView", () => {
     expect(view.server.tls).not.toBe(config.server.tls); // no shared tls block
     expect(view).toEqual(redactedConfigView(config)); // deterministic
   });
+
+  test("an auth block mirrors field by field: enabled + user verbatim, the hash masked", () => {
+    const SECRET_HASH = "$argon2id$v=19$m=65536,t=2,p=1$U0VDUkVUU0FMVA$U0VDUkVUUEFTU1dPUkQ";
+    const view = redactedConfigView({
+      ...normalized(entry({ tlsFingerprint: SECRET_PIN })),
+      auth: { enabled: true, user: "root", passwordHash: SECRET_HASH },
+    });
+
+    expect(view.auth).toEqual({ enabled: true, user: "root", passwordHash: CONFIGURED_MASK });
+    expect(JSON.stringify(view)).not.toContain(SECRET_HASH);
+    expect(JSON.stringify(view)).not.toContain("U0VDUkVU"); // no hash fragment survives
+  });
+
+  test("a disabled auth block reports null credentials; no block reports null auth", () => {
+    const disabled = redactedConfigView({
+      ...normalized(entry()),
+      auth: { enabled: false },
+    });
+    expect(disabled.auth).toEqual({ enabled: false, user: null, passwordHash: null });
+
+    const absent = redactedConfigView(normalized(entry()));
+    expect(absent.auth).toBeNull();
+  });
 });

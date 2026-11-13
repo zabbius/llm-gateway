@@ -98,4 +98,23 @@ describe("handleConfiguration (GET /api/configuration)", () => {
     const raw = await (await app.request("/api/configuration")).text();
     expect(raw).toContain('"tls":null'); // absent tls block → JSON null, not omission
   });
+
+  test("the auth block mirrors the config: mask on the hash, user verbatim; absent block is null", async () => {
+    const SECRET_HASH = "$argon2id$v=19$m=65536,t=2,p=1$VEVTVFNBTFQ$VEVTVFZBTFVF";
+    const withAuth = redactedConfigView({
+      ...config(),
+      auth: { enabled: true, user: "ops-admin", passwordHash: SECRET_HASH },
+    });
+    const app = new Hono<GatewayEnv>();
+    app.get("/api/configuration", handleConfiguration(withAuth));
+
+    const raw = await (await app.request("/api/configuration")).text();
+    const body = JSON.parse(raw) as ConfigurationBody & { auth: { enabled: boolean; user: string | null; passwordHash: string | null } | null };
+    expect(body.auth).toEqual({ enabled: true, user: "ops-admin", passwordHash: "[Configured]" });
+    expect(raw).not.toContain(SECRET_HASH); // the hash never crosses the boundary
+    expect(raw).toContain("ops-admin"); // the login identifies, it does not authenticate
+
+    const absent = JSON.stringify(redactedConfigView(config()));
+    expect(absent).toContain('"auth":null'); // no auth block → JSON null, not omission
+  });
 });
