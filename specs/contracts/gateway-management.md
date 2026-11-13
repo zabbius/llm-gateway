@@ -49,7 +49,7 @@ The management API is a strictly read-only observation surface mounted at `/api/
 
 ## Initialization
 
-At startup the entry point builds the Hono app and mounts the management routes on the `/api/*` prefix **before** static serving is attached (`src/httpapi/app.ts`), alongside the LLM surface at `/llm/v1/*` ([client-gateway.md](client-gateway.md)) — the SPA mount can never shadow an `/api` route. The endpoints exist as soon as the listener is bound; they depend on no upstream being reachable: `GET /api/status` reads the probe outcomes the registry retained during startup (`src/upstreams/registry.ts`, step [6] of the startup flow in [data-flow.md](../architecture/data-flow.md)), and `GET /api/configuration` reads the already-validated in-memory config. Both answer even when every probe failed.
+At startup the entry point builds the Hono app and mounts the management routes on the `/api/*` prefix **before** static serving is attached (`src/httpapi/app.ts`), alongside the LLM surface at `/llm/v1/*` ([client-gateway.md](client-gateway.md)) — the SPA mount can never shadow an `/api` route. The endpoints exist as soon as the listener is bound; they depend on no upstream being reachable: `GET /api/status` reads the probe outcomes the registry retained during startup (`src/upstreams/registry.ts`, step [5] of the startup flow in [data-flow.md](../architecture/data-flow.md)), and `GET /api/configuration` reads the already-validated in-memory config. Both answer even when every probe failed.
 
 ## Data Flow Across Boundary
 

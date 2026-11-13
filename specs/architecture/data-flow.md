@@ -25,13 +25,13 @@ process start (bun src/index.ts)
 [4] register upstreams in the registry (upstream id -> instance)  src/upstreams/registry.ts
      |
      v
-[5] build the Hono app, mount the surfaces:                     src/httpapi/app.ts
+[5] probe every upstream (connect() -> listModels, 10 s budget)  src/upstreams/registry.ts
+     |            failure -> warning logged (with upstream id), startup continues
+     v
+[6] build the Hono app, mount the surfaces:                     src/httpapi/app.ts
       LLM router at /llm/v1/*, management routes at /api/*,
       SPA static serving at /ui/*, root / -> 302 redirect to /ui
      |
-     v
-[6] probe every upstream (connect() -> listModels, 10 s budget)  src/upstreams/registry.ts
-     |            failure -> warning logged (with upstream id), startup continues
      v
 [7] listen on the configured host:port (Bun.serve)
      |
@@ -73,10 +73,10 @@ client
    |            hop-by-hop headers never forwarded,
    |            upstream attaches its own provider credentials;
    |            pinned upstream (tlsFingerprint set, ADR-005): the request opens
-   |            over the cached probed leaf — bare-handshake probe, fail-closed
-   |            SPKI pin check, leaf-anchored chain, per-connection pin veto;
-   |            a TLS failure invalidates the cache (re-probe next request) and
-   |            maps to 502 upstream_tls_error
+   |            its own TLS socket and verifies the pin inline before any byte
+   |            is written — fail-closed SPKI pin check, leaf-anchored chain,
+   |            per-connection pin veto; nothing is cached between requests,
+   |            and a TLS failure maps to 502 upstream_tls_error
    v
 [6] upstream provider processes the request
    |
@@ -85,7 +85,7 @@ client
    |          stream:true -> SSE chunks pass through unbuffered;
    |          status and content-type preserved
    v
-log one line at the configured level to stderr
+log the request-handled summary to stderr (debug level)
 (upstream id, status, duration; no key material -- security-model.md)
 ```
 
@@ -125,7 +125,7 @@ flat aggregated list in the OpenAI list shape -> client
 - A chat-completion request touches exactly one upstream.
 - Streaming responses are forwarded incrementally; the gateway never buffers a full SSE stream before answering the client.
 - The auth stage precedes routing and upstream invocation; on MVP it is a no-op placeholder, and no code path skips it.
-- Every request produces at least one log line at the configured level, written to stderr; nothing below the configured level is emitted.
+- Request handling is logged to stderr — the request-handled summary at debug, failures at warning or error; nothing below the configured level is emitted.
 
 ## Anti-Patterns
 

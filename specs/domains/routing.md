@@ -35,7 +35,7 @@ interface GatewayError {
     message: string;
     type: "invalid_request_error" | "api_error";
     param?: string;   // "model" on model_not_found
-    code?: "model_not_found" | "upstream_error" | "upstream_timeout";  // absent on 400
+    code?: "model_not_found" | "upstream_error" | "upstream_timeout" | "upstream_tls_error";  // absent on 400
   };
 }
 ```
@@ -44,7 +44,7 @@ Resolution rules:
 
 - no `/` in the model id, or an empty half → `404` `model_not_found`;
 - prefix is not a registered upstream id → `404` `model_not_found`;
-- upstream unreachable / timed out → `504` `upstream_timeout`; a non-JSON upstream error body → `502` `upstream_error` — both synthesized by the upstream as a `Response` (`forward()` never rejects; specs/contracts/gateway-upstream.md). An unexpected rejection maps through the app's error middleware to a `502` `api_error` envelope;
+- upstream unreachable / timed out → `504` `upstream_timeout`; a non-JSON upstream error body → `502` `upstream_error`; a TLS verification failure on a pinned upstream → `502` `upstream_tls_error` ([ADR-005](../decisions/005-per-upstream-tls-pinning.md)) — all three synthesized by the upstream as a `Response` (`forward()` never rejects; specs/contracts/gateway-upstream.md). An unexpected rejection maps through the app's error middleware to a `502` `api_error` envelope;
 - an unknown *model* under a known upstream is not a gateway error — the request is forwarded and the upstream owns the verdict.
 
 Endpoint map:

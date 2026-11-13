@@ -40,8 +40,8 @@ The gateway is a credential custodian: it holds provider API keys that clients m
 
 - Logging is leveled (trace/debug/info/warning/error/none) and writes to stderr. The logging layer redacts a fixed set of sensitive fields (authorization, x-api-key, api-key, cookie, token) before emitting any line, at every level including trace.
 - Startup logs upstream ids and types; the raw config is never dumped, and key material never reaches a log line.
-- Upstreams log upstream interactions as metadata (method, host, status, byte counts). Request and response bodies appear only at trace/debug and only after redaction.
-- Upstream error text is redacted before logging: provider error payloads sometimes echo request headers.
+- Upstreams log outcome metadata only — the startup probe result, and code/reason fields on synthesized failures; request and response bodies are never logged at any level, so provider payloads never reach a log line ([observability.md](../domains/observability.md)). The per-request summary line (method, path, status, duration) belongs to the HTTP middleware, not to upstreams.
+- Upstream failure logs carry only the upstream status, a code, and a gateway-authored reason — provider error payloads (which sometimes echo request headers) are relayed to the client verbatim but never echoed into a log line.
 
 ## Invariants
 
@@ -59,7 +59,7 @@ The gateway is a credential custodian: it holds provider API keys that clients m
 
 - Hardcoding a provider key or base URL in upstream source "just for a local test" — keys enter the process only through the config file; a committed test key is a leaked key.
 - Forwarding client headers wholesale to the upstream — header pass-through excludes authorization and hop-by-hop headers; the upstream injects its own credentials.
-- Logging full upstream request/response bodies at info level "to debug faster" — bodies live at trace/debug after redaction; info stays metadata-only.
+- Logging full upstream request/response bodies at any level "to debug faster" — the MVP logs metadata only; provider payloads never reach a log line.
 - Putting key material into an error surface ("upstream rejected key sk-...") — errors carry statuses and provider messages, never credentials.
 - Implementing gateway-auth inside individual upstreams (each upstream checking client keys) — auth is one pre-routing stage; per-upstream auth duplicates checks and spreads credential logic into provider code.
 - Adding a skip-verification fetch path (`rejectUnauthorized: false`) to "make self-signed upstreams work" — the only non-default acceptance path is the pinned one ([ADR-005](../decisions/005-per-upstream-tls-pinning.md)); a flag that accepts any certificate is a standing MITM window.

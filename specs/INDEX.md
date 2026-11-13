@@ -36,14 +36,14 @@ Condensed from [architecture/layers.md](./architecture/layers.md) — the author
                                  v
 +------------------------------------------------------------------+
 | HTTP layer (Hono app)                                            |
-| middleware (request logging, error mapping), route mounting      |
+| middleware (request logging, error mapping), route mounting,     |
+| route handlers: models aggregation, completions dispatch         |
 +--------------------------------+---------------------------------+
                                  | delegates matched requests
                                  v
 +------------------------------------------------------------------+
 | gateway core                                                     |
-| OpenAI endpoints: /llm/v1/models aggregation,                    |
-| completions dispatch by upstream-id prefix                       |
+| model-id prefix resolution ({upstreamId}/{model})                |
 +--------------------------------+---------------------------------+
                                  | looks up by upstream id
                                  v

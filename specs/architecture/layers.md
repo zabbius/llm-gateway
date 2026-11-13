@@ -11,8 +11,8 @@ Stack on MVP: TypeScript on Bun, Hono as the HTTP framework, JSON configuration.
 | Layer | Location | Responsibility |
 | ----- | ---------------- | -------------- |
 | entry point | `src/index.ts` | reads config, constructs upstreams, wires the registry, builds the app, starts the listener |
-| Hono app | `src/httpapi/app.ts` | HTTP concerns only: middleware (request logging, error mapping), route mounting |
-| gateway router | `src/gateway/router.ts` | OpenAI-protocol endpoints: aggregates `GET /llm/v1/models`, dispatches `POST /llm/v1/chat/completions` by upstream-id prefix |
+| Hono app | `src/httpapi/*` | HTTP concerns only: middleware (request logging, error mapping), route mounting, route handlers (`handlers/`: models aggregation, completions dispatch, management endpoints) |
+| gateway router | `src/gateway/router.ts` | model-id prefix resolution: splits `{upstreamId}/{model}` on the first "/" and looks the prefix up in the registry; a null resolution leaves the 404 decision to the HTTP layer |
 | upstream registry | `src/upstreams/registry.ts` | holds upstream instances keyed by upstream id; exact-match lookup; populated once at startup |
 | upstreams | `src/upstreams/*` | speak one provider dialect each; the openai-compatible upstream is a pure pass-through proxy |
 
@@ -32,14 +32,15 @@ Cross-cutting modules importable by every layer:
                                    | constructs and wires
                                    v
 +--------------------------------------------------------------------+
-| HTTP layer (Hono app): src/httpapi/app.ts                          |
-| middleware (request logging, error mapping), route mounting        |
+| HTTP layer (Hono app): src/httpapi                                 |
+| middleware (request logging, error mapping), route mounting;       |
+| route handlers: models aggregation, completions dispatch           |
 +----------------------------------+---------------------------------+
                                    | delegates matched requests
                                    v
 +--------------------------------------------------------------------+
 | gateway core: src/gateway/router.ts                                |
-| GET /llm/v1/models aggregation, POST /llm/v1/chat/completions dispatch |
+| model-id prefix resolution: {upstreamId}/{model}                   |
 +----------------------------------+---------------------------------+
                                    | looks up by upstream id
                                    v
@@ -59,7 +60,7 @@ Cross-cutting modules importable by every layer:
 +--------------------------------------------------------------------+
 | upstreams: src/upstreams/*                                         |
 | one provider dialect per upstream                                  |
-| MVP: openai-compatible upstream (src/upstreams/openai-compatible.ts)|
+| MVP: openai-compatible (src/upstreams/openai-compatible.ts)        |
 +--------------------------------------------------------------------+
 ```
 
@@ -67,12 +68,14 @@ Cross-cutting modules importable by every layer:
 
 Import rules (the dependency contract of the gateway):
 
+Type-only imports (`import type`, type-only re-exports) carry shared vocabulary across layers with no runtime coupling; the numbered rules below govern runtime imports. The production type-only edges: HTTP-layer modules import registry and upstream vocabulary directly from `src/upstreams/*` and the redacted-view type from `src/config/redact.ts`; `src/upstreams/upstream.ts` re-exports `UpstreamConfig`/`UpstreamType` from `src/config/schema.ts`; the gateway core re-exports the `UpstreamRegistry` type for the `createApp` signature.
+
 1. Dependencies point strictly downward: entry point → Hono app → gateway core → upstreams. A layer imports only layers below it plus cross-cutting modules; upward imports and import cycles never occur.
 2. Only the entry point reads the config file and names concrete upstream classes. Every other layer receives already-constructed instances or interfaces; concrete upstream imports live in exactly one place — the startup wiring in `src/index.ts`.
-3. The Hono app (`src/httpapi/app.ts`) imports the gateway core only; it never imports the registry or any upstream.
+3. At runtime the Hono app (`src/httpapi/app.ts`) imports the gateway core only — never the registry, an upstream, or the config loader; its registry and config references are the type-only vocabulary above (injected instances arrive from the entry point).
 4. The gateway core and the registry reference upstreams exclusively through the upstream interface (`src/upstreams/upstream.ts`); a concrete upstream name never appears in core code.
-5. Upstreams import only the upstream interface and cross-cutting modules (shared types, logging); they never import the HTTP layer, the router, the registry, or the config loader.
-6. The upstream interface sits at the bottom of the graph: it imports only shared types, and both the core and the upstreams depend on it.
+5. Upstreams import only upstream-layer modules (the shared interface, sibling helpers such as `src/upstreams/tls-pinning.ts`) and cross-cutting modules (shared types, logging); their only config touch is the type-only vocabulary re-export above, and they never import the HTTP layer, the router, or the registry.
+6. The upstream interface sits at the bottom of the graph: at runtime it imports only shared types (its config-vocabulary re-export is type-only), and both the core and the upstreams depend on it.
 7. Cross-cutting modules (`src/types.ts`, `src/logging/logger.ts`) are imported by any layer and import no project module except shared types.
 
 Structural invariants:
