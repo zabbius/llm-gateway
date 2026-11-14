@@ -168,12 +168,14 @@ export function App(): ReactNode {
   useEffect(() => {
     // One auth probe on mount: a 401 swaps to the login card; any other
     // outcome (including an auth-off gateway) renders the sections — they
-    // carry their own error surfaces.
+    // carry their own error surfaces. `authenticated` tells a live session
+    // (Log out applies) from an auth-off gateway — otherwise a plain refresh
+    // would drop the Log out control while the cookie stays valid.
     let cancelled = false;
     (async (): Promise<void> => {
       try {
-        await fetchStatus();
-        if (!cancelled) setAuth({ kind: "ready", canLogout: false });
+        const status = await fetchStatus();
+        if (!cancelled) setAuth({ kind: "ready", canLogout: status.authenticated });
       } catch (cause) {
         if (cancelled) return;
         if (cause instanceof ApiFetchError && cause.status === 401) {

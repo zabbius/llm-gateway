@@ -224,7 +224,10 @@ describe("startGateway (in-process wiring)", () => {
       expect(login.status).toBe(200);
       const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
       expect(cookie.startsWith("llm_gateway_session=")).toBe(true);
-      expect((await fetch(`${base}/api/status`, { headers: { cookie } })).status).toBe(200);
+      const admitted = await fetch(`${base}/api/status`, { headers: { cookie } });
+      expect(admitted.status).toBe(200);
+      // the refresh bit: a valid session self-reports, the SPA's Log out survives reloads
+      expect(((await admitted.json()) as { authenticated: boolean }).authenticated).toBe(true);
 
       // the sanitized view masks the hash and names the login
       const configuration = (await (

@@ -24,6 +24,8 @@ export interface UpstreamStatus {
 /** The `GET /api/status` body — config order preserved. */
 export interface GatewayStatus {
   readonly upstreams: readonly UpstreamStatus[];
+  /** This request carries a valid session (true only behind a login). */
+  readonly authenticated: boolean;
 }
 
 /** One upstream entry of the sanitized configuration — credentials already masked. */

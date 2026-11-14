@@ -167,7 +167,7 @@ export function createApp(
   // startup-probe outcomes (always 200 — a failed probe is data, not an
   // error); GET /api/configuration serves the redacted view the entry point
   // built — the raw config and its key material never reach this layer.
-  app.get("/api/status", handleStatus(registry));
+  app.get("/api/status", handleStatus(registry, authConfig?.enabled === true));
   app.get("/api/configuration", handleConfiguration(configuration));
 
   // [5] UI namespace (ADR-006) — one top-level prefix per surface; the

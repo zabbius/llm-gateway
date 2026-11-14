@@ -22,12 +22,14 @@ The management API is a read-only observation surface mounted at `/api/*` (names
   "upstreams": [
     { "id": "openai-main", "type": "openai-compatible", "probe": "ok" },
     { "id": "vllm-local", "type": "openai-compatible", "probe": "failed", "reason": "connect timeout after 10000ms" }
-  ]
+  ],
+  "authenticated": false
 }
 ```
 
 - `upstreams[]` appears in config order; `id` and `type` mirror the config entries.
 - `probe` is the retained startup-probe outcome: `"ok"` or `"failed"`. On `"failed"`, `reason` (string) states the failure fact (e.g. timeout, connection refused) and never echoes credential or config material; on `"ok"` the field is absent.
+- `authenticated` states whether this request carries a valid session ([ADR-008](../decisions/008-management-cookie-auth.md)): `true` only behind a login — with auth enabled the gate admits only valid sessions, so reaching the handler proves the cookie; with auth off every request is anonymous (`false`). The SPA's mount probe reads it to keep the `Log out` control across page reloads.
 
 `GET /api/configuration` → `200`:
 

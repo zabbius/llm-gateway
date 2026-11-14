@@ -12,7 +12,7 @@ The operator-facing SPA served under `/ui/*` (namespace: [ADR-006](../decisions/
 - `web/src/main.tsx` — React mount point (StrictMode, the Bootstrap CSS import)
 - `web/src/router.tsx` — minimal history-API router: `usePath()` (popstate + in-app navigation listener, strips the `/ui` base), `navigate()` / `replace()` (pushState/replaceState through the base), the `Link` component (real `/ui/*` hrefs, intercepts plain clicks only), the `SectionId` set, and `sectionForPath()` (unknown paths fall back to the default section)
 - `web/src/api.ts` — typed fetch helpers for the management surface (`GET /api/status`, `GET /api/configuration`, and the auth actions `POST /api/login` / `POST /api/logout` — [ADR-008](../decisions/008-management-cookie-auth.md)) mirroring the contract shapes; the only gateway calls the SPA makes. A `401` (session missing or expired) surfaces as `ApiFetchError` with `status === 401`.
-- `web/src/App.tsx` — the shell: a flex row with the left dock leading (sticky aside, `border-end`) and the main content following; the dock header is the brand (the glyph inlined so it inherits `currentColor`) above the section nav (Bootstrap `nav-pills flex-column`, active highlight), plus the `Log out` control when the current session came from a login; it also canonicalizes `/ui` and `/ui/` to the default section via client-side replaceState. The auth state machine probes `GET /api/status` on mount: `401` swaps the shell to the login card (Bootstrap form, error alert on failure — the server sends no native prompt), success renders the sections; the HttpOnly session cookie rides same-origin fetches automatically.
+- `web/src/App.tsx` — the shell: a flex row with the left dock leading (sticky aside, `border-end`) and the main content following; the dock header is the brand (the glyph inlined so it inherits `currentColor`) above the section nav (Bootstrap `nav-pills flex-column`, active highlight), plus the `Log out` control when the current session came from a login; it also canonicalizes `/ui` and `/ui/` to the default section via client-side replaceState. The auth state machine probes `GET /api/status` on mount: `401` swaps the shell to the login card (Bootstrap form, error alert on failure — the server sends no native prompt), success renders the sections — and the payload's `authenticated` bit drives the dock's `Log out` control (shown for a live session, hidden on an auth-off gateway), so it survives page reloads; the HttpOnly session cookie rides same-origin fetches automatically.
 - `web/src/sections/Status.tsx` — Status section: fetches `GET /api/status` on mount plus a manual refresh button; Bootstrap table (`id`, `type`, probe badge `ok`/`failed`, `reason`); loading spinner and error alert states
 - `web/src/sections/Configuration.tsx` — Configuration section: fetches `GET /api/configuration`; the `server` (`listen`, `tls`) / `logLevel` / `auth` summary and the upstream table with masked secrets rendered as returned
 - `web/src/sections/About.tsx` — static About section: what llm-gateway is, the stack, the OpenAI-client baseURL hint (`<host>/llm/v1`), pointers to `README.md` and `specs/`
@@ -37,6 +37,7 @@ Management API response shapes (`web/src/api.ts`), mirroring [gateway-management
 ```ts
 export interface GatewayStatus {
   readonly upstreams: readonly UpstreamStatus[]; // { id, type, probe: "ok" | "failed", reason? }
+  readonly authenticated: boolean; // this request carries a valid session (true only behind a login)
 }
 export interface GatewayConfiguration {
   readonly server: {
@@ -57,6 +58,8 @@ gateway:  GET / ──► 302 /ui ──► any unmatched GET/HEAD /ui/* serves 
 browser:  /ui (or /ui/) ──► React mounts ──► replaceState to /ui/status (canonical default section)
           auth probe GET /api/status ──► 401 ──► login card ──► POST /api/login ──► Set-Cookie (HttpOnly)
                                                                           └► sections render
+          (a 200 probe renders the sections directly; its `authenticated` bit drives the dock's Log out —
+           true behind a live session, false on an auth-off gateway — so Log out survives page reloads)
           dock Link click ──► pushState /ui/<section> + re-render (no reload; the server never sees a section path)
           deep link /ui/configuration ──► server answers with index.html ──► React reads location, renders that section
           Log out ──► POST /api/logout ──► session revoked ──► back to the login card

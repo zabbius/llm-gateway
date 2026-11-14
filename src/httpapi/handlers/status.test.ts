@@ -74,9 +74,9 @@ async function registryWith(specs: ProbeSpec[]): Promise<UpstreamRegistry> {
 }
 
 /** The handler mounted on a minimal app, driven through `app.request`. */
-function appWith(registry: UpstreamRegistry): Hono<GatewayEnv> {
+function appWith(registry: UpstreamRegistry, authenticated = false): Hono<GatewayEnv> {
   const app = new Hono<GatewayEnv>();
-  app.get("/api/status", handleStatus(registry));
+  app.get("/api/status", handleStatus(registry, authenticated));
   return app;
 }
 
@@ -87,10 +87,10 @@ interface StatusEntry {
   reason?: string;
 }
 
-async function statusBody(app: Hono<GatewayEnv>): Promise<{ status: number; body: { upstreams: StatusEntry[] }; raw: string }> {
+async function statusBody(app: Hono<GatewayEnv>): Promise<{ status: number; body: { upstreams: StatusEntry[]; authenticated: boolean }; raw: string }> {
   const response = await app.request("/api/status");
   const raw = await response.text();
-  return { status: response.status, body: JSON.parse(raw) as { upstreams: StatusEntry[] }, raw };
+  return { status: response.status, body: JSON.parse(raw) as { upstreams: StatusEntry[]; authenticated: boolean }, raw };
 }
 
 describe("handleStatus (GET /api/status)", () => {
@@ -113,6 +113,9 @@ describe("handleStatus (GET /api/status)", () => {
     expect(body.upstreams[1]?.probe).toBe("failed");
     // the log-safe failure fact, same string the startup warning carries
     expect(body.upstreams[1]?.reason).toBe('upstream "dead" is unreachable: timeout');
+    // mounted without auth: every request is anonymous — the SPA's refresh
+    // reads this bit to decide whether a Log out control applies
+    expect(body.authenticated).toBe(false);
   });
 
   test("an ok probe carries no reason key; only a failed probe does", async () => {
@@ -154,5 +157,13 @@ describe("handleStatus (GET /api/status)", () => {
     const { status, body } = await statusBody(app);
     expect(status).toBe(200);
     expect(body.upstreams.map((upstream) => upstream.probe)).toEqual(["failed", "failed"]);
+  });
+
+  test("behind the auth gate the bit flips: app.ts mounts with true once auth is enabled", async () => {
+    // With auth on, the gate admits only valid sessions — reaching the
+    // handler proves the session, so the mounted flag is true.
+    const app = appWith(await registryWith([{ id: "alpha" }]), true);
+    const { body } = await statusBody(app);
+    expect(body.authenticated).toBe(true);
   });
 });

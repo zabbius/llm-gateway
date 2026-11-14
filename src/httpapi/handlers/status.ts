@@ -14,9 +14,13 @@ import type { Handler } from "hono";
 import type { UpstreamRegistry } from "../../upstreams/registry.ts";
 import type { GatewayEnv } from "../../gateway/router.ts";
 
-export function handleStatus(registry: UpstreamRegistry): Handler<GatewayEnv> {
+export function handleStatus(registry: UpstreamRegistry, authenticated: boolean): Handler<GatewayEnv> {
   return async () => {
-    const body = JSON.stringify({ upstreams: registry.status() });
+    // `authenticated` — whether this request carries a valid session: with
+    // auth on, the gate admits only valid sessions, so reaching this handler
+    // means true; with auth off everything is anonymous (false). The SPA's
+    // mount probe reads it to decide whether a Log out control applies.
+    const body = JSON.stringify({ upstreams: registry.status(), authenticated });
     return new Response(body, {
       status: 200,
       headers: { "content-type": "application/json" },
