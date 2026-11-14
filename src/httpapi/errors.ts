@@ -13,6 +13,7 @@
  *   401  authentication_error    code "invalid_credentials" (ADR-008 login)
  *   404  invalid_request_error  param "model", code "model_not_found"
  *   404  invalid_request_error  unmatched route (no code) — envelope rule
+ *   413  invalid_request_error  code "request_too_large" (body size cap)
  *   502  api_error              code "upstream_error"
  *   502  api_error              code "upstream_tls_error" (ADR-005)
  *   504  api_error              code "upstream_timeout"
@@ -52,6 +53,21 @@ export function modelNotFoundResponse(model: string): Response {
 export function badRequestResponse(message: string): Response {
   return envelopeResponse(400, {
     error: { message, type: "invalid_request_error" },
+  });
+}
+
+/**
+ * The request body exceeds the gateway's hard size cap — answered before
+ * any upstream contact, and still the envelope: clients parse it like any
+ * other gateway-generated failure (specs/contracts/client-gateway.md).
+ */
+export function payloadTooLargeResponse(): Response {
+  return envelopeResponse(413, {
+    error: {
+      message: "The request body exceeds the gateway's size limit.",
+      type: "invalid_request_error",
+      code: "request_too_large",
+    },
   });
 }
 

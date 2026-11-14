@@ -92,8 +92,9 @@ interface GatewayConfig {
  * `createApp` — the raw config never crosses into the HTTP layer.
  * `apiKey` is always the fixed mask `[Configured]` (`CONFIGURED_MASK`,
  * src/config/redact.ts); `tlsFingerprint` is the mask when configured,
- * `null` when absent; `baseUrl` is verbatim (not secret). The view is built
- * field by field — the real credential values are never copied into it.
+ * `null` when absent; `baseUrl` is verbatim (not secret). `auth.passwordHash`
+ * is the same mask when configured, `null` when absent (ADR-008). The view is
+ * built field by field — the real credential values are never copied into it.
  */
 interface RedactedTlsConfig {
   enabled: boolean;
@@ -107,6 +108,11 @@ interface RedactedGatewayConfig {
     tls: RedactedTlsConfig | null; // null when the config carries no tls block
   };
   logLevel: LogLevel;
+  auth: {
+    enabled: boolean; // mirrors the config's auth.enabled
+    user: string | null; // verbatim operator login — it identifies, it does not authenticate
+    passwordHash: string | null; // "[Configured]" when configured, null when absent — the hash never crosses into the view
+  } | null; // null when the config carries no auth block
   upstreams: Array<{
     type: UpstreamType;
     id: string;

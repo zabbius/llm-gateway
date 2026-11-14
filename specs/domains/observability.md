@@ -47,8 +47,8 @@ stderr (fd 2) ──► environment's log collection (out of gateway scope)
 
 | Level | Emitted content |
 | ----- | --------------- |
-| `trace` | per-request internals; in the MVP only the auth-stage placeholder emits a trace line (method, path) |
-| `debug` | request handled (method, path, status, duration, resolved upstream id), upstream resolved on completions dispatch (upstream id, upstream model, upstream path), models aggregated (count) |
+| `trace` | per-request internals; the auth stage emits one trace line per request (method, path) — its message names the pass-through placeholder when auth is off, or the mounted session gate when auth is on (ADR-008) |
+| `debug` | request handled (method, path, status, duration, resolved upstream id), upstream resolved on completions dispatch (upstream id, upstream model, upstream path), models aggregated (count), auth events (login succeeded / login failed; a management request without a valid session — 401) |
 | `info` | startup: config loaded, upstream probe results (connected / degraded), listening address with the TLS fact (`tls: true|false` — never PEM contents); shutdown |
 | `warning` | degraded but continuing: startup probe failed (upstream degraded, startup continues), model list failed for one upstream (its entries drop out, the list still answers 200) |
 | `error` | request failed (upstream unreachable/timeout → `504 upstream_timeout`; non-JSON upstream → `502 upstream_error`; TLS pin verification failed on a pinned upstream → `502 upstream_tls_error`), unhandled exception, startup validation failure, TLS certificate/key file missing or unreadable (before the port binds; the path is named, its contents never logged), listen bind failure (process exits) |
@@ -62,7 +62,7 @@ Config uses the gateway vocabulary (`warning`, `none`); the mapping to pino's `w
 - There is exactly one root logger per process; its level is fixed at startup from `logLevel` and never changes at runtime in the MVP.
 - `logLevel: "none"` suppresses every line.
 - No file appenders exist — the gateway never opens a log file.
-- Secrets — `apiKey` values and `Authorization` headers — never appear in any log line.
+- Secrets — `apiKey` and `passwordHash` values and `Authorization` headers — never appear in any log line (the censor covers the header shapes and the credential config field names, `src/logging/logger.ts`).
 - Request and response bodies are never logged in the MVP (metadata only), so SSE payloads never reach the log stream.
 - Each log line is a single JSON object (pino default format).
 

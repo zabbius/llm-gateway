@@ -18,6 +18,7 @@ import { UpstreamRegistry, type UpstreamFactories } from "../upstreams/registry.
 import { OpenAICompatibleUpstream } from "../upstreams/openai-compatible.ts";
 import { createApp, type UiServingOptions } from "./app.ts";
 import { redactedConfigView } from "../config/redact.ts";
+import { MAX_BODY_BYTES } from "./body.ts";
 
 /* ------------------------------------------------------------------ */
 /* test infrastructure                                                 */
@@ -369,6 +370,22 @@ describe("gateway-generated errors", () => {
     expect(upstreams.get("alpha")?.received).toHaveLength(0);
   });
 
+  test("413 request_too_large when the body exceeds the gateway cap — no upstream contact", async () => {
+    const { logger } = fakeLogger();
+    const { app, upstreams } = await gateway([{ id: "alpha" }], logger);
+
+    const response = await app.request("/llm/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "content-length": String(MAX_BODY_BYTES + 1) },
+      body: JSON.stringify({ model: "alpha/gpt-4o" }),
+    });
+    expect(response.status).toBe(413);
+    const body = (await response.json()) as { error: Record<string, unknown> };
+    expect(body.error.type).toBe("invalid_request_error");
+    expect(body.error.code).toBe("request_too_large");
+    expect(upstreams.get("alpha")?.received).toHaveLength(0);
+  });
+
   test("502 upstream_error envelope relayed from a real upstream when the upstream answers non-JSON", async () => {
     const { logger } = fakeLogger();
     const upstream = Bun.serve({
@@ -580,14 +597,20 @@ const UI_ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg"/>';
 /** Absolute fixture dirs: serveStatic joins any root verbatim (node:path). */
 const UI_DIST_FIXTURE = join(import.meta.dir, "..", "..", "web", "dist-fixture");
 const UI_DIST_ABSENT = join(import.meta.dir, "..", "..", "web", "dist-absent-fixture");
+/** Exists but carries no index.html — the SPA fallback's missing-document path. */
+const UI_DIST_EMPTY = join(import.meta.dir, "..", "..", "web", "dist-empty-fixture");
 
 describe("UI namespace (ADR-006): GET / redirect and /ui/* serving", () => {
   beforeAll(() => {
     mkdirSync(UI_DIST_FIXTURE, { recursive: true });
     writeFileSync(join(UI_DIST_FIXTURE, "index.html"), UI_INDEX_HTML);
     writeFileSync(join(UI_DIST_FIXTURE, "icon.svg"), UI_ICON_SVG);
+    mkdirSync(UI_DIST_EMPTY, { recursive: true });
   });
-  afterAll(() => rmSync(UI_DIST_FIXTURE, { recursive: true, force: true }));
+  afterAll(() => {
+    rmSync(UI_DIST_FIXTURE, { recursive: true, force: true });
+    rmSync(UI_DIST_EMPTY, { recursive: true, force: true });
+  });
 
   /** Assert the OpenAI error envelope shape and hand back the body. */
   async function expectEnvelope(response: Response): Promise<{ error: Record<string, unknown> }> {
@@ -634,6 +657,16 @@ describe("UI namespace (ADR-006): GET / redirect and /ui/* serving", () => {
     const head = await app.request("/ui/status", { method: "HEAD" });
     expect(head.status).toBe(200);
     expect(head.headers.get("content-type")).toContain("text/html");
+  });
+
+  test("a build output whose index.html vanished since startup answers plain-text 404 — no envelope, no 502", async () => {
+    const { logger } = fakeLogger();
+    const { app } = await gateway([{ id: "alpha" }], logger, { webDistDir: UI_DIST_EMPTY });
+
+    const response = await app.request("/ui/status");
+    expect(response.status).toBe(404);
+    expect(response.headers.get("content-type")).toContain("text/plain");
+    expect(await response.text()).toContain("SPA document unavailable");
   });
 
   test("existing assets are served from the build output", async () => {

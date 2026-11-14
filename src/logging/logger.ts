@@ -25,8 +25,9 @@ export const PINO_LEVEL: Record<LogLevel, string> = {
 
 /**
  * Sensitive field names redacted from every log line. The names are a fixed
- * set; the path prefixes account for the places where header-shaped objects
- * appear (a bare object, `headers`, or a request handle's `headers`).
+ * set: header shapes (bare, under `headers`, or under a request handle's
+ * `headers`) and credential config fields (bare or one level deep — e.g.
+ * `{ auth: { passwordHash } }` or an upstream entry).
  */
 const REDACT_PATHS: readonly string[] = [
   "authorization",
@@ -34,6 +35,10 @@ const REDACT_PATHS: readonly string[] = [
   "api-key",
   "cookie",
   "token",
+  "apiKey",
+  "passwordHash",
+  "*.apiKey",
+  "*.passwordHash",
   "headers.authorization",
   "headers.x-api-key",
   "headers.api-key",

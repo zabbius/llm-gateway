@@ -7,6 +7,7 @@ import {
   badRequestResponse,
   modelNotFoundResponse,
   notFoundResponse,
+  payloadTooLargeResponse,
   upstreamErrorResponse,
   upstreamTimeoutResponse,
   upstreamTlsErrorResponse,
@@ -42,6 +43,19 @@ describe("error envelope constructors", () => {
       error: {
         message: "you must provide a model parameter",
         type: "invalid_request_error",
+      },
+    });
+  });
+
+  test("payloadTooLargeResponse — 413, invalid_request_error, code 'request_too_large'", async () => {
+    const { status, contentType, body } = await envelopeOf(payloadTooLargeResponse());
+    expect(status).toBe(413);
+    expect(contentType).toContain("application/json");
+    expect(body).toEqual({
+      error: {
+        message: "The request body exceeds the gateway's size limit.",
+        type: "invalid_request_error",
+        code: "request_too_large",
       },
     });
   });

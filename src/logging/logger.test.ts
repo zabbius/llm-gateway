@@ -111,6 +111,8 @@ test("sensitive fields are redacted at trace level, including nested header obje
       `  "api-key": "akey-top-secret",`,
       `  cookie: "ck-top-secret",`,
       `  token: "tk-top-secret",`,
+      `  apiKey: "sk-config-secret",`,
+      `  auth: { passwordHash: "hash-config-secret", user: "kept-user" },`,
       `  model: "openai-main/gpt-4o",`,
       `  headers: { authorization: "sk-nest-secret", cookie: "ck-nest-secret", accept: "kept-accept" },`,
       `  req: { headers: { "x-api-key": "xkey-req-secret" } },`,
@@ -127,6 +129,8 @@ test("sensitive fields are redacted at trace level, including nested header obje
     "akey-top-secret",
     "ck-top-secret",
     "tk-top-secret",
+    "sk-config-secret",
+    "hash-config-secret",
     "sk-nest-secret",
     "ck-nest-secret",
     "xkey-req-secret",
@@ -142,6 +146,10 @@ test("sensitive fields are redacted at trace level, including nested header obje
   expect(line["api-key"]).toBe(REDACT_CENSOR);
   expect(line.cookie).toBe(REDACT_CENSOR);
   expect(line.token).toBe(REDACT_CENSOR);
+  expect(line.apiKey).toBe(REDACT_CENSOR);
+  const auth = line.auth as Record<string, unknown> | undefined;
+  expect(auth?.passwordHash).toBe(REDACT_CENSOR);
+  expect(auth?.user).toBe("kept-user"); // non-credential config fields pass through
   const headers = line.headers as Record<string, unknown> | undefined;
   expect(headers?.authorization).toBe(REDACT_CENSOR);
   expect(headers?.cookie).toBe(REDACT_CENSOR);

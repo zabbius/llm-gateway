@@ -12,6 +12,7 @@ import { Hono } from "hono";
 import type pino from "pino";
 import type { GatewayEnv } from "../gateway/router.ts";
 import { LOGIN_FAILURE_DELAY_MS, MAX_SESSIONS, SESSION_COOKIE, SESSION_TTL_MS, SessionStore, createAuthGate, loginMatches } from "./auth.ts";
+import { MAX_BODY_BYTES } from "./body.ts";
 
 /** A real argon2id hash of the test operator's password (verified below). */
 const OPERATOR_USER = "admin";
@@ -153,6 +154,18 @@ describe("POST /api/login", () => {
     expect(numericFields.status).toBe(400);
     expect(numericFields.status).toBe(400);
     expect(Date.now() - started).toBeLessThan(LOGIN_FAILURE_DELAY_MS);
+  });
+
+  test("a body over the size cap is 413 request_too_large, before any credential check", async () => {
+    const app = appWith();
+    const response = await app.request("/api/login", {
+      method: "POST",
+      headers: { "content-type": "application/json", "content-length": String(MAX_BODY_BYTES + 1) },
+      body: JSON.stringify({ user: OPERATOR_USER, password: OPERATOR_PASSWORD }),
+    });
+    expect(response.status).toBe(413);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("request_too_large");
   });
 });
 

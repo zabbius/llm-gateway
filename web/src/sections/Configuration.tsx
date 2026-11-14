@@ -9,7 +9,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { fetchConfiguration, type GatewayConfiguration } from "../api.ts";
 
-/** The tls summary line: "TLS: enabled — cert <путь>", "TLS: disabled", or "—" when the config carries no tls block. */
+/** The tls summary line: "TLS: enabled — cert <path>", "TLS: disabled", or "—" when the config carries no tls block. */
 function tlsLine(tls: GatewayConfiguration["server"]["tls"]): string {
   if (tls === null) return "—";
   return tls.enabled ? `TLS: enabled — cert ${tls.cert ?? "—"}` : "TLS: disabled";

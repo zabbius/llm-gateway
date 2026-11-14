@@ -158,6 +158,9 @@ export function App(): ReactNode {
   const path = usePath();
   const section = sectionForPath(path);
   const [auth, setAuth] = useState<AuthState>({ kind: "checking" });
+  // True while the login POST is in flight: the card disables its button, so
+  // a slow failed login cannot double-submit.
+  const [loginBusy, setLoginBusy] = useState(false);
 
   useEffect(() => {
     // "/ui" and "/ui/" canonicalize to the default section — replace, not
@@ -191,11 +194,14 @@ export function App(): ReactNode {
   }, []);
 
   const submitLogin = useCallback(async (user: string, password: string): Promise<void> => {
+    setLoginBusy(true);
     try {
       await loginRequest(user, password);
       setAuth({ kind: "ready", canLogout: true });
     } catch (cause) {
       setAuth({ kind: "login", error: cause instanceof Error ? cause.message : String(cause) });
+    } finally {
+      setLoginBusy(false);
     }
   }, []);
 
@@ -221,7 +227,7 @@ export function App(): ReactNode {
     return (
       <LoginCard
         error={auth.error}
-        busy={false}
+        busy={loginBusy}
         onSubmit={(user, password) => {
           void submitLogin(user, password);
         }}

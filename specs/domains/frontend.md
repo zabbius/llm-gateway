@@ -54,7 +54,8 @@ Failures throw an `ApiFetchError` carrying the HTTP status (0 when no response a
 ## Flow
 
 ```
-gateway:  GET / ──► 302 /ui ──► any unmatched GET/HEAD /ui/* serves dist/index.html (ADR-006 fallthrough)
+gateway:  GET / ──► 302 /ui ──► unmatched GET/HEAD /ui/* serves dist/index.html (ADR-006 fallthrough)
+                                        └► document missing since startup ──► plain-text 404/500 (no envelope, no upstream)
 browser:  /ui (or /ui/) ──► React mounts ──► replaceState to /ui/status (canonical default section)
           auth probe GET /api/status ──► 401 ──► login card ──► POST /api/login ──► Set-Cookie (HttpOnly)
                                                                           └► sections render
@@ -74,7 +75,7 @@ sections: Status        ── GET /api/status        ──► { upstreams: [..
 - The SPA calls ONLY the management surface: the read-only `GET /api/status` + `GET /api/configuration`, plus the two auth actions `POST /api/login` / `POST /api/logout` ([ADR-008](../decisions/008-management-cookie-auth.md)) — never `/llm/*`, never anything that mutates gateway state.
 - The session cookie is HttpOnly: the SPA never reads the session token — login state lives in the gateway's session store, and the SPA only knows "the last API call succeeded".
 - The login card is the only login affordance: the server sends no `WWW-Authenticate` header, and the SPA never stores the password beyond the login POST.
-- Everything beyond `/ui` is client-side routed: the server answers every section path with the same index.html and never learns about sections; section switches happen via pushState without a reload.
+- Everything beyond `/ui` is client-side routed: the server answers every section path with the same index.html — a document missing since startup gets a plain-text 404/500, never the OpenAI envelope and never an upstream error — and never learns about sections; section switches happen via pushState without a reload.
 - `/ui` and `/ui/` land on the default section (`/ui/status`) via client-side replaceState — the URL is canonical before the user navigates further.
 - Unknown paths render the default section — the SPA has no 404 view.
 - Secrets stay masked end to end: the SPA renders `apiKey` / `tlsFingerprint` exactly as the management API returns them (the fixed mask, or `null`) and has no way to unmask them.

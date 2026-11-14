@@ -63,6 +63,7 @@ The management API is a read-only observation surface mounted at `/api/*` (names
 - `200` → `{"authenticated": true}` with `Set-Cookie: llm_gateway_session=<token>` — `HttpOnly`, `SameSite=Strict`, `Path=/`, `Max-Age` equal to the session TTL, `Secure` added when the listener serves TLS.
 - `401` → the envelope (`authentication_error` / `invalid_credentials`) after a fixed delay; the message never reveals which half failed and never echoes the presented password.
 - A non-JSON body or non-string `user` / `password` fields → `400` `invalid_request_error` immediately, without the delay — a malformed request is not a credential attempt.
+- A body over the gateway's size cap (`MAX_BODY_BYTES`, `src/httpapi/body.ts`) → `413` `invalid_request_error` code `request_too_large`, also before any credential check.
 - Sessions are in-memory: a 32-byte random token, absolute TTL 24h, a store bounded at 64 sessions (oldest evicted), cleared on restart — a restart logs every operator out ([ADR-008](../decisions/008-management-cookie-auth.md)).
 
 `POST /api/logout`:

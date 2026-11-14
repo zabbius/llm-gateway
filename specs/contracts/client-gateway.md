@@ -79,6 +79,7 @@ Rules that hold for every flow:
 - Only `Content-Type` and `Accept` carry a contract across this boundary; other client headers are forwarded best-effort, and hop-by-hop headers (`Connection`, `Transfer-Encoding`, …) are never forwarded. The client's `Authorization` header is not part of this boundary — it is dropped at the edge (next bullet).
 - Authorization policy: the client's `Authorization` header is dropped at the gateway edge and never forwarded upstream; the upstream authenticates with `Authorization: Bearer <apiKey>` taken from its own upstream config (see [gateway-upstream.md](gateway-upstream.md)). The gateway performs no client authentication in the MVP (see [security-model.md](../architecture/security-model.md)).
 - `GET /llm/v1/models` degrades gracefully: an upstream that fails or errors contributes no entries (logged as a warning) while the rest of the list is still returned with status 200.
+- Request bodies are read under a hard size cap: the dispatch buffers the JSON to read `model`, so a body beyond the cap (`MAX_BODY_BYTES`, `src/httpapi/body.ts`) is answered 413 before any upstream contact and never reaches an upstream.
 
 ## Error Propagation
 
@@ -99,6 +100,7 @@ Every gateway-generated error is returned as an OpenAI-compatible error envelope
 | ------- | ------ | ------------ | ------------ | ------ |
 | `model` has no `/` or unknown `upstreamId` prefix | 404 | `invalid_request_error` | `model_not_found` | gateway |
 | Malformed JSON body / body without `model` | 400 | `invalid_request_error` | provider-style message, no `code` | gateway |
+| Request body over the gateway's size cap (`MAX_BODY_BYTES`, 64 MiB — `src/httpapi/body.ts`) | 413 | `invalid_request_error` | `request_too_large` | gateway |
 | Known upstream, upstream returned 4xx/5xx | upstream status | upstream value (proxied) | upstream value (proxied) | provider |
 | Upstream returned non-JSON / empty error body | 502 | `api_error` | `upstream_error` | gateway-synthesized |
 | Upstream unreachable, connect/response timeout (non-streaming) | 504 | `api_error` | `upstream_timeout` | gateway-synthesized |

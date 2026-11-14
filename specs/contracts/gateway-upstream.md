@@ -94,7 +94,7 @@ upstream ── ForwardResponse{body: SSE bytes, verbatim} ──▶ router ─�
 
 Rules:
 
-- The request body crosses this boundary byte-for-byte except for the single `model` field, which the router has already de-prefixed (see [client-gateway.md](client-gateway.md)); no fields are added, removed, or renamed, and unknown client fields pass through untouched.
+- The request body crosses this boundary semantically unchanged except for the single `model` field, which the router has already de-prefixed (see [client-gateway.md](client-gateway.md)): the dispatch handler buffers the client JSON to read `model` and then re-serializes it — no fields are added, removed, or renamed, and unknown client fields pass through untouched; the byte layout is normalized by the re-serialization (whitespace between tokens, number and unicode formatting).
 - Authorization policy: the upstream builds `Authorization: Bearer <apiKey>` from its own config on every upstream call; the client's `Authorization` header was already dropped at the gateway edge (see [client-gateway.md](client-gateway.md)). The configured `apiKey` never leaves this boundary in any other form.
 - Only the three fixed paths above are callable upstream — client URLs are never proxied as-is.
 - Hop-by-hop headers are never forwarded in either direction.

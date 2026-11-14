@@ -30,7 +30,8 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { MiddlewareHandler, Handler } from "hono";
 import type pino from "pino";
 import type { GatewayEnv } from "../gateway/router.ts";
-import { authenticationRequiredResponse, invalidCredentialsResponse, badRequestResponse } from "./errors.ts";
+import { authenticationRequiredResponse, invalidCredentialsResponse, badRequestResponse, payloadTooLargeResponse } from "./errors.ts";
+import { BodyLimitError, readJsonBody } from "./body.ts";
 
 /** Cookie name carrying the session token. */
 export const SESSION_COOKIE = "llm_gateway_session";
@@ -185,8 +186,9 @@ export function createAuthGate(slice: AuthSlice, logger: pino.Logger): {
   const login: Handler<GatewayEnv> = async (c) => {
     let body: unknown;
     try {
-      body = await c.req.json();
-    } catch {
+      body = await readJsonBody(c.req.raw);
+    } catch (error) {
+      if (error instanceof BodyLimitError) return payloadTooLargeResponse();
       return badRequestResponse("login requires an application/json body");
     }
     const user = (body as { user?: unknown } | null)?.user;

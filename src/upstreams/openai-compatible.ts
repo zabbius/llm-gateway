@@ -20,6 +20,7 @@
  */
 import type pino from "pino";
 import type { Upstream, UpstreamConfig, ModelEntry, ProxyRequest } from "./upstream.ts";
+import type { ErrorEnvelope } from "../types.ts";
 import { isTlsFailure, pinnedUpstreamRequest } from "./tls-pinning.ts";
 
 /** The `listModels()` probe inside `connect()` (startup; non-fatal on expiry). */
@@ -404,7 +405,8 @@ function isJsonContentType(contentType: string): boolean {
 
 /**
  * A gateway-generated failure in the OpenAI error envelope
- * (specs/types.ts `ErrorEnvelope` shape; type "api_error" per
+ * (the `ErrorEnvelope` shape of src/types.ts and
+ * specs/contracts/client-gateway.md; type "api_error" per
  * specs/contracts/gateway-upstream.md error propagation table;
  * "upstream_tls_error" per ADR-005 for a pinned upstream whose TLS
  * verification failed).
@@ -414,7 +416,7 @@ function synthesizedError(
   code: "upstream_error" | "upstream_timeout" | "upstream_tls_error",
   message: string,
 ): Response {
-  const body = JSON.stringify({ error: { message, type: "api_error", code } });
+  const body = JSON.stringify({ error: { message, type: "api_error", code } } satisfies ErrorEnvelope);
   return new Response(body, { status, headers: { "content-type": "application/json" } });
 }
 

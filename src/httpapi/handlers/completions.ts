@@ -8,9 +8,11 @@
  *
  * Gateway-side failures are answered before any upstream contact:
  * unparseable JSON or a missing/empty `model` → 400 `invalid_request_error`
- * (no code); a model id that does not resolve (no "/", empty half, unknown
- * upstream prefix) → 404 `model_not_found`. An unknown *model* under a known
- * upstream is forwarded — model existence is the upstream's verdict.
+ * (no code); a body over the size cap → 413 `request_too_large`
+ * (src/httpapi/body.ts); a model id that does not resolve (no "/", empty
+ * half, unknown upstream prefix) → 404 `model_not_found`. An unknown
+ * *model* under a known upstream is forwarded — model existence is the
+ * upstream's verdict.
  *
  * Header policy at this boundary (specs/contracts/client-gateway.md): the
  * client's `Authorization` is dropped at the edge and hop-by-hop headers are
@@ -24,7 +26,8 @@ import type { UpstreamRegistry } from "../../upstreams/registry.ts";
 import type { ProxyRequest } from "../../upstreams/upstream.ts";
 import type { CompletionRequestBody } from "../../types.ts";
 import { resolveModel, type GatewayEnv } from "../../gateway/router.ts";
-import { badRequestResponse, modelNotFoundResponse } from "../errors.ts";
+import { badRequestResponse, modelNotFoundResponse, payloadTooLargeResponse } from "../errors.ts";
+import { BodyLimitError, readJsonBody } from "../body.ts";
 
 /** Upstream paths relative to baseUrl (specs/domains/routing.md endpoint map). */
 const CHAT_COMPLETIONS_PATH = "chat/completions";
@@ -88,8 +91,9 @@ function dispatch(
   return async (c: Context<GatewayEnv>) => {
     let parsed: unknown;
     try {
-      parsed = await c.req.json();
-    } catch {
+      parsed = await readJsonBody(c.req.raw);
+    } catch (error) {
+      if (error instanceof BodyLimitError) return payloadTooLargeResponse();
       return badRequestResponse("We could not parse the JSON body of your request.");
     }
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {

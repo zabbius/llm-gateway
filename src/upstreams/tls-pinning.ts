@@ -279,15 +279,35 @@ export async function pinnedUpstreamRequest(
     }
     void (async (): Promise<void> => {
       const reader = body.getReader();
+      // A stalled upstream never emits "drain": every drain wait is raced
+      // against the request dying (error/close — aborts destroy the socket,
+      // hence both fire), so the write coroutine can never outlive the
+      // connection and leak the reader, the request, and the socket.
+      let dead = false;
+      let resumeDrain: (() => void) | undefined;
+      const markDead = (): void => {
+        dead = true;
+        resumeDrain?.();
+        resumeDrain = undefined;
+      };
+      request.once("error", markDead);
+      request.once("close", markDead);
       try {
         for (;;) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done || dead) break;
           if (value !== undefined && !request.write(value)) {
-            await new Promise<void>((resume) => request.once("drain", resume));
+            await new Promise<void>((resume) => {
+              resumeDrain = resume;
+              request.once("drain", () => {
+                resumeDrain = undefined;
+                resume();
+              });
+            });
+            if (dead) break;
           }
         }
-        request.end();
+        if (!dead) request.end();
       } catch (error) {
         socket.destroy(error instanceof Error ? error : new Error("the upstream request body failed"));
       }

@@ -79,14 +79,20 @@ export function createApp(
   const log = logger.child({ component: "http" });
   const app = new Hono<GatewayEnv>();
 
-  // [1] AUTH — the stage-1 gate (ADR-008) mounts below, after the request
-  // log; when auth is off this trace line is the whole stage (the documented
-  // pass-through placeholder). Runs before routing; the trace line makes the
-  // stage observable (specs/domains/observability.md — per-request internals).
+  // [1] AUTH — the stage marker runs before routing; the stage-1 gate
+  // (ADR-008) mounts below, after the request log. When auth is off the
+  // marker's message names the pass-through placeholder (the whole stage);
+  // when auth is on it names the mounted session gate. The trace line makes
+  // the stage observable in both modes (specs/domains/observability.md —
+  // per-request internals).
+  const authStageMessage =
+    options.auth?.enabled === true
+      ? "auth stage — session gate mounted (ADR-008)"
+      : "auth stage — no-op placeholder (gateway-auth TODO)";
   app.use("*", async (c, next) => {
     log.trace(
       { method: c.req.method, path: c.req.path },
-      "auth stage — no-op placeholder (gateway-auth TODO)",
+      authStageMessage,
     );
     await next();
   });
@@ -187,14 +193,26 @@ export function createApp(
     // SPA fallback: any /ui/* request serveStatic did not answer (GET/HEAD
     // only) gets the SPA document — React owns everything beyond /ui, so
     // deep links are real URLs resolved client-side (ADR-006). index.html
-    // is read per request: no caching layer in the MVP. Other methods skip
-    // into the envelope notFound below.
+    // is read per request: no caching layer in the MVP. A document missing
+    // since startup answers plain-text 404/500 — this is the HTML surface,
+    // not the API: no upstream was involved, so neither the envelope nor
+    // the 502 upstream_error mapping applies. Other methods skip into the
+    // envelope notFound below.
     app.on(["GET", "HEAD"], "/ui/*", async () => {
-      const html = await readFile(join(webDistDir, "index.html"), "utf8");
-      return new Response(html, {
-        status: 200,
-        headers: { "content-type": "text/html; charset=utf-8" },
-      });
+      try {
+        const html = await readFile(join(webDistDir, "index.html"), "utf8");
+        return new Response(html, {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        const status = code === "ENOENT" ? 404 : 500;
+        return new Response(`SPA document unavailable (HTTP ${status})\n`, {
+          status,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        });
+      }
     });
   }
 

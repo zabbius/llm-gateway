@@ -131,6 +131,7 @@ function describeReadError(path: string, error: unknown): string {
 
 /**
  * Describe a JSON parse failure, naming line and column when the engine's
+ * error message carries a position.
  * Exported for tests (and reuse): the "names line/column when available"
  * behavior is asserted directly, including with engine messages that do carry
  * a position.
