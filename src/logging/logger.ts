@@ -3,7 +3,9 @@
  *
  * - JSON lines, exclusively to stderr (fd 2); stdout stays empty forever.
  * - Level comes from the gateway config vocabulary (`LogLevel`); the mapping
- *   onto pino's spellings lives here and nowhere else.
+ *   onto pino's spellings lives here and nowhere else. pino's `formatters.level`
+ *   serializes the level as its label string ("warn", "trace", …), not pino's
+ *   numeric code — child loggers inherit the formatter, so every line matches.
  * - A fixed set of sensitive fields is redacted before any line is emitted,
  *   at every level including trace (specs/architecture/security-model.md).
  *
@@ -62,6 +64,9 @@ export function createLogger(level: LogLevel): pino.Logger {
   return pino(
     {
       level: PINO_LEVEL[level],
+      // serialize the level as pino's label string ("warn"), not the numeric code;
+      // child loggers inherit this formatter by default
+      formatters: { level: (label: string) => ({ level: label }) },
       redact: { paths: [...REDACT_PATHS], censor: REDACT_CENSOR },
     },
     pino.destination({ dest: 2, sync: false }),

@@ -64,11 +64,11 @@ Config uses the gateway vocabulary (`warning`, `none`); the mapping to pino's `w
 - No file appenders exist — the gateway never opens a log file.
 - Secrets — `apiKey` and `passwordHash` values and `Authorization` headers — never appear in any log line (the censor covers the header shapes and the credential config field names, `src/logging/logger.ts`).
 - Request and response bodies are never logged in the MVP (metadata only), so SSE payloads never reach the log stream.
-- Each log line is a single JSON object (pino default format).
+- Each log line is a single JSON object (pino default format), except that the level is rendered as pino's string label — `trace`/`debug`/`info`/`warn`/`error` — instead of the numeric code.
 
 ## Configuration
 
-`logLevel` from the gateway config — see [Configuration](./configuration.md) for the file location, schema, and validation; omitted → `info`. Raw JSON lines are the shipping format; humans pipe stderr through a pretty-printer locally (e.g. `pino-pretty`) — the gateway itself never formats for humans and never writes files.
+`logLevel` from the gateway config — see [Configuration](./configuration.md) for the file location, schema, and validation; omitted → `info`. Raw JSON lines are the shipping format; humans pipe stderr through a pretty-printer locally (e.g. `pino-pretty`) — the gateway itself never formats for humans and never writes files. Emitted level labels are pino's own spellings (`trace`/`debug`/`info`/`warn`/`error`); the config vocabulary keeps its dictionary in `PINO_LEVEL` (Core Types).
 
 ## Extension Points
 

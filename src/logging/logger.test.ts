@@ -79,7 +79,7 @@ test("createLogger('warning') gates debug and info, passes warn as a JSON line t
   const parsed = jsonLines(result.stderr);
   expect(parsed).toHaveLength(1); // debug and info are suppressed
   expect(parsed[0]?.msg).toBe("visible warning");
-  expect(parsed[0]?.level).toBe(40); // pino's "warn"
+  expect(parsed[0]?.level).toBe("warn");
 });
 
 test("createLogger('none') suppresses every line", async () => {
@@ -140,7 +140,7 @@ test("sensitive fields are redacted at trace level, including nested header obje
   const parsed = jsonLines(result.stderr);
   expect(parsed).toHaveLength(1);
   const line = parsed[0] ?? {};
-  expect(line.level).toBe(10); // pino's "trace" — redaction holds at the most verbose level
+  expect(line.level).toBe("trace"); // level as the pino label — redaction holds at the most verbose level
   expect(line.authorization).toBe(REDACT_CENSOR);
   expect(line["x-api-key"]).toBe(REDACT_CENSOR);
   expect(line["api-key"]).toBe(REDACT_CENSOR);
@@ -193,6 +193,7 @@ test("child loggers carry the component binding; every stderr line is one JSON o
   expect(parsed[0]?.component).toBeUndefined();
   expect(parsed[1]?.component).toBe("http");
   expect(parsed[1]?.msg).toBe("upstream error");
+  expect(parsed[1]?.level).toBe("warn"); // the child inherits the root's level formatter
 });
 
 // The root logger itself is exercised once in-process for API-shape sanity;
