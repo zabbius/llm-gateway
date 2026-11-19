@@ -1,0 +1,133 @@
+# Frontend (SPA)
+
+## Purpose
+
+The operator-facing SPA served under `/ui/*` (namespace: [ADR-005](../decisions/005-gateway-surface-namespace.md)): a single-page shell whose left dock switches between the five sections — Status (upstream health), Models (the aliases' effective token budgets and capability badges plus the per-upstream live model catalogs and discover), Upstreams (the upstream CRUD), Clients (the client CRUD), About (static overview) — over the management API. The SPA drives the boundary's full sanctioned mutation set ([ADR-014](../decisions/014-runtime-management-crud.md) D5: the endpoints, their contract rows, and the SPA sections that consume them land together — the boundary never presents a mutating API its own operator UI cannot drive): the create/edit/delete forms over `upstreams`, `models` and `clients`, the discover button, and the auth actions. Built with React + Bootstrap only; the gateway serves pre-built static assets and never executes UI code server-side. When the gateway gates `/api/*` ([ADR-007](../decisions/007-management-cookie-auth.md)), the shell swaps to a login card on the first `401`; the static shell itself stays public — every protected byte arrives from `/api`.
+
+## Key Files
+
+- `web/package.json` — React 19 + Bootstrap 5.3 dependencies, Vite build; no other runtime or UI dependency enters the SPA
+- `web/vite.config.ts` — build config: `base: "/ui/"` makes every emitted asset URL resolve under the `/ui` namespace (index.html references included)
+- `web/index.html` — SPA entry document (the base is handled by the Vite config — `/icon.svg` and `/src/main.tsx` are emitted under `/ui/`)
+- `web/src/main.tsx` — React mount point (StrictMode, the Bootstrap CSS import)
+- `web/src/router.tsx` — minimal history-API router: `usePath()` (popstate + in-app navigation listener, strips the `/ui` base), `navigate()` / `replace()` (pushState/replaceState through the base), the `Link` component (real `/ui/*` hrefs, intercepts plain clicks only), the `SectionId` set, and `sectionForPath()` (unknown paths fall back to the default section)
+- `web/src/api.ts` — typed fetch helpers for the management surface mirroring the contract shapes ([gateway-management.md](../contracts/gateway-management.md)): the slim `GET /api/status` probe, the three CRUD collections (list/get/create/update/delete over `/api/upstreams`, `/api/models`, `/api/clients` — [ADR-014](../decisions/014-runtime-management-crud.md)), the discover mount `POST /api/upstreams/:id/discover`, the ADR-011 live listing `GET /api/upstreams/:id/models`, and the auth actions `POST /api/login` / `POST /api/logout` ([ADR-007](../decisions/007-management-cookie-auth.md)) — the only gateway calls the SPA makes. One generic transport (`request` + a JSON `send` for any method); a `401` (session missing or expired) surfaces as `ApiFetchError` with `status === 401`, and every failure carries the OpenAI envelope's `message`.
+- `web/src/App.tsx` — the shell: a flex row with the left dock leading (sticky aside, `border-end`) and the main content following; the dock header is the brand (the glyph inlined so it inherits `currentColor`) above the section nav (Bootstrap `nav-pills flex-column`, active highlight), plus the `Log out` control when the current session came from a login; it also canonicalizes `/ui` and `/ui/` to the default section via client-side replaceState. The auth state machine probes `GET /api/status` on mount: `401` swaps the shell to the login card (Bootstrap form, error alert on failure — the server sends no native prompt), success renders the sections — and the payload's `authenticated` bit drives the dock's `Log out` control (shown for a live session, hidden on an auth-off gateway), so it survives page reloads; the HttpOnly session cookie rides same-origin fetches automatically.
+- `web/src/sections/Status.tsx` — Status section: the upstream health table built from `GET /api/upstreams` (id, type, probe badge `ok`/`failed`, `reason`, `baseUrl`) plus the slim `GET /api/status` verdict badge; manual refresh, loading spinner, error alert, and an empty state pointing at the Upstreams section
+- `web/src/sections/Models.tsx` — Models section: the alias table from `GET /api/models` (alias, the `meta` context window / output limit with unknown → “—”, the strict-AND capability flags as badges, the route set with weights). Below it, one card per configured upstream (`GET /api/upstreams`) with two affordances: **Load models** (`GET /api/upstreams/:id/models` — the ADR-011 listing, filterable by model id, every id click-to-copy, idle/loading/error/empty states per card) and **Discover** (`POST /api/upstreams/:id/discover` — an inline `ok` / `reason` verdict, [ADR-014](../decisions/014-runtime-management-crud.md) D4); a finished discover quietly re-reads `GET /api/models` so the `meta` rows fold the refreshed slices
+- `web/src/sections/Upstreams.tsx` — Upstreams section: the upstream CRUD ([ADR-014](../decisions/014-runtime-management-crud.md)) — a table from `GET /api/upstreams` (masks rendered exactly as returned) over inline Bootstrap create/edit/delete forms: `id`/`type` immutable on edit, `apiKey` optional on edit labeled “пусто = не менять” (an empty field is omitted from the body — the D7 keep-existing semantics; the mask literal is never submitted; create requires the key), the pin field following the same keep-existing/clear-with-`null` rule — and the create/update answers render the D8 blocking-probe verdict (`ok` / `reason`) as data
+- `web/src/sections/Clients.tsx` — Clients section: the client CRUD ([ADR-014](../decisions/014-runtime-management-crud.md)) — a table from `GET /api/clients` (masks as returned) over the same inline-form pattern (`name` immutable on edit, `apiKey` optional = keep-existing, create requires the key), the alias ACL as a checkbox group fed by `GET /api/models`
+- `web/src/sections/About.tsx` — static About section: what llm-gateway is, the stack, the OpenAI-client baseURL hint (`<host>/llm/v1`), pointers to `README.md` and `specs/`
+- `web/public/icon.svg` — brand icon (tile + white mark); served as the favicon via a `<link rel="icon">` in `web/index.html`
+- `web/public/glyph.svg` — monochrome variant of the same mark, stroked with `currentColor`; its geometry is inlined into `App.tsx` for the dock header; `public/*` is copied verbatim into the build output
+
+## Core Types
+
+Section identity and navigation (`web/src/router.tsx`) — the section set is the SPA's route table; a new section is one more entry:
+
+```ts
+export const SECTIONS = [
+  { id: "status", label: "Status" },
+  { id: "models", label: "Models" },
+  { id: "upstreams", label: "Upstreams" },
+  { id: "clients", label: "Clients" },
+  { id: "about", label: "About" },
+] as const;
+export type SectionId = (typeof SECTIONS)[number]["id"]; // "status" is the default
+```
+
+Management API response shapes (`web/src/api.ts`), mirroring [gateway-management.md](../contracts/gateway-management.md):
+
+```ts
+export interface GatewayStatus {
+  readonly status: "ok";          // the fixed literal — the process is up and serving
+  readonly authenticated: boolean; // this request carries a valid session (true only behind a login)
+}
+export interface ManagedUpstream {
+  readonly type: string;
+  readonly id: string;
+  readonly baseUrl: string;
+  readonly apiKey: "[Configured]";          // the mask, exactly as returned — never a real value
+  readonly tlsFingerprint: string | null;   // "[Configured]" | null
+}
+export interface UpstreamWriteResponse {   // POST /api/upstreams, PUT /api/upstreams/:id (ADR-014 D8)
+  readonly upstream: ManagedUpstream;
+  readonly probe: { ok: boolean; reason?: string };  // data, never a gate — a failed probe still landed
+}
+export interface ManagedModelAlias {       // GET /api/models entries (ADR-014 D4 — `meta` lives here)
+  readonly alias: string;
+  readonly routes: ReadonlyArray<{ upstream: string; model: string; weight: number | null }>;
+  readonly balance: { readonly strategy: string };
+  readonly limits: { readonly context: number | null; readonly output: number | null } | null;
+  readonly meta: {
+    readonly contextWindow: number | null;
+    readonly outputLimit: number | null;
+    readonly capabilities: { attachment: boolean; reasoning: boolean; temperature: boolean; toolCall: boolean } | null;
+  };
+}
+export interface ManagedClient {
+  readonly name: string;
+  readonly apiKey: "[Configured]";
+  readonly models: readonly string[];
+}
+```
+
+Write requests follow the D7 semantics: create requires the key; an update omits `apiKey` entirely to mean keep-existing, and the mask literal is never submitted. Failures throw an `ApiFetchError` carrying the HTTP status (0 when no response arrived) and the OpenAI envelope's `message` — the `409 resource_in_use` and last-entry `400` refusals land as alerts with that message.
+
+## Flow
+
+```
+gateway:  GET / ──► 302 /ui ──► unmatched GET/HEAD /ui/* serves dist/index.html (ADR-005 fallthrough)
+                                        └► document missing since startup ──► plain-text 404/500 (no envelope, no upstream)
+browser:  /ui (or /ui/) ──► React mounts ──► replaceState to /ui/status (canonical default section)
+          auth probe GET /api/status ──► 401 ──► login card ──► POST /api/login ──► Set-Cookie (HttpOnly)
+                                                                          └► sections render
+          (a 200 probe renders the sections directly; its `authenticated` bit drives the dock's Log out —
+           true behind a live session, false on an auth-off gateway — so Log out survives page reloads)
+          dock Link click ──► pushState /ui/<section> + re-render (no reload; the server never sees a section path)
+          deep link /ui/upstreams ──► server answers with index.html ──► React reads location, renders that section
+          Log out ──► POST /api/logout ──► session revoked ──► back to the login card
+sections: Status        ── GET /api/upstreams + GET /api/status ──► health table + verdict badge
+          Models        ── GET /api/models ──► alias table (meta budgets + capability badges + routes)
+                        ── GET /api/upstreams ──► upstream cards
+                        ── GET /api/upstreams/:id/models per Load-models click (ADR-011) ──► live catalog: filter, click-to-copy
+                        ── POST /api/upstreams/:id/discover per Discover click ──► inline verdict; then a quiet re-read of GET /api/models
+          Upstreams     ── GET/POST /api/upstreams, GET/PUT/DELETE /api/upstreams/:id ──► table + inline forms;
+                        create/update answers render the D8 probe verdict; failures (incl. 409) land as alerts
+          Clients       ── GET/POST /api/clients, GET/PUT/DELETE /api/clients/:name ──► table + inline forms;
+                        the ACL checkbox group is fed by GET /api/models
+          About         ── no API call — static content
+```
+
+## Invariants
+
+- The SPA's stack is React + Bootstrap — no other UI framework, router library, or component library (zero runtime dependencies beyond `react`, `react-dom`, `bootstrap`).
+- The SPA calls ONLY the management surface: the slim `GET /api/status` probe, the three CRUD collections (`GET`/`POST` on `/api/upstreams`, `/api/models`, `/api/clients` and their `GET`/`PUT`/`DELETE` detail routes — [ADR-014](../decisions/014-runtime-management-crud.md)), the discover mount `POST /api/upstreams/:id/discover`, the ADR-011 live listing `GET /api/upstreams/:id/models` (fired only by an explicit Load-models click, never on its own schedule), plus the two auth actions `POST /api/login` / `POST /api/logout` ([ADR-007](../decisions/007-management-cookie-auth.md)) — never `/llm/*`, and no mutation beyond the boundary's sanctioned set; every mutating call is an operator-initiated form submission or button click, never a scheduled or on-mount side effect.
+- The session cookie is HttpOnly: the SPA never reads the session token — login state lives in the gateway's session store, and the SPA only knows "the last API call succeeded".
+- The login card is the only login affordance: the server sends no `WWW-Authenticate` header, and the SPA never stores the password beyond the login POST.
+- Everything beyond `/ui` is client-side routed: the server answers every section path with the same index.html — a document missing since startup gets a plain-text 404/500, never the OpenAI envelope and never an upstream error — and never learns about sections; section switches happen via pushState without a reload.
+- `/ui` and `/ui/` land on the default section (`/ui/status`) via client-side replaceState — the URL is canonical before the user navigates further.
+- Unknown paths render the default section — the SPA has no 404 view.
+- Secrets stay masked end to end: the SPA renders `apiKey` / `tlsFingerprint` exactly as the management API returns them (the fixed mask, or `null`) and has no way to unmask them; the edit forms invert the direction honestly — an empty key field is omitted from the submitted body (keep-existing, [ADR-014](../decisions/014-runtime-management-crud.md) D7) and the mask literal is never a submitted value.
+- Every management failure lands visibly as an alert carrying the OpenAI envelope's `message` — including the `409 resource_in_use` refusals (D6) and the last-entry `400` answers — so a refused delete or create is operator-readable, never silent.
+- The Models section's alias table renders the `meta` values from `GET /api/models` (unknown → “—”, never a fabricated zero) and re-reads the catalog quietly after a finished discover, so the rows fold the refreshed slices ([ADR-014](../decisions/014-runtime-management-crud.md) D4).
+- The SPA ships as pre-built static assets; the gateway only serves files and never executes UI code server-side.
+
+## Configuration
+
+None — the frontend has no entry in the gateway config file. What the HTTP layer serves (the root 302, the `/ui/*` static mount, the SPA fallback, the envelope prefixes) is fixed by [ADR-005](../decisions/005-gateway-surface-namespace.md) and implemented in `src/httpapi/app.ts`; the build-time `base: "/ui/"` in `web/vite.config.ts` keeps every emitted asset URL inside the same namespace. The data the sections display comes from the management API's effective (normalized, masked) config — not from any frontend setting.
+
+## Extension Points
+
+- A new section is one entry in `SECTIONS` (`web/src/router.tsx`) plus one component under `web/src/sections/` wired in `App.tsx` — the dock and the router pick it up with no server-side change (the fallback already serves index.html for the new path).
+- A section that needs new gateway data waits for its management endpoint to be specified in the contract first — the API spec leads, and the UI lands in the same change ([ADR-014](../decisions/014-runtime-management-crud.md) D5); the typed fetch helpers and shapes join `web/src/api.ts`.
+- The CRUD sections share one form pattern (table + inline create/edit/delete, immutable identity key, optional key fields meaning keep-existing, envelope-message alerts) — a fourth collection (if a future ADR adds one to the store) extends the pattern rather than inventing a second one.
+- **Discover control** (landed): the Models section's per-upstream card carries the one discover button (`POST /api/upstreams/:id/discover`); its inline verdict shows `ok` or the report's log-safe `reason` (failures are data, not HTTP errors), and the quiet `GET /api/models` re-read folds the refreshed snapshots into the alias table ([gateway-management.md](../contracts/gateway-management.md)).
+
+## Related Specs
+
+- [META](../META.md) — this spec's place in the canonical spec tree
+- [Gateway management contract](../contracts/gateway-management.md) — the `/api/*` surface every section consumes: shapes, masking rule, the D7/D8 write semantics the forms implement, mount order
+- [ADR-005: Gateway surface namespace](../decisions/005-gateway-surface-namespace.md) — fixes the SPA mount at `/ui/*`, the root `302` redirect, and the client-side routing rule
+- [ADR-014: runtime management CRUD](../decisions/014-runtime-management-crud.md) — the mutation surface the SPA drives (D5: the sections land with the endpoints)
+- [Configuration](./configuration.md) — the config file the CRUD forms write through the store (the schema the forms' fields mirror)

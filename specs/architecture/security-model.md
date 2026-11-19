@@ -1,0 +1,96 @@
+# Architecture: Security Model
+
+## Context
+
+The gateway is a credential custodian: it holds provider API keys that clients must never see, and it forwards untrusted client traffic to trusted upstreams. Stage 1 of gateway-auth gates the management surface (`/api/*`) with a config-backed cookie session ([ADR-007](../decisions/007-management-cookie-auth.md)); stage 2 gates the LLM surface (`/llm/v1/*`) with config-backed client Bearer keys whenever the `clients` block is configured ([ADR-008](../decisions/008-client-bearer-auth.md)) — without that block the LLM surface stays open, and the loopback binding remains its protection. The active protections are the two gates, key storage rules, log redaction, and the trust boundaries below. They must hold in every mode: auth enabled or off, clients configured or absent.
+
+## Trust Boundaries
+
+```
+     UNTRUSTED                                TRUSTED
++------------------+                +------------------+
+|     clients      |                |    providers     |
+| arbitrary        |                |      APIs        |
+| request bodies   |                |   authenticated  |
+| unknown identity |                |  by provider key |
++------------------+                +------------------+
+        |                                    ^
+        | HTTP or HTTPS                      | HTTPS + provider key
+        | server TLS only, no client auth    | credentials from config only
+        v                                    |
++------------------------------------------------------------------+
+|                             gateway                              |
+|  request stages: auth (session gate on /api/* when auth   |
+|  enabled -- ADR-007; client Bearer gate on /llm/v1/* when  |
+|  the clients block is configured -- ADR-008) ->           |
+|  route -> resolve -> upstream -> proxy stream;            |
+|  key storage + log redaction rules                        |
++------------------------------------------------------------------+
+```
+
+- Inbound: every client request is untrusted regardless of route. Stage 1 gates `/api/*` with the config-backed session when `auth.enabled` is true; stage 2 gates `/llm/v1/*` with the config-backed client Bearer key when the `clients` block is configured ([ADR-008](../decisions/008-client-bearer-auth.md)). Without a configured block the LLM surface and the static shell stay ungated, so the listener binds to loopback or a private interface only — that binding is the load-bearing protection for the ungated surfaces. A TLS-enabled listener ([ADR-006](../decisions/006-tls-listener-server-block.md)) changes the transport only — HTTPS encrypts the link and authenticates nobody, so the gates above remain the sole client-auth mechanisms and the loopback default stands for every ungated surface.
+- Outbound: the gateway authenticates to provider APIs only with credentials from its config; client-supplied credentials never travel upstream. A configured `tlsFingerprint` narrows that trust further: the pinned upstream is identified by its SPKI key alone — fail-closed probe, leaf-anchored chain, per-connection pin veto ([ADR-004](../decisions/004-per-upstream-tls-pinning.md)) — and its chain need not be publicly trusted. Without a pin, the system CA pool plus hostname verification decide; there is deliberately no third mode that accepts an arbitrary certificate.
+- The upstream is trusted to answer OpenAI-dialect requests — and trusted with no more client data than the request itself carries.
+
+## Provider Keys
+
+- Provider API keys exist in exactly two places: the config file and the in-memory field of their upstream instance.
+- Keys enter the process through two ingress channels that land in the same two places ([ADR-014](../decisions/014-runtime-management-crud.md)): the config file (kept out of version control), and — since the runtime CRUD — an authenticated `POST`/`PUT` body on `/api/upstreams` behind the session gate, which the configuration store validates, writes back to `config.json` (atomic persist, invariant 15), and only then applies into a fresh upstream instance. The config path comes from the `LLM_GATEWAY_CONFIG` environment variable (default `./config.json`), key material never does; a mutation body's key value is consumed by the store — it never reaches a response body, a log line, an error message, or a validation problem line, and the mask literal `[Configured]` is rejected as a submitted value (the mask is a display fact, never a credential).
+- Key flow: config or mutation body → store → upstream field → provider credential header on upstream calls. No other component reads the field.
+- `GET /llm/v1/models` and error responses expose model ids and statuses only — never keys, never upstream credentials. The management surface serves the same rule from the other side: every CRUD read returns `apiKey` / `tlsFingerprint` as a fixed mask, never the configured values — while non-secret fields (`baseUrl`, paths) are shown verbatim — the mask is applied by the store's redacted view (`ConfigStore.view`, built by `redactedConfigView` in `src/config/redact.ts`), so a handler below the entry point never holds a real value to leak ([gateway-management.md](../contracts/gateway-management.md)).
+
+## Operator Credentials
+
+- Stage 1 management auth is a single config-backed operator identity: a top-level optional `auth` block — `{ enabled, user, passwordHash }` — with an argon2id PHC hash generated by `tools/hash-password.ts`. An absent block or `enabled: false` means the gateway behaves exactly as before ([ADR-007](../decisions/007-management-cookie-auth.md)).
+- The hash lives in exactly two places — the config file and the in-memory auth slice the entry point injects into the HTTP layer — the same two-place rule as provider keys. It never enters the redacted view (the management view carries only the fixed mask), a log line, an error message, or a config-validation problem line ([configuration.md](../domains/configuration.md)).
+- The plain password exists only inside `POST /api/login` request handling: verification is `Bun.password.verify` against the configured hash, the user comparison is timing-safe with dummy-hash leveling, and failed logins answer after a fixed delay.
+- Sessions are in-memory only: a 32-byte random token, an absolute TTL, a bounded store, cleared on restart; the cookie is `HttpOnly`, `SameSite=Strict`, `Path=/`, and `Secure` under TLS. Session tokens never appear in a log line (the logging censor already covers `cookie`/`authorization`/`token` shapes).
+
+## Client Keys
+
+- Stage 2 LLM-surface auth is a set of config-backed client credentials: a top-level optional `clients` block — entries of `{ name, apiKey, models }` ([ADR-008](../decisions/008-client-bearer-auth.md)). An absent block means the gateway behaves exactly as before ADR-008: no gate mounts on `/llm/v1/*`.
+- A key lives in exactly two places — the config file and the entry-point-injected client slice inside the gate closure (where it exists only as a precomputed SHA-256 digest) — the same two-place rule as provider keys and operator credentials. Since the runtime CRUD ([ADR-014](../decisions/014-runtime-management-crud.md)) a client key may also enter through an authenticated `POST`/`PUT` body on `/api/clients` behind the session gate: the configuration store validates it, writes it back to `config.json` (atomic persist, invariant 15), and hot-applies the rebuilt digest registry into the gate — the value itself never enters the redacted view (the management view carries only the fixed `[Configured]` mask), a log line, an error message, a response body, or a config-validation problem line ([configuration.md](../domains/configuration.md)); the mask literal is rejected as a submitted value, and an update that omits `apiKey` keeps the stored credential.
+- Verification is timing-safe: the presented Bearer credential is SHA-256 digested per request and compared through `timingSafeEqual` against the configured digests — no length or prefix-of-match signal. A missing credential answers the 401 `authentication_required` envelope, an unknown key the 401 `invalid_api_key` envelope, both from the single error mapper, both before any body read or upstream contact, and both without echoing any key value.
+- A client key authenticates only the LLM surface: it is not an operator session, opens nothing on `/api/*`, and the session cookie authenticates nothing on `/llm/v1/*` — the two credential classes are gate-bound ([ADR-007](../decisions/007-management-cookie-auth.md), [ADR-008](../decisions/008-client-bearer-auth.md)).
+- The gate consumes the client's `Authorization` header; it is never forwarded upstream — the upstream attaches its own credential from its config (invariant 4). The logging censor already covers `authorization`/`apiKey` field shapes at every level.
+
+## Redaction in Logs
+
+- Logging is leveled (trace/debug/info/warning/error/none) and writes to stderr. The logging layer redacts a fixed set of sensitive fields (authorization, x-api-key, api-key, cookie, token) before emitting any line, at every level including trace.
+- Startup logs upstream ids and types; the raw config is never dumped, and key material never reaches a log line. TLS startup errors may name the certificate/key file paths — paths are not secret; the PEM file contents never do, and the listening line carries only the fact of TLS (enabled or not), never file material.
+- Upstreams log outcome metadata only — the startup probe result, and code/reason fields on synthesized failures; request and response bodies are never logged at any level, so provider payloads never reach a log line ([observability.md](../domains/observability.md)). The per-request summary line (method, path, status, duration) belongs to the HTTP middleware, not to upstreams.
+- Upstream failure logs carry only the upstream status, a code, and a gateway-authored reason — provider error payloads (which sometimes echo request headers) are relayed to the client verbatim but never echoed into a log line.
+
+## Invariants
+
+1. Provider API keys are stored in exactly two places: the config file and the in-memory field of their upstream instance. A key created or updated at runtime enters through an authenticated management mutation body behind the session gate and lands in those same two places — never a third ([ADR-014](../decisions/014-runtime-management-crud.md)).
+2. No provider key, client credential, or sensitive header value ever appears in a log line, an HTTP response body, or an error message the gateway emits.
+3. The logging layer redacts sensitive field values before emission, at every level including trace.
+4. Upstreams attach their own credentials at the upstream boundary; client-supplied authorization headers are never forwarded upstream.
+5. The auth stage precedes routing and upstream invocation in the request lifecycle, and no code path reaches an upstream without passing through it. When `auth.enabled` is true, the stage gates `/api/*` with the config-backed session — `POST /api/login` and `POST /api/logout` are the only requests it serves without one ([ADR-007](../decisions/007-management-cookie-auth.md)). When the `clients` block is configured — or the runtime configuration store is wired ([ADR-014](../decisions/014-runtime-management-crud.md): the clients CRUD can create the first client later, and the empty registry answers 401 fail-closed until it does) — the stage gates `/llm/v1/*` with the config-backed client Bearer key — a missing credential answers 401 `authentication_required`, an unknown key 401 `invalid_api_key`, both before any body read or upstream contact ([ADR-008](../decisions/008-client-bearer-auth.md)). The `/ui` shell and the root redirect stay ungated in every mode.
+6. While the LLM surface is ungated (no `clients` block configured), the listener binds only to loopback or a private interface.
+7. Startup logging names upstreams (id, type) but never prints key material or the raw config.
+8. A configured `tlsFingerprint` always fails closed on a pin mismatch — a pinned upstream that presents any other key surfaces as `502 upstream_tls_error`, never as a relayed response or a warning-and-continue ([ADR-004](../decisions/004-per-upstream-tls-pinning.md)).
+9. The management reads carry masked values only: every CRUD answer is the store's redacted view — `redactedConfigView` (`src/config/redact.ts`) replaces every `apiKey` (upstream or client) with the fixed mask `[Configured]` and a configured `tlsFingerprint` with the same mask — `null` when absent — and the store rebuilds the view after every applied mutation, so a read after a write serves the mutated, masked state; the raw config never crosses into the HTTP layer ([gateway-management.md](../contracts/gateway-management.md), [configuration.md](../domains/configuration.md)).
+10. TLS certificate and key files enter the process only through their configured paths, read once at startup before the port binds; their contents appear in no log line, error message, or HTTP response, and the config file carries paths, never PEM material ([ADR-006](../decisions/006-tls-listener-server-block.md), [configuration.md](../domains/configuration.md)).
+11. Server TLS is transport, not authentication: `server.tls.enabled` encrypts the client link and nothing else — the auth stage stays in the lifecycle exactly as before, the loopback default stands, and no certificate check substitutes for client auth ([ADR-006](../decisions/006-tls-listener-server-block.md)).
+12. The `auth.passwordHash` enters the HTTP layer only as the entry-point-injected auth slice — never through the redacted view (which carries the fixed mask), a log line, an error message, or a config-validation problem line; the plain password exists only inside `POST /api/login` request handling ([ADR-007](../decisions/007-management-cookie-auth.md)).
+13. Sessions are in-memory only — a restart clears every session — and the sanctioned mutations on `/api/*` are exactly three kinds: the auth actions (the session store), the runtime CRUD's validate → persist → apply write-back over the three mutable config collections ([ADR-014](../decisions/014-runtime-management-crud.md)), and the metadata-store swaps (the `POST /api/upstreams/:id/discover` mount's retain-last-good snapshot swap and the CRUD probes' seed/clear of the affected upstream's slice); session tokens never appear in a log line ([ADR-007](../decisions/007-management-cookie-auth.md), [gateway-management.md](../contracts/gateway-management.md)).
+14. Client apiKeys are stored in exactly two places: the config file and the entry-point-injected client slice inside the gate closure; a key created or updated at runtime enters through an authenticated management mutation body behind the session gate and lands in those same two places ([ADR-014](../decisions/014-runtime-management-crud.md)) — never the redacted view (which carries the fixed `[Configured]` mask), a log line, an error message, or a config-validation problem line. Verification digests both sides (SHA-256) and compares timing-safe; a valid client key authenticates `/llm/v1/*` only and never travels upstream ([ADR-008](../decisions/008-client-bearer-auth.md)).
+15. A runtime mutation reaches memory only after its write-back succeeded: the configuration store writes the whole config to a sibling temp file and renames it onto `config.json` — a same-filesystem atomic replace — and rebuilds the in-memory state only after that write; a validation problem or a failed write leaves both disk and memory untouched, the file on disk and the state in memory never diverge, and `config.json` stays the one authority a restart reconstructs everything from. It is the gateway's only runtime file write ([ADR-014](../decisions/014-runtime-management-crud.md) D1, [configuration.md](../domains/configuration.md)).
+
+## Anti-Patterns
+
+- Hardcoding a provider key or base URL in upstream source "just for a local test" — keys enter the process only through the config file; a committed test key is a leaked key.
+- Forwarding client headers wholesale to the upstream — header pass-through excludes authorization and hop-by-hop headers; the upstream injects its own credentials.
+- Logging full upstream request/response bodies at any level "to debug faster" — the MVP logs metadata only; provider payloads never reach a log line.
+- Putting key material into an error surface ("upstream rejected key sk-...") — errors carry statuses and provider messages, never credentials.
+- Implementing gateway-auth inside individual upstreams (each upstream checking client keys) — auth is one pre-routing stage; per-upstream auth duplicates checks and spreads credential logic into provider code.
+- Adding a skip-verification fetch path (`rejectUnauthorized: false`) to "make self-signed upstreams work" — the only non-default acceptance path is the pinned one ([ADR-004](../decisions/004-per-upstream-tls-pinning.md)); a flag that accepts any certificate is a standing MITM window.
+- Reading server TLS as client authentication — "it is HTTPS now, auth can wait" conflates transport encryption with identity: `server.tls.enabled` gates the link only, the auth stage remains the sole client-auth mechanism (a no-op today), and the loopback default exists precisely because neither exists yet ([ADR-006](../decisions/006-tls-listener-server-block.md)).
+- Exposing the MVP listener publicly "temporarily" before gateway-auth lands, or shipping provider keys to the future admin SPA — the admin surface receives aggregates and statuses, never key material (invariant 9: the mask is applied in the config domain, so no handler below the entry point ever holds a real value to leak).
+- Gating the `/ui` static shell while `/api/*` answers without a session — the data boundary is `/api`; a gated shell over an open API protects nothing ([ADR-007](../decisions/007-management-cookie-auth.md)).
+- Echoing the configured `passwordHash`, a plain password, or a session token into a log line, an error envelope, or a validation problem line — operator credentials follow the same never-echoed rule as `apiKey` (invariant 12).
+- Treating a client Bearer key as an operator session (or the reverse) — the two credential classes are gate-bound ([ADR-007](../decisions/007-management-cookie-auth.md), [ADR-008](../decisions/008-client-bearer-auth.md)); a valid client key opens `/llm/v1/*` and nothing else, a session cookie opens `/api/*` and nothing else.
+- Comparing presented credentials with plain string equality "just for the client keys" — timing leaks length and prefix-of-match; every credential comparison goes through the SHA-256 digest + `timingSafeEqual` construction (invariant 14).
+- Writing `config.json` through a non-atomic path, or applying a mutation in memory before its write-back succeeded — a crash mid-write can lose the config file, and a memory-first variant lets disk and memory diverge into two truths about one gateway (invariant 15); every mutation is validate → persist (sibling temp file + atomic rename) → apply ([ADR-014](../decisions/014-runtime-management-crud.md)).

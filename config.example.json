@@ -1,0 +1,80 @@
+{
+  "server": {
+    "listen": "127.0.0.1:8080",
+    "maxRequestBodyBytes": 4194304,
+    "tls": {
+      "enabled": false,
+      "cert": "./tls/cert.pem",
+      "key": "./tls/key.pem"
+    }
+  },
+  "logLevel": "info",
+  "auth": {
+    "enabled": false,
+    "user": "admin",
+    "passwordHash": "$argon2id$v=19$m=65536,t=2,p=1$UkVQTEFDRQ$UkVQTEFDRQ"
+  },
+  "clients": [
+    {
+      "name": "local-dev",
+      "apiKey": "replace-with-a-client-key",
+      "models": ["smart", "fast"]
+    }
+  ],
+  "models": [
+    {
+      "alias": "smart",
+      "routes": [
+        {
+          "upstream": "openai",
+          "model": "gpt-4o",
+          "weight": 3
+        },
+        {
+          "upstream": "ollama",
+          "model": "qwen2.5:7b-instruct",
+          "weight": 1
+        }
+      ],
+      "balance": {
+        "strategy": "weighted-round-robin"
+      },
+      "limits": {
+        "context": 128000,
+        "output": 16384
+      }
+    },
+    {
+      "alias": "fast",
+      "routes": [
+        {
+          "upstream": "ollama",
+          "model": "qwen2.5:7b-instruct"
+        }
+      ],
+      "balance": {
+        "strategy": "round-robin"
+      },
+      "limits": {
+        "context": 32768,
+        "output": 4096
+      }
+    }
+  ],
+  "upstreams": [
+    {
+      "type": "openai-compatible",
+      "id": "openai",
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "sk-replace-with-your-api-key",
+      "tlsFingerprint": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    },
+    {
+      "type": "openai-compatible",
+      "id": "ollama",
+      "baseUrl": "http://127.0.0.1:11434/v1",
+      "apiKey": "ollama",
+      "tlsFingerprint": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "llm-gateway",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "apidocs": "bun run src/httpapi/generate-openapi.ts",
+    "build": "bun run apidocs",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "hono": "^4.13.18",
+    "pino": "^10.4.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "hono-openapi": "^1.6.0",
+    "typescript": "^7.0.2",
+    "zod": "^4.6.7"
+  }
+}
