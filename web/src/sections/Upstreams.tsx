@@ -3,14 +3,14 @@
  * (ADR-014): every configured upstream in config order (id, type, probe
  * outcome, reason, baseUrl verbatim, the credential and pin masks exactly
  * as the redacted view serves them) plus create / edit / delete, and the
- * per-upstream live-model facilities: "Load models" (`GET
- * /api/upstreams/:id/models`, ADR-011 — the live catalog, filterable by
- * model id, every id click-to-copy: the unprefixed provider name that
- * `models[].routes[].model` in config expects) and "Discover" (`POST
- * /api/upstreams/:id/discover`, ADR-014 D4 — one re-probe, always-200
- * verdict whose inline outcome reads ok or the log-safe reason; a
- * successful run swaps the upstream's metadata slice, visible in the
- * Models section's `meta` rows on their next read).
+ * per-upstream live-model facility: "Load models" (`GET
+ * /api/upstreams/:id/models?discover=1`, ADR-011 as amended by ADR-016 —
+ * the live catalog, filterable by model id, every id click-to-copy: the
+ * unprefixed provider name that `models[].routes[].model` in config
+ * expects; the `discover=1` fetch also swaps the upstream's metadata
+ * slice, visible in the Models section's `meta` rows on their next read,
+ * retain-last-good on failure — the former standalone "Discover" button
+ * is folded into this one affordance).
  *
  * The form is a modal pop-up over the table (the shared EditorModal; the
  * static backdrop and the disabled Esc keep a typed editing session —
@@ -27,17 +27,15 @@
  * ConfirmModal (Esc / backdrop / Cancel dismiss; only Delete proceeds).
  */
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { Copy, Download, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
+import { Copy, Download, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Alert, Badge, Button, Card, Form, Spinner, Table } from "react-bootstrap";
 import {
   CONFIGURED_MASK,
   createUpstream,
   deleteUpstream,
-  discoverUpstream,
   fetchUpstreamModels,
   fetchUpstreams,
   updateUpstream,
-  type DiscoverResult,
   type ManagedUpstream,
   type UpstreamModel,
   type UpstreamWriteRequest,
@@ -82,24 +80,6 @@ type Listing =
   | { kind: "loading" }
   | { kind: "error"; message: string }
   | { kind: "loaded"; models: readonly UpstreamModel[]; fetchedAt: string };
-
-/** One discover run's state within this section visit (per upstream). */
-type DiscoverRun =
-  | { kind: "loading" }
-  | { kind: "done"; result: DiscoverResult };
-
-/** A finished discover run's inline verdict — the report's own shape: ok,
- * or the log-safe reason. Nothing while loading or untouched. */
-function DiscoverOutcome({ run }: { run: DiscoverRun | undefined }): ReactNode {
-  if (run?.kind !== "done") {
-    return null;
-  }
-  return (
-    <span className={`d-block small ${run.result.ok ? "text-success" : "text-danger"}`}>
-      Discover: {run.result.ok ? "ok" : (run.result.reason ?? "failed")}
-    </span>
-  );
-}
 
 /** Clipboard write with a plain-DOM fallback for non-secure contexts. */
 async function copyText(text: string): Promise<void> {
@@ -207,22 +187,19 @@ function ModelList({ models, upstreamId }: { models: readonly UpstreamModel[]; u
   );
 }
 
-/** One upstream card: probe state, its on-demand live listing, and its per-upstream "Discover". */
+/** One upstream card: probe state and its on-demand live listing — the one
+ * "Load models" affordance (its fetch carries `?discover=1`, so every load
+ * also refreshes the metadata slice, ADR-016). */
 function UpstreamCard({
   upstream,
   listing,
   onLoad,
-  discover,
-  onDiscover,
 }: {
   upstream: ManagedUpstream;
   listing: Listing;
   onLoad: (upstreamId: string) => void;
-  discover: DiscoverRun | undefined;
-  onDiscover: (upstreamId: string) => void;
 }): ReactNode {
   const loading = listing.kind === "loading";
-  const discovering = discover?.kind === "loading";
   return (
     <Card className="mb-3">
       <Card.Header className="d-flex align-items-center justify-content-between gap-2">
@@ -238,18 +215,6 @@ function UpstreamCard({
         <span className="d-flex align-items-center gap-2">
           <Button
             type="button"
-            variant="outline-secondary"
-            size="sm"
-            className="d-inline-flex align-items-center gap-1"
-            onClick={() => onDiscover(upstream.id)}
-            disabled={discovering}
-          >
-            {discovering && <Spinner as="span" size="sm" aria-hidden="true" />}
-            <Search aria-hidden="true" size={14} />
-            Discover
-          </Button>
-          <Button
-            type="button"
             variant="outline-primary"
             size="sm"
             className="d-inline-flex align-items-center gap-1"
@@ -263,7 +228,6 @@ function UpstreamCard({
         </span>
       </Card.Header>
       <Card.Body>
-        <DiscoverOutcome run={discover} />
         {listing.kind === "idle" && (
           <p className="text-body-secondary small mb-0">
             Not loaded yet — “Load models” fetches the upstream’s current catalog live.
@@ -297,10 +261,9 @@ export function UpstreamsSection(): ReactNode {
   const [busy, setBusy] = useState(false);
   /** The saved entry's probe verdict (D8) — data next to the confirmation. */
   const [probe, setProbe] = useState<UpstreamWriteResponse["probe"] | null>(null);
-  /** Per-upstream live listing state ("Load models", ADR-011). */
+  /** Per-upstream live listing state ("Load models", ADR-011 as amended by
+   * ADR-016 — the fetch carries `?discover=1` and refreshes the slice). */
   const [listings, setListings] = useState<Record<string, Listing>>({});
-  /** Discover runs by upstream id (ADR-014 D4). */
-  const [runs, setRuns] = useState<Record<string, DiscoverRun>>({});
   /** The pending delete confirmation — open exactly while non-null (ConfirmModal). */
   const [dialog, setDialog] = useState<ConfirmDialog | null>(null);
 
@@ -406,40 +369,17 @@ export function UpstreamsSection(): ReactNode {
     });
   };
 
-  /** One discover run per upstream: the always-200 verdict is the outcome
-   * (its `reason` carries a failure). A successful run swaps the upstream's
-   * metadata slice — the refreshed minima fold into the Models section's
-   * `meta` rows on their next read; no re-read happens on this tab. */
-  const runDiscover = useCallback(
-    (upstreamId: string): void => {
-      setRuns((current) => ({ ...current, [upstreamId]: { kind: "loading" } }));
-      void (async (): Promise<void> => {
-        let run: DiscoverRun;
-        try {
-          run = { kind: "done", result: await discoverUpstream(upstreamId) };
-        } catch (cause) {
-          // The 404/401 classes: the envelope's message is the verdict.
-          run = {
-            kind: "done",
-            result: {
-              upstream: upstreamId,
-              ok: false,
-              reason: cause instanceof Error ? cause.message : String(cause),
-            },
-          };
-        }
-        setRuns((current) => ({ ...current, [upstreamId]: run }));
-      })();
-    },
-    [],
-  );
-
-  /** One live listing per upstream, on the explicit "Load models" click. */
+  /** One live listing per upstream, on the explicit "Load models" click —
+   * the fetch carries `?discover=1` (ADR-016): a successful load also swaps
+   * the upstream's metadata slice, so the refreshed minima fold into the
+   * Models section's `meta` rows on their next read (no re-read on this
+   * tab); a failure answers the 502 envelope, and retain-last-good keeps
+   * the previous slice serving. */
   const load = useCallback((upstreamId: string): void => {
     setListings((current) => ({ ...current, [upstreamId]: { kind: "loading" } }));
     void (async (): Promise<void> => {
       try {
-        const listing = await fetchUpstreamModels(upstreamId);
+        const listing = await fetchUpstreamModels(upstreamId, { discover: true });
         setListings((current) => ({
           ...current,
           [upstreamId]: {
@@ -496,8 +436,8 @@ export function UpstreamsSection(): ReactNode {
       <p className="text-body-secondary">
         Every configured upstream, in config order — create, edit, or delete;
         changes write through to config.json and hot-apply without a restart.
-        Each card loads the upstream’s live model catalog on demand, and
-        Discover re-probes that one upstream.
+        Each card loads the upstream’s live model catalog on demand — the
+        load also refreshes that upstream’s metadata slice.
       </p>
 
       {/* Page-level failures (refresh, delete) — submit errors render inside the editor modal. */}
@@ -597,8 +537,6 @@ export function UpstreamsSection(): ReactNode {
               upstream={upstream}
               listing={listings[upstream.id] ?? { kind: "idle" }}
               onLoad={load}
-              discover={runs[upstream.id]}
-              onDiscover={runDiscover}
             />
           ))}
         </>

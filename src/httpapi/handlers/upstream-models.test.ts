@@ -1,8 +1,9 @@
 /**
- * The `GET /api/upstreams/:id/models` contracts (ADR-011,
- * specs/contracts/gateway-management.md): the operator-triggered live
- * `listModels()` through the named upstream — the management boundary's only
- * request-time upstream contact. Success carries the provider-native,
+ * The `GET /api/upstreams/:id/models` contracts (ADR-011 as amended by
+ * ADR-016, specs/contracts/gateway-management.md): the operator-triggered
+ * live `listModels()` through the named upstream — one of the boundary's
+ * operator-triggered request-time upstream contacts (the CRUD blocking
+ * probes are the others). Success carries the provider-native,
  * unprefixed catalog plus `fetchedAt` and no credential material; an unknown
  * id is the 404 envelope answered before any upstream contact; a failing
  * upstream (rejection or probe-budget expiry) is the 502 `upstream_error`
@@ -15,6 +16,7 @@ import type pino from "pino";
 import type { Upstream, UpstreamConfig, ModelEntry, ProxyRequest } from "../../upstreams/upstream.ts";
 import { UpstreamRegistry, type UpstreamFactories } from "../../upstreams/registry.ts";
 import type { GatewayEnv } from "../../gateway/router.ts";
+import { MetadataStore } from "../../gateway/metastore.ts";
 import { redactedConfigView } from "../../config/redact.ts";
 import { DEFAULT_MAX_REQUEST_BODY_BYTES } from "../../config/schema.ts";
 import { createApp } from "../app.ts";
@@ -112,7 +114,7 @@ function appWith(
   timeoutMs = UPSTREAM_MODELS_TIMEOUT_MS,
 ): Hono<GatewayEnv> {
   const app = new Hono<GatewayEnv>();
-  app.get("/api/upstreams/:id/models", handleUpstreamModels(registry, logger, timeoutMs));
+  app.get("/api/upstreams/:id/models", handleUpstreamModels(registry, new MetadataStore(), logger, timeoutMs));
   return app;
 }
 
@@ -217,6 +219,60 @@ describe("handleUpstreamModels (GET /api/upstreams/:id/models)", () => {
     expect(body.error.type).toBe("api_error");
     expect(body.error.code).toBe("upstream_error");
     expect(body.error.message).toContain("probe budget");
+  });
+});
+
+describe("handleUpstreamModels with discover=1 (ADR-016 — the folded discover mount)", () => {
+  function appWithStore(registry: UpstreamRegistry, metadata: MetadataStore, timeoutMs?: number): Hono<GatewayEnv> {
+    const app = new Hono<GatewayEnv>();
+    app.get("/api/upstreams/:id/models", handleUpstreamModels(registry, metadata, fakeLogger(), timeoutMs));
+    return app;
+  }
+
+  test("discover=1 swaps the metadata slice; the plain request writes nothing", async () => {
+    const { registry } = await registryWith([
+      { id: "alpha", models: [{ id: "m", object: "model", created: 1, owned_by: "openai" }] },
+    ]);
+    const metadata = new MetadataStore();
+    const app = appWithStore(registry, metadata);
+
+    const plain = await app.request("/api/upstreams/alpha/models");
+    expect(plain.status).toBe(200);
+    // Pure read — the slice stays empty.
+    expect(metadata.entries("alpha")).toEqual([]);
+
+    const discovered = await app.request("/api/upstreams/alpha/models?discover=1");
+    expect(discovered.status).toBe(200);
+    expect(metadata.entries("alpha").map((model) => model.id)).toEqual(["m"]);
+  });
+
+  test("a failing discovered listing keeps the pre-seeded slice — retain-last-good, 502 envelope", async () => {
+    const { registry } = await registryWith([
+      { id: "dead", listError: new Error('upstream "dead" is unreachable: timeout') },
+    ]);
+    const metadata = new MetadataStore();
+    metadata.set("dead", [{ id: "kept", object: "model", created: 1, owned_by: "openai" }]);
+    const app = appWithStore(registry, metadata);
+
+    const response = await app.request("/api/upstreams/dead/models?discover=1");
+    expect(response.status).toBe(502);
+    const body = (await response.json()) as EnvelopeBody;
+    expect(body.error.code).toBe("upstream_error");
+    // The failed discovery changed nothing.
+    expect(metadata.entries("dead").map((model) => model.id)).toEqual(["kept"]);
+  });
+
+  test("an expired budget with discover=1 answers the 502 envelope fast and keeps the slice", async () => {
+    const { registry } = await registryWith([{ id: "slow", hang: true }]);
+    const metadata = new MetadataStore();
+    metadata.set("slow", [{ id: "kept", object: "model", created: 1, owned_by: "openai" }]);
+    const app = appWithStore(registry, metadata, 20);
+
+    const response = await app.request("/api/upstreams/slow/models?discover=1");
+    expect(response.status).toBe(502);
+    const body = (await response.json()) as EnvelopeBody;
+    expect(body.error.message).toContain("probe budget");
+    expect(metadata.entries("slow").map((model) => model.id)).toEqual(["kept"]);
   });
 });
 

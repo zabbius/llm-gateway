@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Detects per-model facts — context window, output limit, tool calling, reasoning, temperature, attachments — from raw upstream `/models` listings and folds them, with the operator's manual `limits`, into one client-facing metadata record per configured alias. The detector chain is the 1:1 TypeScript port of the c0wrk first-wins detectors ([ADR-012](../decisions/012-alias-model-metadata.md)); the raw listings come from discovery at start plus on-demand refreshes — the per-upstream discover mount (`POST /api/upstreams/:id/discover`, [ADR-014](../decisions/014-runtime-management-crud.md) D4) and the management CRUD's upstream writes, whose blocking probes seed or clear the affected slice — and the aggregate projects onto the client catalog and the management models reads (`meta`, [gateway-management.md](../contracts/gateway-management.md)) — advisory data the gateway never enforces.
+Detects per-model facts — context window, output limit, tool calling, reasoning, temperature, attachments — from raw upstream `/models` listings and folds them, with the operator's manual `limits`, into one client-facing metadata record per configured alias. The detector chain is the 1:1 TypeScript port of the c0wrk first-wins detectors ([ADR-012](../decisions/012-alias-model-metadata.md)); the raw listings come from discovery at start plus on-demand refreshes — the live listing's `discover=1` query parameter ([ADR-011](../decisions/011-management-live-model-listing.md) as amended by [ADR-016](../decisions/016-discover-folded-into-live-listing.md)) and the management CRUD's upstream writes, whose blocking probes seed or clear the affected slice — and the aggregate projects onto the client catalog and the management models reads (`meta`, [gateway-management.md](../contracts/gateway-management.md)) — advisory data the gateway never enforces.
 
 ## Key Files
 
@@ -11,9 +11,10 @@ Detects per-model facts — context window, output limit, tool calling, reasonin
 - `src/gateway/aliasmeta.ts` — `buildAliasMetadata`: the min-rule, the strict AND, the manual-`limits` fold, frozen output
 - `src/httpapi/handlers/models.ts` — the catalog projection (`limit` / `capabilities` / `modalities`, absent-when-unknown)
 - `src/httpapi/handlers/model-aliases.ts` — the management models CRUD: every managed entry carries `meta`, the aggregate folded per read from the store's current slice ([ADR-014](../decisions/014-runtime-management-crud.md) D4 — `meta` moved here from the retired status inventory)
-- `src/httpapi/handlers/upstreams.ts` — the discover mount (`POST /api/upstreams/:id/discover`: one `listModels()` within the probe budget, retain-last-good wholesale swap) and the CRUD hot-apply that seeds or clears the affected slice from the blocking probe's outcome ([ADR-014](../decisions/014-runtime-management-crud.md) D8)
+- `src/httpapi/handlers/upstream-models.ts` — the live listing with its `discover=1` metadata-slice swap (one `listModels()` within the probe budget, retain-last-good wholesale swap before the answer, [ADR-016](../decisions/016-discover-folded-into-live-listing.md))
+- `src/httpapi/handlers/upstreams.ts` — the CRUD hot-apply that seeds or clears the affected slice from the blocking probe's outcome ([ADR-014](../decisions/014-runtime-management-crud.md) D8)
 - `src/config/schema.ts` — the optional `models[].limits` block (validation, normalization, redacted view)
-- `src/upstreams/openai-compatible.ts` — the two-leg startup probe (standard `GET {baseUrl}/models` + LM Studio native leg, merged native-first) that seeds the store, and the single-leg `listModels()` fetch the discover mount races
+- `src/upstreams/openai-compatible.ts` — the two-leg startup probe (standard `GET {baseUrl}/models` + LM Studio native leg, merged native-first) that seeds the store, and the single-leg `listModels()` fetch the `discover=1` listing races
 - `src/index.ts` — wiring step [4c]: store construction + `seed(registry.status())` after the probes resolve
 
 ## Core Types
@@ -45,13 +46,6 @@ interface ManagedAliasMeta {
   contextWindow: number | null;
   outputLimit: number | null;
   capabilities: ModelCapabilities | null;
-}
-
-/** One discover mount's outcome; reason (log-safe) only when ok is false. */
-interface DiscoverResult {
-  upstream: string;
-  ok: boolean;
-  reason?: string;
 }
 
 /** The operator's manual ground truth — positive integers, tokens. */
@@ -86,24 +80,25 @@ interface ModelLimitsConfig {
 
 - **The client catalog** (`GET /llm/v1/models`, [client-gateway.md](../contracts/client-gateway.md)): an alias with a known context window gains `limit: { context, output }` — `context` positive, `output` `0` when the output limit is not declared (the "0 == undeclared" wire contract); the pair `capabilities` (`tools.supported`, `reasoning.supported`, `temperature` verbatim) + `modalities` (`input`: `["text"]`, plus `"image/png"` when image input is declared) appears only together, only on the full four-flag declaration the strict AND yields. An alias without metadata serializes byte-for-byte as the bare four-key OpenAI entry; the extra keys follow the base keys so the serialization order is stable.
 - **The management surface** (`GET /api/models` and its single-entry read, [gateway-management.md](../contracts/gateway-management.md)): every managed alias entry carries `meta` — `{ contextWindow, outputLimit, capabilities }` with JSON `null` where the aggregate is unknown and the strict-AND four-flag object verbatim where declared, folded from the store's *current* slice against the store's current `models` block. `meta` moved here from the retired `GET /api/status` inventory ([ADR-014](../decisions/014-runtime-management-crud.md) D4). The SPA renders the values read-only ([frontend.md](./frontend.md)).
-- Both folds read the store's *current* slice: a successful discover run — or an upstream CRUD write whose blocking probe retained a catalog — is visible on the next read; a failed one changes nothing (retain-last-good).
+- Both folds read the store's *current* slice: a successful `discover=1` listing — or an upstream CRUD write whose blocking probe retained a catalog — is visible on the next read; a failed one changes nothing (retain-last-good).
 
 ### Discovery (where the snapshots come from)
 
 - **At start** (wiring step [4c]): `MetadataStore.seed(registry.status())` folds every ok startup probe's retained catalog in as that upstream's initial snapshot; failed probes — and ok probes whose upstream retains no catalog — seed nothing.
 - **On demand** — two writers, both explicit and both behind the session gate ([ADR-014](../decisions/014-runtime-management-crud.md)):
-  - the discover mount `POST /api/upstreams/:id/discover` — one `listModels()` call on the named upstream within the startup probe budget (`RUNTIME_PROBE_BUDGET_MS`, 10 s — the mount races the budget around the interface call, which names no concrete upstream module), no retries; an unknown id is the `404` envelope before any contact. The answer is **always `200` data-not-error**: `{ upstream, ok, reason? }` — a rejection or the expired budget leaves the store untouched (retain-last-good) and reports the log-safe reason as data, so nothing in the run can throw into the error mapper, and no credential material can reach the body. A success swaps the fresh listing in wholesale (an empty listing is a fact, not a failure) and logs an info line; a failure logs a warn with the reason.
+  - the live listing's `discover=1` query parameter — `GET /api/upstreams/:id/models?discover=1` ([ADR-011](../decisions/011-management-live-model-listing.md) as amended by [ADR-016](../decisions/016-discover-folded-into-live-listing.md); the former `POST /api/upstreams/:id/discover` mount is removed) — one `listModels()` call on the named upstream within the startup probe budget (the listing races its own budget around the interface call, which names no concrete upstream module), no retries; an unknown id is the `404` envelope before any contact. A success swaps the fresh listing in wholesale (an empty listing is a fact, not a failure) before answering `{ upstream, models, fetchedAt }` and logs an info line; a rejection or the expired budget leaves the store untouched (retain-last-good), answers the `502` `upstream_error` envelope with the log-safe reason, and logs a warn.
   - the management CRUD's upstream writes ([ADR-014](../decisions/014-runtime-management-crud.md) D8): a create or update runs the startup-style blocking probe within the same budget — the probe's outcome is data in the write answer (`{ upstream, probe }`), never a cancellation — and its retained catalog seeds the fresh slice on an ok probe; a failed probe, a retained-nothing probe, a delete, or a replaced instance clears the slice (the write replaced the instance the old snapshot described).
-- **Snapshot richness:** the startup seeding and the CRUD-probe seeding carry the `openai-compatible` upstream's **two-leg** probe — the standard `GET {baseUrl}/models` leg and the LM Studio native leg merged native-first by exact id (native failures are silently skipped) ([openai-compatible.md](./upstreams/openai-compatible.md)). The discover mount stores the upstream's `listModels()` answer — for `openai-compatible` that fetch is the **standard leg alone**, so a refresh trades the native-leg extras for the one mandatory interface method every upstream type implements; the upstream's optional `discover()` two-leg re-probe exists on the contract but no management mount consults it.
+- **Snapshot richness:** the startup seeding and the CRUD-probe seeding carry the `openai-compatible` upstream's **two-leg** probe — the standard `GET {baseUrl}/models` leg and the LM Studio native leg merged native-first by exact id (native failures are silently skipped) ([openai-compatible.md](./upstreams/openai-compatible.md)). The `discover=1` listing stores the upstream's `listModels()` answer — for `openai-compatible` that fetch is the **standard leg alone**, so a refresh trades the native-leg extras for the one mandatory interface method every upstream type implements; the upstream's optional `discover()` two-leg re-probe exists on the contract but no management mount consults it.
 
 ```
 startup:   registry probes resolve
              └─ MetadataStore.seed(registry.status())
                   └─ ok probe + retained catalog → that upstream's initial snapshot
-operator:  POST /api/upstreams/:id/discover
+operator:  GET /api/upstreams/:id/models?discover=1
              └─ 404 before contact; one listModels() within the probe budget
                   ├─ ok     → set(id, listing): wholesale swap (empty listing = a fact)
-                  └─ failed → store untouched (retain-last-good); reason in the report
+                  │           then 200 { upstream, models, fetchedAt }
+                  └─ failed → store untouched (retain-last-good); 502 envelope
 CRUD:      upstream create/update ── probe ok + retained catalog ── set(id, catalog)
                               └─ otherwise (failed probe, delete) ── clear(id)
 per request (pure folds, no upstream contact):
@@ -117,11 +112,11 @@ per request (pure folds, no upstream contact):
 ## Invariants
 
 - Numbers on detected metadata are flatly "0 == undeclared"; the management surface reports JSON `null` for unknown dimensions; no surface fabricates a value — absent/null always means unknown, and a `false` capability flag is emitted only when every route fully declared it false.
-- The detector chain, the builder, and both surface folds are pure: they contact no upstream, read no files, and never mutate the store. The store's only writers are `seed()` (startup), the discover mount's wholesale swap, and the CRUD hot-apply's seed-or-clear of the affected upstream's slice ([ADR-014](../decisions/014-runtime-management-crud.md) D8).
+- The detector chain, the builder, and both surface folds are pure: they contact no upstream, read no files, and never mutate the store. The store's only writers are `seed()` (startup), the `discover=1` listing's wholesale swap, and the CRUD hot-apply's seed-or-clear of the affected upstream's slice ([ADR-014](../decisions/014-runtime-management-crud.md) D8).
 - A failed refresh never changes what any surface serves (retain-last-good); a successful one replaces the snapshot atomically and wholesale — an empty listing is a fact, not a failure.
 - Limits aggregate as the element-wise minimum over declaring routes and then with the manual `limits`; capabilities aggregate as the strict AND gated by full declaration; an alias with no known dimension has no metadata record at all.
 - Metadata is advisory ([ADR-012](../decisions/012-alias-model-metadata.md)): no endpoint enforces, truncates, or rewrites a request or response payload because of it.
-- No metadata payload — catalog fields, a managed entry's `meta`, or a discover report — can carry credential material.
+- No metadata payload — catalog fields or a managed entry's `meta` — can carry credential material.
 
 ## Configuration
 
@@ -135,16 +130,17 @@ A present block must be an object carrying at least one of the two keys, both po
 ## Extension Points
 
 - **A new listing shape:** add a detector to the chain in `src/gateway/modelmetadata.ts`, most-specific position first; keep the "0 == undeclared" and no-negative contract and extend the ported test table rather than special-casing consumers.
-- **A new upstream type:** implement `listModels()` — the discover mount and the CRUD blocking probes reuse it, so the new type is discoverable with no further wiring ([upstream-contract.md](./upstreams/upstream-contract.md)); the optional `discover()` two-leg re-probe is an implementation choice no management mount consults.
+- **A new upstream type:** implement `listModels()` — the listing's `discover=1` swap and the CRUD blocking probes reuse it, so the new type is discoverable with no further wiring ([upstream-contract.md](./upstreams/upstream-contract.md)); the optional `discover()` two-leg re-probe is an implementation choice no management mount consults.
 - **Enforcement:** if the gateway is ever to enforce limits (reject, truncate, count tokens), that is a new ADR — metadata stays advisory until one exists.
 
 ## Related Specs
 
 - [routing.md](./routing.md) "Alias metadata" — the routing-domain view: the store/builder types in context of dispatch and the endpoint map
 - [ADR-012](../decisions/012-alias-model-metadata.md) — this domain's decision record (detector port, discovery model, min-rule, capability-AND, informativeness)
-- [ADR-014](../decisions/014-runtime-management-crud.md) — the runtime CRUD that reshaped the refresh paths: the discover mount (D4) and the CRUD probes' seed/clear (D8)
-- [ADR-011](../decisions/011-management-live-model-listing.md) — the boundary posture of an operator-triggered live upstream call (the listing; the discover mount rides the same budget and gate)
-- [gateway-management.md](../contracts/gateway-management.md) — the managed entries' `meta` key and the discover mount on the management boundary
+- [ADR-014](../decisions/014-runtime-management-crud.md) — the runtime CRUD that reshaped the refresh paths: the CRUD probes' seed/clear (D8); its discover mount (D4) is superseded by [ADR-016](../decisions/016-discover-folded-into-live-listing.md)
+- [ADR-011](../decisions/011-management-live-model-listing.md) — the boundary posture of an operator-triggered live upstream call (the listing)
+- [ADR-016](../decisions/016-discover-folded-into-live-listing.md) — the discovery folded into the listing's `discover=1` query parameter
+- [gateway-management.md](../contracts/gateway-management.md) — the managed entries' `meta` key and the listing's `discover=1` swap on the management boundary
 - [client-gateway.md](../contracts/client-gateway.md) — the catalog entry's optional metadata fields
 - [configuration.md](./configuration.md) — the `limits` schema and its validation
 - [upstreams/openai-compatible.md](./upstreams/openai-compatible.md) — the two-leg startup probe behind the seeded slices

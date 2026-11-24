@@ -27,8 +27,7 @@
  *                           management CRUD blocks (ADR-014): the [4d] one
  *                           over the `upstreams` collection (GET/POST
  *                           /api/upstreams, GET/PUT/DELETE
- *                           /api/upstreams/:id and the
- *                           POST /api/upstreams/:id/discover mount) and
+ *                           /api/upstreams/:id) and
  *                           the [4e] one over the `models` collection
  *                           (GET/POST /api/models, GET/PUT/DELETE
  *                           /api/models/:alias) and the [4f] one over the
@@ -150,8 +149,8 @@ export interface UiServingOptions {
    */
   configStore?: ConfigStore;
   /**
-   * The probe budget for the management CRUD's blocking probes and the
-   * discover mount (ADR-014 D8); defaults to the upstream domain's startup
+   * The probe budget for the management CRUD's blocking probes
+   * (ADR-014 D8); defaults to the upstream domain's startup
    * probe budget (10 s). Injectable so tests can shrink the budget.
    */
   probeBudgetMs?: number;
@@ -367,16 +366,16 @@ export function createApp(
     "/api/status",
     handleStatus(authConfig?.enabled === true),
   );
+  // The management handlers' metadata slices (the live listing's `discover=1`
+  // swap, the upstream CRUD's seed/clear, the alias reads folding it into
+  // `meta`) share the option's store. No options store (tests) → one private
+  // empty store: they mutate nothing observable, exactly the option's
+  // documented fallback behavior.
+  const discoveryStore = options.metadataStore ?? new MetadataStore();
   app.get(
     "/api/upstreams/:id/models",
-    handleUpstreamModels(registry, logger),
+    handleUpstreamModels(registry, discoveryStore, logger),
   );
-  // The management CRUD handlers' metadata slices (the upstream handlers
-  // seed/clear the per-upstream slice; the alias reads fold it into `meta`)
-  // share the option's store. No options store (tests) → one private empty
-  // store: they mutate nothing observable, exactly the option's documented
-  // fallback behavior.
-  const discoveryStore = options.metadataStore ?? new MetadataStore();
 
   // [4d] Management CRUD (ADR-014) — the runtime write half of the
   // boundary, mounted as one block after the observation mounts ([4b]),
@@ -407,7 +406,6 @@ export function createApp(
     app.get("/api/upstreams/:id", upstreamApi.get);
     app.put("/api/upstreams/:id", upstreamApi.update);
     app.delete("/api/upstreams/:id", upstreamApi.remove);
-    app.post("/api/upstreams/:id/discover", upstreamApi.discover);
   }
 
   // [4e] Management CRUD — the models collection (ADR-014): the runtime

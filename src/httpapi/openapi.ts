@@ -19,8 +19,8 @@
  *     ADR-008 client Bearer gate, ADR-009 alias catalog + the alias
  *     metadata projection, ADR-010 `X-Session-Id` session affinity).
  *   - Management surface: specs/contracts/gateway-management.md (ADR-007
- *     session gate + login/logout, ADR-011 live listing, the ADR-014
- *     management CRUD + per-upstream discover mount, the masking rule).
+ *     session gate + login/logout, ADR-011 live listing with the ADR-016
+ *     folded-in discovery, the ADR-014 management CRUD, the masking rule).
  *
  * Layering (specs/architecture/layers.md): the module imports only within
  * the httpapi layer — the session-cookie constant from `auth.ts` — and its
@@ -205,8 +205,9 @@ export const RedactedModelSchema = z.object({
 
 /* ------------------------------------------------------------------ *
  * `GET /api/upstreams/:id/models` — the operator-triggered live listing
- * (ADR-011): `{ upstream, models, fetchedAt }`, provider-native entries
- * verbatim, extras riding along.
+ * (ADR-011 as amended by ADR-016 — `?discover=1` folds the metadata-slice
+ * swap into the listing): `{ upstream, models, fetchedAt }`,
+ * provider-native entries verbatim, extras riding along.
  * ------------------------------------------------------------------ */
 
 /** The live listing answer — `fetchedAt` is the ISO-8601 completion instant. */
@@ -217,22 +218,8 @@ export const UpstreamModelListSchema = z.object({
 });
 
 /* ------------------------------------------------------------------ *
- * Discovery — `POST /api/upstreams/:id/discover` (the ADR-014 D4
- * per-upstream mount): always 200, one report — failures are data
- * (`ok: false` + log-safe `reason`), never HTTP errors.
- * ------------------------------------------------------------------ */
-
-/** One upstream's discovery outcome; `reason` exists only when `ok` is false. */
-export const DiscoveryResultSchema = z.object({
-  upstream: z.string(),
-  ok: z.boolean(),
-  reason: z.string().optional(),
-});
-
-/* ------------------------------------------------------------------ *
  * Upstream management CRUD — `GET`/`POST /api/upstreams`,
- * `GET`/`PUT`/`DELETE /api/upstreams/:id`,
- * `POST /api/upstreams/:id/discover` (ADR-014): the write half of the
+ * `GET`/`PUT`/`DELETE /api/upstreams/:id` (ADR-014): the write half of the
  * management boundary over the `upstreams` collection. Entries are served
  * through the redacted view — the mask literals below are the wire contract
  * (the runtime source is `CONFIGURED_MASK`, src/config/redact.ts). Create
@@ -593,15 +580,26 @@ export const ROUTE_DESCRIPTIONS = {
     },
   },
 
-  /** `GET /api/upstreams/:id/models` — the ADR-011 live listing. */
+  /** `GET /api/upstreams/:id/models` — the ADR-011 live listing (ADR-016
+   * folds the former discover mount in behind `?discover=1`). */
   listUpstreamModels: {
     tags: ["Management"],
     operationId: "listUpstreamModels",
     summary: "Live model list of one upstream",
     description:
-      "The boundary's one live model listing (ADR-011): a single `listModels()` call on the named upstream within the startup probe budget — no retries. The answer carries the provider-native, unprefixed catalog verbatim (unlike the alias catalog of `GET /llm/v1/models`); provider-native extra fields ride along. An unknown id is the 404 envelope answered before any upstream contact; a rejection or an expired budget is the 502 envelope with a log-safe, credential-free message.",
+      "The boundary's one live model listing (ADR-011): a single `listModels()` call on the named upstream within the startup probe budget — no retries. The answer carries the provider-native, unprefixed catalog verbatim (unlike the alias catalog of `GET /llm/v1/models`); provider-native extra fields ride along. With `discover=1` (ADR-016 — the folded former discover mount) the fetched catalog swaps the upstream's alias-metadata slice wholesale before the answer, an empty listing included. An unknown id is the 404 envelope answered before any upstream contact; a rejection or an expired budget is the 502 envelope with a log-safe, credential-free message — retain-last-good keeps the previous metadata slice serving.",
     security: [{ cookieAuth: [] }],
-    parameters: [UPSTREAM_ID_PARAMETER],
+    parameters: [
+      UPSTREAM_ID_PARAMETER,
+      {
+        name: "discover",
+        in: "query",
+        required: false,
+        schema: { type: "string", enum: ["1"] },
+        description:
+          "Fold the discovery into this listing (ADR-016): with `discover=1` the fetched catalog swaps the upstream's alias-metadata slice before the answer; without the parameter the listing is a pure read.",
+      },
+    ],
     responses: {
       "200": {
         description: "The live provider-native catalog plus the fetch instant.",
@@ -723,25 +721,6 @@ export const ROUTE_DESCRIPTIONS = {
       "409": errorEnvelope(
         "A `models[].routes[]` entry still names this upstream — `invalid_request_error` / `resource_in_use` (D6); nothing is removed.",
       ),
-    },
-  },
-
-  /** `POST /api/upstreams/:id/discover` — one upstream's discovery run (ADR-014 D4). */
-  discoverUpstream: {
-    tags: ["Management"],
-    operationId: "discoverUpstream",
-    summary: "Discover one upstream's models",
-    description:
-      "The ADR-014 per-upstream discovery mount (D4): one `listModels()` call on the named upstream within the startup probe budget — no retries. A successful listing swaps the upstream's alias-metadata slice wholesale (an empty listing included); a failed one or an expired budget leaves the last good snapshot serving (retain-last-good). Always-200 data-not-error report `{ upstream, ok, reason? }`; the 404 envelope for an unknown id is answered before any upstream contact.",
-    security: [{ cookieAuth: [] }],
-    parameters: [UPSTREAM_ID_PARAMETER],
-    responses: {
-      "200": {
-        description: "The discovery report for this one upstream — failures are data, never HTTP errors.",
-        content: { "application/json": { schema: resolver(DiscoveryResultSchema) } },
-      },
-      "401": errorEnvelope("No valid session cookie while the session gate is mounted (ADR-007)."),
-      "404": errorEnvelope("The upstream id is not configured — `invalid_request_error`, no code, answered before any contact."),
     },
   },
 
@@ -1039,7 +1018,7 @@ export const OPENAPI_DOCUMENT_OPTIONS: Partial<GenerateSpecOptions> = {
       // document states its own MVP version marker.
       version: "0.1.0",
       description:
-        "One OpenAI-protocol gateway fronting many LLM providers (ADR-005 surface namespace): the `/llm/v1` client surface resolves each request's `model` against the configured alias table (ADR-009) and relays the selected upstream's answer; the `/api` management surface observes gateway state, issues operator sessions (ADR-007), runs the operator-triggered live upstream facilities (the ADR-011 listing, the ADR-014 per-upstream discover mount) and carries the runtime management CRUD (ADR-014). Contracts: specs/contracts/client-gateway.md, specs/contracts/gateway-management.md.",
+        "One OpenAI-protocol gateway fronting many LLM providers (ADR-005 surface namespace): the `/llm/v1` client surface resolves each request's `model` against the configured alias table (ADR-009) and relays the selected upstream's answer; the `/api` management surface observes gateway state, issues operator sessions (ADR-007), runs the operator-triggered live upstream listing (ADR-011, its `discover=1` variant folding the ADR-016 metadata swap in) and carries the runtime management CRUD (ADR-014). Contracts: specs/contracts/client-gateway.md, specs/contracts/gateway-management.md.",
     },
     servers: [
       {
@@ -1057,7 +1036,7 @@ export const OPENAPI_DOCUMENT_OPTIONS: Partial<GenerateSpecOptions> = {
       {
         name: "Management",
         description:
-          "The management surface (`/api/*`): reads are in-memory except the operator-triggered live upstream contacts (the ADR-011 listing, the ADR-014 per-upstream discover mount); the ADR-014 CRUD mutations hot-apply without a restart; session auth is the ADR-007 cookie gate whenever `auth.enabled`.",
+          "The management surface (`/api/*`): reads are in-memory except the operator-triggered live upstream listing (ADR-011, whose `discover=1` variant folds the ADR-016 metadata swap in); the ADR-014 CRUD mutations hot-apply without a restart; session auth is the ADR-007 cookie gate whenever `auth.enabled`.",
       },
     ],
     components: {
@@ -1101,7 +1080,6 @@ export const OPENAPI_ROUTES = [
   { key: "getUpstream", method: "GET", path: "/api/upstreams/:id" },
   { key: "updateUpstream", method: "PUT", path: "/api/upstreams/:id" },
   { key: "deleteUpstream", method: "DELETE", path: "/api/upstreams/:id" },
-  { key: "discoverUpstream", method: "POST", path: "/api/upstreams/:id/discover" },
   { key: "listModelAliases", method: "GET", path: "/api/models" },
   { key: "createModelAlias", method: "POST", path: "/api/models" },
   { key: "getModelAlias", method: "GET", path: "/api/models/:alias" },

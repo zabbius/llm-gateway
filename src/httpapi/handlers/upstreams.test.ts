@@ -12,10 +12,12 @@
  *  - delete refuses an in-use upstream with the `409 resource_in_use`
  *    envelope (D6) and removes an unreferenced one everywhere (store, disk,
  *    registry, metadata slice);
- *  - discover runs one `listModels()` within the budget and swaps the
- *    alias-metadata slice wholesale (retain-last-good on failure), always
- *    answering 200 `{ upstream, ok, reason? }`; an unknown id is the 404
- *    envelope before any contact;
+ *  - the live listing with `discover=1` runs one `listModels()` within the
+ *    budget and swaps the alias-metadata slice wholesale before the answer
+ *    (retain-last-good on failure — the 502 envelope, store untouched);
+ *    without the parameter it is a pure read; an unknown id is the 404
+ *    envelope before any contact; the standalone discover mount is gone
+ *    (ADR-016);
  *  - rejection paths: 401 without a session (gate on), 400 validation,
  *    404 unknown id.
  *
@@ -499,14 +501,14 @@ describe("DELETE /api/upstreams/:id", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* discover: one listModels within the budget, wholesale slice swap     */
+/* the live listing: pure read; discover=1 swaps the slice (ADR-016)    */
 /* ------------------------------------------------------------------ */
 
-describe("POST /api/upstreams/:id/discover", () => {
-  test("a successful discovery updates the metadata slice — the alias reads reflect the fresh listing", async () => {
-    // The alias `smart` routes to ollama/qwen2.5:7b-instruct — the discovery
-    // listing's qwen entry (with max_model_len) is what the alias metadata
-    // aggregate folds.
+describe("GET /api/upstreams/:id/models?discover=1", () => {
+  test("a successful discovered listing swaps the metadata slice — the alias reads reflect the fresh listing", async () => {
+    // The alias `smart` routes to ollama/qwen2.5:7b-instruct — the listing's
+    // qwen entry (with max_model_len) is what the alias metadata aggregate
+    // folds.
     const specs = new Map<string, FakeSpec>([
       [
         "ollama",
@@ -530,28 +532,60 @@ describe("POST /api/upstreams/:id/discover", () => {
     // Before any discovery the slice is empty: the aggregate knows nothing.
     expect((await smartMeta())?.contextWindow).toBeNull();
 
-    const response = await app.request("/api/upstreams/ollama/discover", { method: "POST" });
+    const response = await app.request("/api/upstreams/ollama/models?discover=1");
     expect(response.status).toBe(200);
-    expect(JSON.parse(await bodyText(response))).toEqual({ upstream: "ollama", ok: true });
+    const body = JSON.parse(await bodyText(response)) as { upstream: string; models: unknown[]; fetchedAt: string };
+    expect(body.upstream).toBe("ollama");
+    expect(body.models).toHaveLength(1);
+    expect(body.fetchedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 
     expect((await smartMeta())?.contextWindow).toBe(8192);
     expect(metadata.entries("ollama")).toHaveLength(1);
   });
 
-  test("a failing discovery answers ok:false with a log-safe reason and the store stays untouched when nothing was seeded", async () => {
+  test("without discover=1 the listing is a pure read — the slice stays empty", async () => {
+    const specs = new Map<string, FakeSpec>([
+      [
+        "ollama",
+        {
+          models: [
+            { id: "qwen2.5:7b-instruct", object: "model", created: 1712267047, owned_by: "ollama", max_model_len: 8192 },
+          ],
+        },
+      ],
+    ]);
+    const { app, metadata } = await gateway(specs);
+
+    const response = await app.request("/api/upstreams/ollama/models");
+    expect(response.status).toBe(200);
+    const body = JSON.parse(await bodyText(response)) as { upstream: string; models: unknown[] };
+    expect(body.upstream).toBe("ollama");
+    expect(body.models).toHaveLength(1);
+
+    // The listing fetched, but nothing was written: the metadata store is
+    // untouched, and the alias aggregate stays ignorant.
+    expect(metadata.entries("ollama")).toEqual([]);
+    const listed = JSON.parse(await bodyText(await app.request("/api/models"))) as {
+      models: Array<{ alias: string; meta: { contextWindow: number | null } }>;
+    };
+    expect(listed.models.find((entry) => entry.alias === "smart")?.meta.contextWindow).toBeNull();
+  });
+
+  test("a failing discovered listing answers the 502 envelope and the store stays untouched when nothing was seeded", async () => {
     const specs = new Map<string, FakeSpec>([["openai", { listModelsError: new Error("provider went away") }]]);
     const { app, metadata } = await gateway(specs);
 
-    const response = await app.request("/api/upstreams/openai/discover", { method: "POST" });
-    expect(response.status).toBe(200);
-    const body = JSON.parse(await bodyText(response)) as { upstream: string; ok: boolean; reason?: string };
-    expect(body.upstream).toBe("openai");
-    expect(body.ok).toBe(false);
-    expect(body.reason).toContain("provider went away");
+    const response = await app.request("/api/upstreams/openai/models?discover=1");
+    expect(response.status).toBe(502);
+    const body = JSON.parse(await bodyText(response)) as Envelope;
+    expect(body.error.type).toBe("api_error");
+    expect(body.error.code).toBe("upstream_error");
+    expect(body.error.message).toContain("provider went away");
+    // Retain-last-good: nothing to retain here, the slice stays empty.
     expect(metadata.entries("openai")).toEqual([]);
   });
 
-  test("retain-last-good: a failing second discovery leaves the first listing serving", async () => {
+  test("retain-last-good: a failing second discovered listing leaves the first serving", async () => {
     let calls = 0;
     // A getter-based spec: the first listModels succeeds, later ones fail —
     // FakeUpstream reads the property per call. The listing carries the
@@ -571,16 +605,15 @@ describe("POST /api/upstreams/:id/discover", () => {
     ]);
     const { app } = await gateway(specs);
 
-    const first = await app.request("/api/upstreams/ollama/discover", { method: "POST" });
+    const first = await app.request("/api/upstreams/ollama/models?discover=1");
     expect(first.status).toBe(200);
-    expect(JSON.parse(await bodyText(first))).toEqual({ upstream: "ollama", ok: true });
     calls = 1;
 
-    const second = await app.request("/api/upstreams/ollama/discover", { method: "POST" });
-    expect(second.status).toBe(200);
-    const body = JSON.parse(await bodyText(second)) as { upstream: string; ok: boolean; reason?: string };
-    expect(body.ok).toBe(false);
-    expect(body.reason).toContain("provider went away");
+    const second = await app.request("/api/upstreams/ollama/models?discover=1");
+    expect(second.status).toBe(502);
+    const body = JSON.parse(await bodyText(second)) as Envelope;
+    expect(body.error.code).toBe("upstream_error");
+    expect(body.error.message).toContain("provider went away");
 
     // The first listing still serves (retain-last-good) — the alias reads
     // fold the retained slice.
@@ -590,23 +623,24 @@ describe("POST /api/upstreams/:id/discover", () => {
     expect(listed.models.find((entry) => entry.alias === "smart")?.meta.contextWindow).toBe(8192);
   });
 
-  test("an expired budget answers ok:false with the budget fact and abandons the hung fetch", async () => {
-    const specs = new Map<string, FakeSpec>([["openai", { hangListModels: true }]]);
-    const { app } = await gateway(specs);
-
-    const response = await app.request("/api/upstreams/openai/discover", { method: "POST" });
-    expect(response.status).toBe(200);
-    const body = JSON.parse(await bodyText(response)) as { ok: boolean; reason?: string };
-    expect(body.ok).toBe(false);
-    expect(body.reason).toContain("probe budget");
-  });
-
   test("unknown id: the 404 envelope before any upstream contact", async () => {
     const specs = new Map<string, FakeSpec>([["openai", {}]]);
     const { app } = await gateway(specs);
 
-    const response = await app.request("/api/upstreams/ghost/discover", { method: "POST" });
+    const response = await app.request("/api/upstreams/ghost/models?discover=1");
     expect(response.status).toBe(404);
+  });
+
+  test("the standalone discover mount is gone — every method answers the 404 envelope (ADR-016)", async () => {
+    const specs = new Map<string, FakeSpec>([["openai", {}]]);
+    const { app } = await gateway(specs);
+
+    for (const method of ["GET", "POST"]) {
+      const response = await app.request("/api/upstreams/openai/discover", { method });
+      expect(response.status, method).toBe(404);
+      const body = JSON.parse(await bodyText(response)) as Envelope;
+      expect(body.error.type, method).toBe("invalid_request_error");
+    }
   });
 });
 
@@ -626,7 +660,7 @@ describe("the ADR-007 session gate over the CRUD surface", () => {
       { method: "GET", path: "/api/upstreams/openai" },
       { method: "PUT", path: "/api/upstreams/openai" },
       { method: "DELETE", path: "/api/upstreams/openai" },
-      { method: "POST", path: "/api/upstreams/openai/discover" },
+      { method: "GET", path: "/api/upstreams/openai/models" },
     ];
     for (const attempt of attempts) {
       const response = await app.request(attempt.path, { method: attempt.method });

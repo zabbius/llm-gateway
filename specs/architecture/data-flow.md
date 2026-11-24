@@ -102,7 +102,7 @@ client
    |                      | POST /llm/v1/completions
    |          management: GET /api/status | GET /api/upstreams[/:id]
    |                      | POST /api/upstreams | PUT/DELETE /api/upstreams/:id
-   |                      | POST /api/upstreams/:id/discover | GET /api/upstreams/:id/models
+   |                      | GET /api/upstreams/:id/models[?discover=1]
    |                      | GET/POST /api/models | GET/PUT/DELETE /api/models/:alias
    |                      | GET/POST /api/clients | GET/PUT/DELETE /api/clients/:name
    |                      | POST /api/login | POST /api/logout (ADR-007, ADR-011, ADR-014)
@@ -220,7 +220,7 @@ client
    (referenced deletes answer 409 resource_in_use at step [2] before anything moves)
 ```
 
-The discover mount (`POST /api/upstreams/:id/discover`) and the ADR-011 listing ride the same gate and the same probe budget: one `listModels()` each, the discover run swapping the metadata slice wholesale on success and leaving it serving (retain-last-good) on failure — its report is always `200` data-not-error.
+The ADR-011 listing carries the on-demand discovery in its `discover=1` query parameter ([ADR-016](../domains/../decisions/016-discover-folded-into-live-listing.md) — the folded former discover mount): same gate, same probe budget, one `listModels()` — a success swaps the metadata slice wholesale before the answer, a failure or expired budget leaves it serving (retain-last-good) and surfaces as the listing's `502` envelope.
 
 ## Errors Along the Flow
 

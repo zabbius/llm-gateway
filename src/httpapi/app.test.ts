@@ -999,6 +999,8 @@ describe("retired management routes", () => {
       { path: "/api/discovery", init: { method: "POST" } },
       { path: "/api/discovery/upstream/alpha", init: { method: "POST" } },
       { path: "/api/discovery/alias/fast", init: { method: "POST" } },
+      { path: "/api/upstreams/alpha/discover" },
+      { path: "/api/upstreams/alpha/discover", init: { method: "POST" } },
     ];
     for (const { path, init } of removed) {
       const response = await app.request(path, { ...init, headers: { ...(init?.headers ?? {}) } });
@@ -1044,7 +1046,7 @@ describe("docs namespace: GET /docs and GET /docs/openapi.json", () => {
   });
 
   /**
-   * The fourteen operation paths the artifact always describes — the document
+   * The thirteen operation paths the artifact always describes — the document
    * is deployment-independent: the auth actions belong to the interface
    * whether or not a given deployment enables the session gate (`:id`/
    * `:alias`/`:name` render as `{id}`/`{alias}`/`{name}` in the OpenAPI
@@ -1057,7 +1059,6 @@ describe("docs namespace: GET /docs and GET /docs/openapi.json", () => {
     "/api/status",
     "/api/upstreams",
     "/api/upstreams/{id}",
-    "/api/upstreams/{id}/discover",
     "/api/upstreams/{id}/models",
     "/api/models",
     "/api/models/{alias}",

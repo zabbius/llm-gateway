@@ -12,12 +12,6 @@
  *                                         `resource_in_use` envelope while
  *                                         any `models[].routes[]` entry
  *                                         still names the upstream (D6)
- *   POST   /api/upstreams/:id/discover  — one `listModels()` within the
- *                                         probe budget, no retries; the
- *                                         fresh listing swaps the metadata
- *                                         slice wholesale (retain-last-good),
- *                                         reported as the always-200
- *                                         `{ upstream, ok, reason? }` (D4)
  *
  * The mutation sequence is the store's own validate → persist → apply
  * (src/config/store.ts — the config file stays the single source of truth,
@@ -43,7 +37,6 @@ import type { RedactedUpstreamConfig } from "../../config/redact.ts";
 import type { GatewayEnv } from "../../gateway/router.ts";
 import type { MetadataStore } from "../../gateway/metastore.ts";
 import type { UpstreamRegistry } from "../../upstreams/registry.ts";
-import type { Upstream } from "../../upstreams/upstream.ts";
 import { RUNTIME_PROBE_BUDGET_MS } from "../../upstreams/registry.ts";
 import { readJsonBody, BodyLimitError } from "../body.ts";
 import { badRequestResponse, notFoundResponse, payloadTooLargeResponse, resourceInUseResponse } from "../errors.ts";
@@ -300,77 +293,7 @@ export function handleDeleteUpstream(deps: UpstreamManagementDeps): Handler<Gate
   };
 }
 
-/**
- * `POST /api/upstreams/:id/discover` — one `listModels()` on the named
- * upstream within the startup probe budget, no retries (D4): a successful
- * listing swaps the upstream's metadata slice wholesale (an empty listing
- * included — "provider lists zero models" is a fact), a failed one or an
- * expired budget leaves the last good snapshot serving (retain-last-good).
- * Always-200 data-not-error report `{ upstream, ok, reason? }`; the 404
- * envelope for an unknown id is answered before any upstream contact.
- */
-export function handleUpstreamDiscover(deps: UpstreamManagementDeps): Handler<GatewayEnv> {
-  const log = deps.logger.child({ component: "http" });
-  const timeoutMs = deps.probeBudgetMs ?? RUNTIME_PROBE_BUDGET_MS;
-
-  return async (c) => {
-    const id = c.req.param("id") ?? "";
-    const upstream: Upstream | undefined = deps.registry.find(id);
-    if (upstream === undefined) {
-      return notFoundResponse(`Upstream '${id}' is not configured`);
-    }
-    // The request-log line names the upstream this run is about to contact
-    // (the ADR-011 binding).
-    c.set("upstreamId", upstream.id);
-
-    // The probe-budget race: the answer arrives within the budget or the
-    // report says so — the underlying listModels() fetch is abandoned, not
-    // awaited.
-    let timedOut = false;
-    let disarmBudget: (() => void) | undefined;
-    const budget = new Promise<never>((_, reject) => {
-      const timer = setTimeout(() => {
-        timedOut = true;
-        reject(new Error("probe budget expired"));
-      }, timeoutMs);
-      timer.unref();
-      disarmBudget = () => clearTimeout(timer);
-    });
-
-    try {
-      const entries = await Promise.race([upstream.listModels(), budget]);
-      disarmBudget?.();
-      // The wholesale swap — a successful discovery replaces the slice
-      // atomically (the store freezes its own copy).
-      deps.metadata.set(upstream.id, entries);
-      log.info({ upstreamId: upstream.id, count: entries.length }, "upstream discovery finished");
-      return new Response(JSON.stringify({ upstream: upstream.id, ok: true }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    } catch (error) {
-      disarmBudget?.();
-      // Retain-last-good: the store is untouched, so the last good snapshot
-      // keeps serving alias metadata; the log-safe failure fact is the
-      // report's `reason` — data, never an HTTP error.
-      const reason = timedOut
-        ? `no answer within the probe budget (${timeoutMs}ms)`
-        : error instanceof Error
-          ? error.message
-          : String(error);
-      log.warn(
-        { upstreamId: upstream.id, timedOut, reason },
-        "upstream discovery failed — last good metadata retained",
-      );
-      return new Response(JSON.stringify({ upstream: upstream.id, ok: false, reason }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }
-  };
-}
-
-/** All six upstream CRUD mounts, wired to one deps object — the app mounts
+/** All five upstream CRUD mounts, wired to one deps object — the app mounts
  * them as a single management-CRUD block (ADR-014 D2). */
 export function upstreamManagementHandlers(deps: UpstreamManagementDeps): {
   list: Handler<GatewayEnv>;
@@ -378,7 +301,6 @@ export function upstreamManagementHandlers(deps: UpstreamManagementDeps): {
   create: Handler<GatewayEnv>;
   update: Handler<GatewayEnv>;
   remove: Handler<GatewayEnv>;
-  discover: Handler<GatewayEnv>;
 } {
   return {
     list: handleListUpstreams(deps),
@@ -386,6 +308,5 @@ export function upstreamManagementHandlers(deps: UpstreamManagementDeps): {
     create: handleCreateUpstream(deps),
     update: handleUpdateUpstream(deps),
     remove: handleDeleteUpstream(deps),
-    discover: handleUpstreamDiscover(deps),
   };
 }

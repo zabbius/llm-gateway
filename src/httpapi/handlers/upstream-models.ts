@@ -1,16 +1,23 @@
 /**
  * `GET /api/upstreams/:id/models` — the management surface's
- * operator-triggered live upstream listing (ADR-011, specs/contracts/gateway-management.md):
- * it invokes `listModels()` on the named upstream through the interface
- * and answers `200` with the provider-native catalog:
- * `{ upstream, models, fetchedAt }`.
+ * operator-triggered live upstream listing (ADR-011 as amended by ADR-016,
+ * specs/contracts/gateway-management.md): it invokes `listModels()` on the
+ * named upstream through the interface and answers `200` with the
+ * provider-native catalog: `{ upstream, models, fetchedAt }`.
+ *
+ * `?discover=1` (ADR-016) folds the former standalone discover mount into
+ * this listing: the fetched catalog swaps the upstream's alias-metadata
+ * slice wholesale before the answer — an empty listing included ("provider
+ * lists zero models" is a fact); a failed listing or an expired budget
+ * leaves the last good snapshot serving (retain-last-good) and surfaces as
+ * this endpoint's own `502` envelope. Without the parameter the endpoint
+ * is a pure read — nothing mutates.
  *
  * This is one of the enumerated exceptions to the management reads'
  * in-memory rule (ADR-011): the sanctioned request-time upstream contacts
- * on `/api/*` are this listing, the discover mount, and the CRUD
- * create/update blocking probes (ADR-014 D4/D8) — every other read
- * (`GET /api/status`, the CRUD lists) and both auth actions stay strictly
- * in-memory, and nothing here mutates gateway state.
+ * on `/api/*` are this listing and the CRUD create/update blocking probes
+ * (ADR-014 D8) — every other read (`GET /api/status`, the CRUD lists)
+ * and both auth actions stay strictly in-memory.
  * The budget is the startup probe budget: an operator refresh must not hang
  * for the forward budget a completions relay may legitimately take. Any
  * failure — a `listModels()` rejection or the budget expiring — is the `502`
@@ -29,6 +36,7 @@ import type pino from "pino";
 import type { Handler } from "hono";
 import type { UpstreamRegistry } from "../../upstreams/registry.ts";
 import type { GatewayEnv } from "../../gateway/router.ts";
+import type { MetadataStore } from "../../gateway/metastore.ts";
 import { notFoundResponse, upstreamErrorResponse } from "../errors.ts";
 
 /**
@@ -43,6 +51,7 @@ export const UPSTREAM_MODELS_TIMEOUT_MS = 10_000;
 
 export function handleUpstreamModels(
   registry: UpstreamRegistry,
+  metadata: MetadataStore,
   logger: pino.Logger,
   timeoutMs: number = UPSTREAM_MODELS_TIMEOUT_MS,
 ): Handler<GatewayEnv> {
@@ -60,6 +69,10 @@ export function handleUpstreamModels(
       return notFoundResponse(`Upstream '${id}' is not configured`);
     }
     c.set("upstreamId", upstream.id);
+
+    // `?discover=1` (ADR-016): the fetched catalog swaps the metadata slice
+    // before the answer. Any other value — the pure ADR-011 read.
+    const discover = c.req.query("discover") === "1";
 
     // The probe-budget race: the answer must arrive within the budget or the
     // operator gets the 502 envelope — the underlying listModels() fetch (its
@@ -79,6 +92,17 @@ export function handleUpstreamModels(
       const models = await Promise.race([upstream.listModels(), budget]);
       disarmBudget?.();
 
+      if (discover) {
+        // The wholesale swap — a successful listing replaces the slice
+        // atomically (the store freezes its own copy), an empty listing
+        // included ("provider lists zero models" is a fact, ADR-016).
+        metadata.set(upstream.id, models);
+        log.info(
+          { upstreamId: upstream.id, count: models.length },
+          "live listing with discover=1 — metadata slice swapped",
+        );
+      }
+
       log.debug({ upstreamId: upstream.id, count: models.length }, "live model list fetched");
       const body = JSON.stringify({ upstream: upstream.id, models, fetchedAt: new Date().toISOString() });
       return new Response(body, {
@@ -90,7 +114,9 @@ export function handleUpstreamModels(
       // A failed live listing is an expected outcome (a degraded upstream is
       // exactly what an operator probes for): logged at warn — never thrown
       // into the app's error middleware — and answered as the contract's 502
-      // envelope (ADR-011). The reason is the upstream interface's log-safe
+      // envelope (ADR-011). With `discover=1` the store is untouched here —
+      // retain-last-good keeps the last good snapshot serving (ADR-016).
+      // The reason is the upstream interface's log-safe
       // rejection fact (upstream-contract.md): no credential material.
       const reason = timedOut
         ? `no answer within the probe budget (${timeoutMs}ms)`

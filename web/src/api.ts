@@ -4,9 +4,9 @@
  * only gateway calls the SPA makes: the slim session-gated mount probe
  * (`GET /api/status`, ADR-014 D3), the three CRUD collections (upstreams,
  * model aliases, clients), the operator-triggered live model listing
- * (`GET /api/upstreams/:id/models`, ADR-011), the per-upstream discover run
- * (`POST /api/upstreams/:id/discover`, ADR-014 D4), plus the auth actions
- * (`POST /api/login`, `POST /api/logout`, ADR-007).
+ * (`GET /api/upstreams/:id/models`, ADR-011 as amended by ADR-016 —
+ * `?discover=1` folds the metadata-slice swap into the listing), plus the
+ * auth actions (`POST /api/login`, `POST /api/logout`, ADR-007).
  *
  * Response shapes mirror the wire contract; the session cookie is HttpOnly
  * and carried by same-origin fetches automatically; error responses use the
@@ -39,7 +39,7 @@ export interface GatewayStatus {
 
 /* ------------------------------------------------------------------ *
  * Upstreams collection — GET/POST /api/upstreams,
- * GET/PUT/DELETE /api/upstreams/:id, POST /api/upstreams/:id/discover.
+ * GET/PUT/DELETE /api/upstreams/:id.
  * ------------------------------------------------------------------ */
 
 /**
@@ -101,17 +101,6 @@ export interface UpstreamWriteRequest {
 /** The `DELETE /api/upstreams/:id` answer. */
 export interface UpstreamDeleteResponse {
   readonly deleted: string;
-}
-
-/**
- * One upstream's discover verdict (`POST /api/upstreams/:id/discover`,
- * ADR-014 D4) — always `200` data-not-error: `reason` exists only when `ok`
- * is false; an unknown id answers the `404` envelope before any contact.
- */
-export interface DiscoverResult {
-  readonly upstream: string;
-  readonly ok: boolean;
-  readonly reason?: string;
 }
 
 /* ------------------------------------------------------------------ *
@@ -372,26 +361,21 @@ export function deleteUpstream(id: string): Promise<UpstreamDeleteResponse> {
 }
 
 /**
- * Discover exactly one upstream (`POST /api/upstreams/:id/discover`,
- * ADR-014 D4): one listing within the probe budget, no retries, the fresh
- * catalog swaps the metadata slice wholesale (retain-last-good). Always
- * `200` — the verdict's `reason` carries a failure; a `404` (unknown id)
- * throws ApiFetchError before any upstream contact. A `401` follows the
- * shared login-card flow.
- */
-export function discoverUpstream(id: string): Promise<DiscoverResult> {
-  return send<DiscoverResult>("POST", `/api/upstreams/${encodeURIComponent(id)}/discover`, {});
-}
-
-/**
  * Fetch an upstream's live model list (`GET /api/upstreams/:id/models`,
- * ADR-011) — one of the boundary's operator-triggered request-time upstream
- * contacts, triggered only by this explicit call. A `404` (unknown id) or
- * `502` (upstream failure, probe budget expiry) throws ApiFetchError with
- * the envelope's message; a `401` follows the shared login-card flow.
+ * ADR-011 as amended by ADR-016) — one of the boundary's operator-triggered
+ * request-time upstream contacts, triggered only by this explicit call.
+ * With `discover: true` the fetched catalog swaps the upstream's metadata
+ * slice wholesale before the answer (retain-last-good on failure — the
+ * merged former discover mount). A `404` (unknown id) or `502` (upstream
+ * failure, probe budget expiry) throws ApiFetchError with the envelope's
+ * message; a `401` follows the shared login-card flow.
  */
-export function fetchUpstreamModels(id: string): Promise<UpstreamModels> {
-  return request<UpstreamModels>(`/api/upstreams/${encodeURIComponent(id)}/models`);
+export function fetchUpstreamModels(
+  id: string,
+  opts?: { readonly discover?: boolean },
+): Promise<UpstreamModels> {
+  const suffix = opts?.discover === true ? "?discover=1" : "";
+  return request<UpstreamModels>(`/api/upstreams/${encodeURIComponent(id)}/models${suffix}`);
 }
 
 /** Every configured alias entry with its metadata aggregate (`GET /api/models`). */

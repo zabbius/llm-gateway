@@ -159,7 +159,7 @@ One alias's client-facing metadata is aggregated, not stored: every route's raw 
 Discovery model (where the snapshots come from):
 
 - at startup, after the registry's probes resolve, every ok probe's retained catalog seeds that upstream's snapshot (discovery at start); failed probes — and ok probes whose upstream retains no catalog — seed nothing;
-- the operator refreshes one upstream's snapshot on demand through `POST /api/upstreams/:id/discover` — one `listModels()` within the startup probe budget, no retries ([ADR-014](../decisions/014-runtime-management-crud.md) D4, the discovery runs' replacement; [gateway-management.md](../contracts/gateway-management.md)): a success swaps the slice wholesale, a failure or expired budget leaves the last good snapshot serving (retain-last-good), and the always-`200` report `{ upstream, ok, reason? }` carries the log-safe outcome as data;
+- the operator refreshes one upstream's snapshot on demand through the live listing's `discover=1` query parameter — `GET /api/upstreams/:id/models?discover=1`, one `listModels()` within the startup probe budget, no retries ([ADR-011](../decisions/011-management-live-model-listing.md) as amended by [ADR-016](../decisions/016-discover-folded-into-live-listing.md); [gateway-management.md](../contracts/gateway-management.md)): a success swaps the slice wholesale before the answer, a failure or expired budget leaves the last good snapshot serving (retain-last-good) and surfaces as the listing's `502` envelope;
 - the management CRUD's upstream writes keep the slices honest without an operator round: a create/update whose blocking probe succeeded with a retained catalog seeds the fresh slice; anything else — a failed probe, no retained catalog, a delete — clears it ([ADR-014](../decisions/014-runtime-management-crud.md) D8);
 - an on-demand refresh replaces an upstream's snapshot wholesale when it succeeds; an empty listing is a fact, not a failure ("provider lists zero models"); a failed refresh never touches the store: the last good snapshot keeps serving, so a broken re-discovery cannot degrade alias metadata.
 
@@ -173,13 +173,13 @@ Client-facing projection (where the aggregate surfaces — both folds run per re
 
 - the alias catalog (`GET /llm/v1/models`, `src/httpapi/handlers/models.ts`): an entry whose alias has a known context window gains `limit: { context, output }` — `context` positive, `output` `0` when the output limit is not declared (the c0wrk wire contract's "0 == undeclared"); the `capabilities` (`tools.supported` ← tool-call flag, `reasoning.supported` ← reasoning flag, `temperature` verbatim) + `modalities` (`input`: `["text"]`, plus `"image/png"` when image input is declared) pair appears only on the full four-flag declaration the strict AND yields. An alias without any known metadata serializes byte-for-byte as the bare four-key OpenAI entry ([client-gateway.md](../contracts/client-gateway.md));
 - the management surface (`GET /api/models` and its single-entry read, `src/httpapi/handlers/model-aliases.ts`): every managed alias entry carries `meta` — `{ contextWindow, outputLimit, capabilities }` with JSON `null` where the aggregate is unknown and the strict-AND four-flag object verbatim where it is declared ([gateway-management.md](../contracts/gateway-management.md));
-- both folds read the store's *current* slice against the store's current `models` block — a successful discover run (or a CRUD write whose blocking probe retained a catalog) is visible on the next read; a failed one changes nothing (retain-last-good).
+- both folds read the store's *current* slice against the store's current `models` block — a successful `discover=1` listing (or a CRUD write whose blocking probe retained a catalog) is visible on the next read; a failed one changes nothing (retain-last-good).
 
 ```
 store.seed(registry.status())                    (startup, after the probes resolve)
   └ ok probe with a retained catalog → the upstream's initial snapshot
-POST /api/upstreams/:id/discover ── success ── set(id, listing) → wholesale swap (frozen)
-                                └── failed ─── store untouched (retain-last-good)
+GET /api/upstreams/:id/models?discover=1 ── success ── set(id, listing) → wholesale swap (frozen)
+                                        └── failed ─── store untouched (retain-last-good)
 upstream CRUD write ── probe ok + retained catalog ── set(id, catalog)
                  └── otherwise (failed probe, delete) ── clear(id)
 buildAliasMetadata(models, store)                (pure, frozen output)

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; the discover-mount aspects superseded by [ADR-016](./016-discover-folded-into-live-listing.md)
 
 ## Context
 

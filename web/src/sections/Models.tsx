@@ -24,8 +24,8 @@
  * (ADR-011 semantics — fired only by the operator opening the select,
  * never on mount or form open), and picking a listed id sets the field; a
  * stored value renders as a plain option — the field never annotates it
- * with catalog provenance. The per-upstream live catalogs and discover
- * runs live on the Upstreams section.
+ * with catalog provenance. The per-upstream live catalogs live on the
+ * Upstreams section.
  */
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
@@ -576,8 +576,8 @@ export function ModelsSection(): ReactNode {
         Every configured alias with its effective token budgets and capability
         badges, in config order — create, edit, or delete; changes rebuild the
         routing table and hot-apply without a restart (a deleted alias answers
-        404 on the next request). The per-upstream live catalogs and discover
-        runs live on the Upstreams section.
+        404 on the next request). The per-upstream live catalogs live on the
+        Upstreams section.
       </p>
 
       {/* Page-level failures (refresh, delete) — submit errors render inside the editor modal. */}

@@ -33,7 +33,7 @@ specs/
 │   │   └── openai-compatible.md    MVP upstream: pure proxy to an OpenAI-compatible provider API
 │   ├── routing.md                  alias routing, client-scoped model catalog, dispatch, startup route inventory
 │   ├── load-balancing.md           route selection strategies, in-memory route health, session affinity, failover
-│   ├── model-metadata.md           per-alias limits/capabilities: detection, aggregation, discover mount, CRUD probes
+│   ├── model-metadata.md           per-alias limits/capabilities: detection, aggregation, the listing's discover=1 swap, CRUD probes
 │   ├── configuration.md            config file location, JSON schema, startup validation, the runtime store's write-back
 │   ├── observability.md            leveled pino logging to stderr
 │   ├── frontend.md                 SPA shell (React + Bootstrap), /ui/* client-side routing + management sections
@@ -59,7 +59,9 @@ specs/
     ├── 011-management-live-model-listing.md operator-triggered live model listing on the management surface
     ├── 012-alias-model-metadata.md         alias model metadata: c0wrk detector port, discovery, advisory-only
     ├── 013-openapi-docs-surface.md         the /docs surface: build-time OpenAPI artifact + Swagger UI shell
-    └── 014-runtime-management-crud.md      runtime management CRUD on /api: write-back, hot apply, discover
+    ├── 014-runtime-management-crud.md      runtime management CRUD on /api: write-back, hot apply, discover
+    ├── 015-adopt-react-bootstrap.md         react-bootstrap as the SPA component layer, the shared ConfirmModal
+    └── 016-discover-folded-into-live-listing.md discover folded into the live listing (discover=1)
 ```
 
 This tree is the canonical layout of the spec system: every spec file under `specs/` lands at the path shown here.
