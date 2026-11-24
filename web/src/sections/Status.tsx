@@ -55,10 +55,11 @@ export function StatusSection(): ReactNode {
           type="button"
           variant="outline-secondary"
           size="sm"
+          className="d-inline-flex align-items-center gap-1"
           onClick={() => void refresh()}
           disabled={loading}
         >
-          <RefreshCw aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+          <RefreshCw aria-hidden="true" size={14} />
           Refresh
         </Button>
       </div>

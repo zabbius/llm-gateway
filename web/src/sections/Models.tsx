@@ -324,20 +324,22 @@ function AliasTable({
                   type="button"
                   variant="outline-secondary"
                   size="sm"
+                  className="d-inline-flex align-items-center gap-1"
                   onClick={() => onEdit(entry)}
                   disabled={locked}
                 >
-                  <Pencil aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+                  <Pencil aria-hidden="true" size={14} />
                   Edit
                 </Button>
                 <Button
                   type="button"
                   variant="outline-danger"
                   size="sm"
+                  className="d-inline-flex align-items-center gap-1"
                   onClick={() => onDelete(entry)}
                   disabled={locked}
                 >
-                  <Trash2 aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+                  <Trash2 aria-hidden="true" size={14} />
                   Delete
                 </Button>
               </span>
@@ -542,18 +544,26 @@ export function ModelsSection(): ReactNode {
           Models
         </h1>
         <span className="d-flex align-items-center gap-2">
-          <Button type="button" variant="primary" size="sm" onClick={openCreate} disabled={editor !== null}>
-            <Plus aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+          <Button
+            type="button"
+            variant="primary"
+            size="sm"
+            className="d-inline-flex align-items-center gap-1"
+            onClick={openCreate}
+            disabled={editor !== null}
+          >
+            <Plus aria-hidden="true" size={14} />
             Add alias
           </Button>
           <Button
             type="button"
             variant="outline-secondary"
             size="sm"
+            className="d-inline-flex align-items-center gap-1"
             onClick={() => void refresh()}
             disabled={loading || editor !== null}
           >
-            <RefreshCw aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+            <RefreshCw aria-hidden="true" size={14} />
             Refresh
           </Button>
         </span>
@@ -697,20 +707,22 @@ export function ModelsSection(): ReactNode {
                         />
                       </Form.Group>
                       <div className="col-md-2">
-                        {/* the control-only column: the full-size button
-                            matches the selects' height, so the row's shared
-                            bottom alignment centers it on their centers */}
+                        {/* the control-only column: the row's bottom
+                            alignment pins the button to the selects'
+                            bottoms; mb-1 (4px) lifts it by half the 7px
+                            btn-sm height gap so its center stays on theirs */}
                         <Button
                           type="button"
                           variant="outline-danger"
-                          className="w-100"
+                          size="sm"
+                          className="d-inline-flex align-items-center gap-1 mb-1"
                           onClick={() =>
                             setForm({ ...form, routes: form.routes.filter((_, i) => i !== index) })
                           }
                           disabled={form.routes.length === 1}
                           title={form.routes.length === 1 ? "At least one route is required" : "Remove route"}
                         >
-                          <Trash2 aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+                          <Trash2 aria-hidden="true" size={14} />
                           Remove
                         </Button>
                       </div>
@@ -726,10 +738,10 @@ export function ModelsSection(): ReactNode {
               type="button"
               variant="outline-secondary"
               size="sm"
-              className="mt-2"
+              className="mt-2 d-inline-flex align-items-center gap-1"
               onClick={() => setForm({ ...form, routes: [...form.routes, emptyRoute()] })}
             >
-              <Plus aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+              <Plus aria-hidden="true" size={14} />
               Add route
             </Button>
             {upstreams.length === 0 && (
@@ -765,13 +777,24 @@ export function ModelsSection(): ReactNode {
             </div>
 
             <div className="d-flex gap-2 mt-3">
-              <Button type="submit" variant="primary" disabled={busy}>
-                {busy && <Spinner as="span" animation="border" size="sm" className="me-2" aria-hidden="true" />}
-                {editing ? <Save aria-hidden="true" className="me-1 align-text-bottom" size={16} /> : <Plus aria-hidden="true" className="me-1 align-text-bottom" size={16} />}
+              <Button
+                type="submit"
+                variant="primary"
+                className="d-inline-flex align-items-center gap-1"
+                disabled={busy}
+              >
+                {busy && <Spinner as="span" animation="border" size="sm" aria-hidden="true" />}
+                {editing ? <Save aria-hidden="true" size={16} /> : <Plus aria-hidden="true" size={16} />}
                 {editing ? "Save" : "Create"}
               </Button>
-              <Button type="button" variant="outline-secondary" onClick={close} disabled={busy}>
-                <X aria-hidden="true" className="me-1 align-text-bottom" size={16} />
+              <Button
+                type="button"
+                variant="outline-secondary"
+                className="d-inline-flex align-items-center gap-1"
+                onClick={close}
+                disabled={busy}
+              >
+                <X aria-hidden="true" size={16} />
                 Cancel
               </Button>
             </div>

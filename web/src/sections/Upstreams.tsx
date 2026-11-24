@@ -140,7 +140,7 @@ function CopyableModelId({ id }: { id: string }): ReactNode {
       onClick={() => void copy()}
       title={`Copy model id "${id}"`}
     >
-      <Copy aria-hidden="true" className="me-1 align-text-bottom" size={12} />
+      <Copy aria-hidden="true" className="me-1 align-middle" size={12} />
       <code>{copied ? "copied ✓" : id}</code>
     </Button>
   );
@@ -236,22 +236,24 @@ function UpstreamCard({
             type="button"
             variant="outline-secondary"
             size="sm"
+            className="d-inline-flex align-items-center gap-1"
             onClick={() => onDiscover(upstream.id)}
             disabled={discovering}
           >
-            {discovering && <Spinner as="span" size="sm" className="me-2" aria-hidden="true" />}
-            <Search aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+            {discovering && <Spinner as="span" size="sm" aria-hidden="true" />}
+            <Search aria-hidden="true" size={14} />
             Discover
           </Button>
           <Button
             type="button"
             variant="outline-primary"
             size="sm"
+            className="d-inline-flex align-items-center gap-1"
             onClick={() => onLoad(upstream.id)}
             disabled={loading}
           >
-            {loading && <Spinner as="span" size="sm" className="me-2" aria-hidden="true" />}
-            <Download aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+            {loading && <Spinner as="span" size="sm" aria-hidden="true" />}
+            <Download aria-hidden="true" size={14} />
             {listing.kind === "loaded" ? "Reload models" : "Load models"}
           </Button>
         </span>
@@ -467,20 +469,22 @@ export function UpstreamsSection(): ReactNode {
             type="button"
             variant="primary"
             size="sm"
+            className="d-inline-flex align-items-center gap-1"
             onClick={openCreate}
             disabled={editor !== null}
           >
-            <Plus aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+            <Plus aria-hidden="true" size={14} />
             Add upstream
           </Button>
           <Button
             type="button"
             variant="outline-secondary"
             size="sm"
+            className="d-inline-flex align-items-center gap-1"
             onClick={() => void refresh()}
             disabled={loading || editor !== null}
           >
-            <RefreshCw aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+            <RefreshCw aria-hidden="true" size={14} />
             Refresh
           </Button>
         </span>
@@ -553,20 +557,22 @@ export function UpstreamsSection(): ReactNode {
                         type="button"
                         variant="outline-secondary"
                         size="sm"
+                        className="d-inline-flex align-items-center gap-1"
                         onClick={() => openEdit(upstream)}
                         disabled={editor !== null}
                       >
-                        <Pencil aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+                        <Pencil aria-hidden="true" size={14} />
                         Edit
                       </Button>
                       <Button
                         type="button"
                         variant="outline-danger"
                         size="sm"
+                        className="d-inline-flex align-items-center gap-1"
                         onClick={() => remove(upstream)}
                         disabled={busy || editor !== null}
                       >
-                        <Trash2 aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+                        <Trash2 aria-hidden="true" size={14} />
                         Delete
                       </Button>
                     </span>
@@ -669,13 +675,24 @@ export function UpstreamsSection(): ReactNode {
               </Form.Group>
             </div>
             <div className="d-flex gap-2 mt-3">
-              <Button type="submit" variant="primary" disabled={busy}>
-                {busy && <Spinner as="span" size="sm" className="me-2" aria-hidden="true" />}
-                {editing ? <Save aria-hidden="true" className="me-1 align-text-bottom" size={16} /> : <Plus aria-hidden="true" className="me-1 align-text-bottom" size={16} />}
+              <Button
+                type="submit"
+                variant="primary"
+                className="d-inline-flex align-items-center gap-1"
+                disabled={busy}
+              >
+                {busy && <Spinner as="span" size="sm" aria-hidden="true" />}
+                {editing ? <Save aria-hidden="true" size={16} /> : <Plus aria-hidden="true" size={16} />}
                 {editing ? "Save" : "Create"}
               </Button>
-              <Button type="button" variant="outline-secondary" onClick={close} disabled={busy}>
-                <X aria-hidden="true" className="me-1 align-text-bottom" size={16} />
+              <Button
+                type="button"
+                variant="outline-secondary"
+                className="d-inline-flex align-items-center gap-1"
+                onClick={close}
+                disabled={busy}
+              >
+                <X aria-hidden="true" size={16} />
                 Cancel
               </Button>
             </div>

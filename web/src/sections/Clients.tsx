@@ -178,20 +178,22 @@ export function ClientsSection(): ReactNode {
             type="button"
             variant="primary"
             size="sm"
+            className="d-inline-flex align-items-center gap-1"
             onClick={openCreate}
             disabled={editor !== null}
           >
-            <Plus aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+            <Plus aria-hidden="true" size={14} />
             Add client
           </Button>
           <Button
             type="button"
             variant="outline-secondary"
             size="sm"
+            className="d-inline-flex align-items-center gap-1"
             onClick={() => void refresh()}
             disabled={loading || editor !== null}
           >
-            <RefreshCw aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+            <RefreshCw aria-hidden="true" size={14} />
             Refresh
           </Button>
         </span>
@@ -247,20 +249,22 @@ export function ClientsSection(): ReactNode {
                         type="button"
                         variant="outline-secondary"
                         size="sm"
+                        className="d-inline-flex align-items-center gap-1"
                         onClick={() => openEdit(client)}
                         disabled={editor !== null}
                       >
-                        <Pencil aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+                        <Pencil aria-hidden="true" size={14} />
                         Edit
                       </Button>
                       <Button
                         type="button"
                         variant="outline-danger"
                         size="sm"
+                        className="d-inline-flex align-items-center gap-1"
                         onClick={() => requestRemove(client)}
                         disabled={busy || editor !== null}
                       >
-                        <Trash2 aria-hidden="true" className="me-1 align-text-bottom" size={14} />
+                        <Trash2 aria-hidden="true" size={14} />
                         Delete
                       </Button>
                     </span>
@@ -346,14 +350,21 @@ export function ClientsSection(): ReactNode {
               <Button
                 variant="primary"
                 type="submit"
+                className="d-inline-flex align-items-center gap-1"
                 disabled={busy || form.models.length === 0 || (!editing && (form.name.trim() === "" || form.apiKey === ""))}
               >
-                {busy && <Spinner as="span" animation="border" size="sm" className="me-2" aria-hidden="true" />}
-                {editing ? <Save aria-hidden="true" className="me-1 align-text-bottom" size={16} /> : <Plus aria-hidden="true" className="me-1 align-text-bottom" size={16} />}
+                {busy && <Spinner as="span" animation="border" size="sm" aria-hidden="true" />}
+                {editing ? <Save aria-hidden="true" size={16} /> : <Plus aria-hidden="true" size={16} />}
                 {editing ? "Save" : "Create"}
               </Button>
-              <Button variant="outline-secondary" type="button" onClick={close} disabled={busy}>
-                <X aria-hidden="true" className="me-1 align-text-bottom" size={16} />
+              <Button
+                variant="outline-secondary"
+                type="button"
+                className="d-inline-flex align-items-center gap-1"
+                onClick={close}
+                disabled={busy}
+              >
+                <X aria-hidden="true" size={16} />
                 Cancel
               </Button>
             </div>
