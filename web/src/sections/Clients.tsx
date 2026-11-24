@@ -5,7 +5,10 @@
  * alias ACL) plus create / edit / delete. Every mutation hot-applies into
  * the gate's digest registry — the very next `/llm/v1` request sees it.
  *
- * The form is inline (below the table): the ACL is a multi-select fed by
+ * The form is a modal pop-up over the table (the shared EditorModal; the
+ * static backdrop and the disabled Esc keep a typed editing session —
+ * closing is explicit via Cancel or the header close button): the ACL is
+ * a multi-select fed by
  * the configured aliases (`GET /api/models`); the key field is never
  * pre-filled — an empty `apiKey` is omitted from the request body, which
  * the boundary reads as "keep the stored credential" (ADR-014 D7; sending
@@ -19,8 +22,8 @@
  * this collection).
  */
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { Pencil, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
-import { Alert, Button, Card, Form, Spinner, Table } from "react-bootstrap";
+import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Alert, Button, Form, Spinner, Table } from "react-bootstrap";
 import {
   CONFIGURED_MASK,
   createClient,
@@ -32,6 +35,7 @@ import {
   type ClientWriteRequest,
 } from "../api.ts";
 import { ConfirmModal, type ConfirmDialog } from "../ui/ConfirmModal.tsx";
+import { EditorModal } from "../ui/EditorModal.tsx";
 
 /** One open editor: `null` = closed, `NEW` = create, otherwise the name being edited. */
 const NEW_CLIENT = Symbol("new");
@@ -204,7 +208,8 @@ export function ClientsSection(): ReactNode {
         restart (a deleted key answers 401 on the next request).
       </p>
 
-      {error !== null && <Alert variant="danger">{error}</Alert>}
+      {/* Page-level failures (refresh, delete) — submit errors render inside the editor modal. */}
+      {editor === null && error !== null && <Alert variant="danger">{error}</Alert>}
 
       {loading && (
         <div className="d-flex justify-content-center py-5" role="status">
@@ -276,105 +281,86 @@ export function ClientsSection(): ReactNode {
         )
       )}
 
-      {editor !== null && (
-        <Card as="form" className="mt-3" onSubmit={submit}>
-          <Card.Body>
-            <Card.Title as="h2" className="h5">
-              {editing ? `Edit client ${editor}` : "Add client"}
-            </Card.Title>
-            <div className="row g-3">
-              <Form.Group className="col-md-4" controlId="client-name">
-                <Form.Label>name</Form.Label>
-                <Form.Control
-                  value={form.name}
-                  onChange={(event) => setForm({ ...form, name: event.target.value })}
-                  disabled={editing}
-                  required={!editing}
-                />
-                {editing && (
-                  <Form.Text as="div">The name is immutable — the path parameter owns it.</Form.Text>
-                )}
-              </Form.Group>
-              <Form.Group className="col-md-4" controlId="client-api-key">
-                <Form.Label>
-                  apiKey {editing && <span className="text-body-secondary">(пусто = не менять)</span>}
-                </Form.Label>
-                <Form.Control
-                  type="password"
-                  autoComplete="new-password"
-                  value={form.apiKey}
-                  onChange={(event) => setForm({ ...form, apiKey: event.target.value })}
-                  required={!editing}
-                  placeholder={editing ? `пусто = не менять (сейчас ${CONFIGURED_MASK})` : "client Bearer key"}
-                />
+      {/* The create/edit editor — the shared EditorModal shell over the table. */}
+      <EditorModal
+        show={editor !== null}
+        title={editing ? `Edit client ${editor}` : "Add client"}
+        editing={editing}
+        busy={busy}
+        submitDisabled={form.models.length === 0 || (!editing && (form.name.trim() === "" || form.apiKey === ""))}
+        onClose={close}
+        onSubmit={submit}
+      >
+          {error !== null && <Alert variant="danger">{error}</Alert>}
+          <div className="row g-3">
+            <Form.Group className="col-md-4" controlId="client-name">
+              <Form.Label>name</Form.Label>
+              <Form.Control
+                value={form.name}
+                onChange={(event) => setForm({ ...form, name: event.target.value })}
+                disabled={editing}
+                required={!editing}
+              />
+              {editing && (
+                <Form.Text as="div">The name is immutable — the path parameter owns it.</Form.Text>
+              )}
+            </Form.Group>
+            <Form.Group className="col-md-4" controlId="client-api-key">
+              <Form.Label>
+                apiKey {editing && <span className="text-body-secondary">(пусто = не менять)</span>}
+              </Form.Label>
+              <Form.Control
+                type="password"
+                autoComplete="new-password"
+                value={form.apiKey}
+                onChange={(event) => setForm({ ...form, apiKey: event.target.value })}
+                required={!editing}
+                placeholder={editing ? `пусто = не менять (сейчас ${CONFIGURED_MASK})` : "client Bearer key"}
+              />
+              <Form.Text as="div">
+                {editing
+                  ? "Leave empty to keep the stored key — the stored value is never served back."
+                  : "Required on create; stored once, served back only as the mask."}
+              </Form.Text>
+            </Form.Group>
+            <Form.Group className="col-md-4" controlId="client-models">
+              <Form.Label>models (ACL)</Form.Label>
+              {aliases.length === 0 ? (
                 <Form.Text as="div">
-                  {editing
-                    ? "Leave empty to keep the stored key — the stored value is never served back."
-                    : "Required on create; stored once, served back only as the mask."}
+                  No aliases configured — create one under Models first; the ACL must name
+                  existing aliases.
                 </Form.Text>
-              </Form.Group>
-              <Form.Group className="col-md-4" controlId="client-models">
-                <Form.Label>models (ACL)</Form.Label>
-                {aliases.length === 0 ? (
-                  <Form.Text as="div">
-                    No aliases configured — create one under Models first; the ACL must name
-                    existing aliases.
-                  </Form.Text>
-                ) : (
-                  <div
-                    id="client-models"
-                    className="border rounded p-2 d-flex flex-column gap-1"
-                    style={{ maxHeight: "12rem", overflowY: "auto" }}
-                    role="group"
-                    aria-label="Allowed aliases"
-                  >
-                    {aliases.map((alias, index) => (
-                      <Form.Check
-                        key={alias}
-                        id={`client-models-${index}`}
-                        inline
-                        className="mb-0 small"
-                        checked={form.models.includes(alias)}
-                        onChange={(event) => toggleModel(alias, event.target.checked)}
-                        label={<code>{alias}</code>}
-                      />
-                    ))}
-                  </div>
-                )}
-                <Form.Text as="div">
-                  The aliases this client may request — at least one, each an existing alias.
-                </Form.Text>
-              </Form.Group>
-            </div>
-            <div className="d-flex gap-2 mt-3">
-              <Button
-                variant="primary"
-                type="submit"
-                className="d-inline-flex align-items-center gap-1"
-                disabled={busy || form.models.length === 0 || (!editing && (form.name.trim() === "" || form.apiKey === ""))}
-              >
-                {busy && <Spinner as="span" animation="border" size="sm" aria-hidden="true" />}
-                {editing ? <Save aria-hidden="true" size={16} /> : <Plus aria-hidden="true" size={16} />}
-                {editing ? "Save" : "Create"}
-              </Button>
-              <Button
-                variant="outline-secondary"
-                type="button"
-                className="d-inline-flex align-items-center gap-1"
-                onClick={close}
-                disabled={busy}
-              >
-                <X aria-hidden="true" size={16} />
-                Cancel
-              </Button>
-            </div>
-            <p className="form-text mb-0 mt-2">
-              Saving validates and persists to config.json, then hot-applies into the gate —
-              the very next request admits or refuses with the new key set.
-            </p>
-          </Card.Body>
-        </Card>
-      )}
+              ) : (
+                <div
+                  id="client-models"
+                  className="border rounded p-2 d-flex flex-column gap-1"
+                  style={{ maxHeight: "12rem", overflowY: "auto" }}
+                  role="group"
+                  aria-label="Allowed aliases"
+                >
+                  {aliases.map((alias, index) => (
+                    <Form.Check
+                      key={alias}
+                      id={`client-models-${index}`}
+                      inline
+                      className="mb-0 small"
+                      checked={form.models.includes(alias)}
+                      onChange={(event) => toggleModel(alias, event.target.checked)}
+                      label={<code>{alias}</code>}
+                    />
+                  ))}
+                </div>
+              )}
+              <Form.Text as="div">
+                The aliases this client may request — at least one, each an existing alias.
+              </Form.Text>
+            </Form.Group>
+          </div>
+          <p className="form-text mb-0">
+            Saving validates and persists to config.json, then hot-applies into the gate —
+            the very next request admits or refuses with the new key set.
+          </p>
+      </EditorModal>
 
       <ConfirmModal dialog={dialog} onDismiss={() => setDialog(null)} />
     </section>

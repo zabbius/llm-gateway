@@ -5,7 +5,10 @@
  * the aggregated minima over the alias's routes, and the strict-AND
  * capability badges) plus create / edit / delete.
  *
- * The form is inline (below the table): the alias is immutable on edit —
+ * The form is a modal pop-up over the table (the shared EditorModal; the
+ * static backdrop and the disabled Esc keep a typed editing session —
+ * closing is explicit via Cancel or the header close button): the alias is
+ * immutable on edit —
  * the path parameter owns it; routes, balance strategy and limits are
  * replaced wholesale by an update. Client-side checks mirror the store's
  * entry grammar (the alias pattern, at least one route, non-empty
@@ -25,8 +28,8 @@
  * runs live on the Upstreams section.
  */
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { Pencil, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
-import { Alert, Badge, Button, Card, Form, Spinner, Table } from "react-bootstrap";
+import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Alert, Badge, Button, Form, Spinner, Table } from "react-bootstrap";
 import {
   createModel,
   deleteModel,
@@ -41,6 +44,7 @@ import {
   type UpstreamModel,
 } from "../api.ts";
 import { ConfirmModal, type ConfirmDialog } from "../ui/ConfirmModal.tsx";
+import { EditorModal } from "../ui/EditorModal.tsx";
 
 /** The load-balancing strategies an entry's `balance` block may select
  * between — the config grammar's vocabulary (src/config/schema.ts). */
@@ -576,7 +580,8 @@ export function ModelsSection(): ReactNode {
         runs live on the Upstreams section.
       </p>
 
-      {error !== null && <Alert variant="danger">{error}</Alert>}
+      {/* Page-level failures (refresh, delete) — submit errors render inside the editor modal. */}
+      {editor === null && error !== null && <Alert variant="danger">{error}</Alert>}
 
       {loading && (
         <div className="d-flex justify-content-center py-5" role="status">
@@ -593,219 +598,199 @@ export function ModelsSection(): ReactNode {
         )
       )}
 
-      {editor !== null && (
-        <Card as="form" className="mt-3" onSubmit={submit}>
-          <Card.Body>
-            <Card.Title as="h2" className="h5">
-              {editing ? `Edit alias ${editor}` : "Add alias"}
-            </Card.Title>
-            <div className="row g-3">
-              <Form.Group className="col-md-4" controlId="model-alias">
-                <Form.Label>alias</Form.Label>
-                <Form.Control
-                  value={form.alias}
-                  onChange={(event) => setForm({ ...form, alias: event.target.value })}
-                  disabled={editing}
-                  required={!editing}
-                  placeholder="client-facing model id"
-                />
-                {editing ? (
-                  <div className="form-text">The alias is immutable — the path parameter owns it.</div>
-                ) : (
-                  <div className="form-text">No whitespace, no “/” (the upstream-prefix separator); unique.</div>
-                )}
-              </Form.Group>
-              <Form.Group className="col-md-4" controlId="model-strategy">
-                <Form.Label>balance.strategy</Form.Label>
-                <Form.Select
-                  value={form.strategy}
-                  onChange={(event) =>
-                    setForm({ ...form, strategy: event.target.value as BalanceStrategy })
-                  }
-                >
-                  {BALANCE_STRATEGIES.map((strategy) => (
-                    <option key={strategy} value={strategy}>
-                      {strategy}
-                    </option>
-                  ))}
-                </Form.Select>
-                <div className="form-text">
-                  {weighted
-                    ? "Weighted rotation — every route needs a positive integer weight."
-                    : "Routes rotate in config order; weights are not allowed."}
-                </div>
-              </Form.Group>
-            </div>
-
-            <label className="form-label mt-3">routes</label>
-            <div className="d-flex flex-column gap-2">
-              {form.routes.map((route, index) => {
-                const catalog: Catalog =
-                  route.upstream === "" ? IDLE_CATALOG : (catalogs[route.upstream] ?? IDLE_CATALOG);
-                return (
-                  <div key={index}>
-                    <div className="row g-2 align-items-end">
-                      <Form.Group className="col-md-4" controlId={`route-upstream-${index}`}>
-                        <Form.Label className="small text-body-secondary">upstream {index + 1}</Form.Label>
-                        <Form.Select
-                          value={route.upstream}
-                          onChange={(event) =>
-                            // a model belongs to its upstream — switching resets the pick
-                            setForm({
-                              ...form,
-                              routes: form.routes.map((row, i) =>
-                                i === index ? { ...row, upstream: event.target.value, model: "" } : row,
-                              ),
-                            })
-                          }
-                          required
-                        >
-                          <option value="" disabled>
-                            — choose upstream —
-                          </option>
-                          {upstreams.map((upstream) => (
-                            <option key={upstream.id} value={upstream.id}>
-                              {upstream.id}
-                            </option>
-                          ))}
-                        </Form.Select>
-                      </Form.Group>
-                      <Form.Group className="col-md-4" controlId={`route-model-${index}`}>
-                        <Form.Label className="small text-body-secondary">model</Form.Label>
-                        <RouteModelSelect
-                          domId={`route-model-${index}`}
-                          route={route}
-                          catalog={catalog}
-                          onChange={(model) =>
-                            setForm({
-                              ...form,
-                              routes: form.routes.map((row, i) =>
-                                i === index ? { ...row, model } : row,
-                              ),
-                            })
-                          }
-                          onOpen={() => ensureCatalog(route.upstream)}
-                        />
-                      </Form.Group>
-                      <Form.Group className={weighted ? "col-md-2" : "col-md-2 d-none"} controlId={`route-weight-${index}`}>
-                        <Form.Label className="small text-body-secondary">weight</Form.Label>
-                        <Form.Control
-                          type="number"
-                          min={1}
-                          step={1}
-                          value={route.weight}
-                          onChange={(event) =>
-                            setForm({
-                              ...form,
-                              routes: form.routes.map((row, i) =>
-                                i === index ? { ...row, weight: event.target.value } : row,
-                              ),
-                            })
-                          }
-                          required={weighted}
-                          placeholder="w"
-                        />
-                      </Form.Group>
-                      <div className="col-md-2">
-                        {/* the control-only column: the row's bottom
-                            alignment pins the button to the selects'
-                            bottoms; mb-1 (4px) lifts it by half the 7px
-                            btn-sm height gap so its center stays on theirs */}
-                        <Button
-                          type="button"
-                          variant="outline-danger"
-                          size="sm"
-                          className="d-inline-flex align-items-center gap-1 mb-1"
-                          onClick={() =>
-                            setForm({ ...form, routes: form.routes.filter((_, i) => i !== index) })
-                          }
-                          disabled={form.routes.length === 1}
-                          title={form.routes.length === 1 ? "At least one route is required" : "Remove route"}
-                        >
-                          <Trash2 aria-hidden="true" size={14} />
-                          Remove
-                        </Button>
-                      </div>
-                    </div>
-                    {/* the catalog status renders below the row — it moves
-                        only what follows the row, never the row's columns */}
-                    <RouteCatalogStatus catalog={catalog} />
-                  </div>
-                );
-              })}
-            </div>
-            <Button
-              type="button"
-              variant="outline-secondary"
-              size="sm"
-              className="mt-2 d-inline-flex align-items-center gap-1"
-              onClick={() => setForm({ ...form, routes: [...form.routes, emptyRoute()] })}
-            >
-              <Plus aria-hidden="true" size={14} />
-              Add route
-            </Button>
-            {upstreams.length === 0 && (
+      {/* The create/edit editor — the shared EditorModal shell over the table. */}
+      <EditorModal
+        show={editor !== null}
+        title={editing ? `Edit alias ${editor}` : "Add alias"}
+        editing={editing}
+        busy={busy}
+        onClose={close}
+        onSubmit={submit}
+      >
+          {error !== null && <Alert variant="danger">{error}</Alert>}
+          <div className="row g-3">
+            <Form.Group className="col-md-4" controlId="model-alias">
+              <Form.Label>alias</Form.Label>
+              <Form.Control
+                value={form.alias}
+                onChange={(event) => setForm({ ...form, alias: event.target.value })}
+                disabled={editing}
+                required={!editing}
+                placeholder="client-facing model id"
+              />
+              {editing ? (
+                <div className="form-text">The alias is immutable — the path parameter owns it.</div>
+              ) : (
+                <div className="form-text">No whitespace, no “/” (the upstream-prefix separator); unique.</div>
+              )}
+            </Form.Group>
+            <Form.Group className="col-md-4" controlId="model-strategy">
+              <Form.Label>balance.strategy</Form.Label>
+              <Form.Select
+                value={form.strategy}
+                onChange={(event) =>
+                  setForm({ ...form, strategy: event.target.value as BalanceStrategy })
+                }
+              >
+                {BALANCE_STRATEGIES.map((strategy) => (
+                  <option key={strategy} value={strategy}>
+                    {strategy}
+                  </option>
+                ))}
+              </Form.Select>
               <div className="form-text">
-                No upstreams configured — add one under Upstreams first; every route names a configured upstream id.
+                {weighted
+                  ? "Weighted rotation — every route needs a positive integer weight."
+                  : "Routes rotate in config order; weights are not allowed."}
               </div>
-            )}
+            </Form.Group>
+          </div>
 
-            <div className="row g-3 mt-1">
-              <Form.Group className="col-md-3" controlId="model-limits-context">
-                <Form.Label>limits.context</Form.Label>
-                <Form.Control
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={form.context}
-                  onChange={(event) => setForm({ ...form, context: event.target.value })}
-                  placeholder="optional"
-                />
-              </Form.Group>
-              <Form.Group className="col-md-3" controlId="model-limits-output">
-                <Form.Label>limits.output</Form.Label>
-                <Form.Control
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={form.output}
-                  onChange={(event) => setForm({ ...form, output: event.target.value })}
-                  placeholder="optional"
-                />
-                <div className="form-text">Optional manual budgets; both empty = no limits block.</div>
-              </Form.Group>
+          <label className="form-label mt-3">routes</label>
+          <div className="d-flex flex-column gap-2">
+            {form.routes.map((route, index) => {
+              const catalog: Catalog =
+                route.upstream === "" ? IDLE_CATALOG : (catalogs[route.upstream] ?? IDLE_CATALOG);
+              return (
+                <div key={index}>
+                  <div className="row g-2 align-items-end">
+                    <Form.Group className="col-md-4" controlId={`route-upstream-${index}`}>
+                      <Form.Label className="small text-body-secondary">upstream {index + 1}</Form.Label>
+                      <Form.Select
+                        value={route.upstream}
+                        onChange={(event) =>
+                          // a model belongs to its upstream — switching resets the pick
+                          setForm({
+                            ...form,
+                            routes: form.routes.map((row, i) =>
+                              i === index ? { ...row, upstream: event.target.value, model: "" } : row,
+                            ),
+                          })
+                        }
+                        required
+                      >
+                        <option value="" disabled>
+                          — choose upstream —
+                        </option>
+                        {upstreams.map((upstream) => (
+                          <option key={upstream.id} value={upstream.id}>
+                            {upstream.id}
+                          </option>
+                        ))}
+                      </Form.Select>
+                    </Form.Group>
+                    <Form.Group className="col-md-4" controlId={`route-model-${index}`}>
+                      <Form.Label className="small text-body-secondary">model</Form.Label>
+                      <RouteModelSelect
+                        domId={`route-model-${index}`}
+                        route={route}
+                        catalog={catalog}
+                        onChange={(model) =>
+                          setForm({
+                            ...form,
+                            routes: form.routes.map((row, i) =>
+                              i === index ? { ...row, model } : row,
+                            ),
+                          })
+                        }
+                        onOpen={() => ensureCatalog(route.upstream)}
+                      />
+                    </Form.Group>
+                    <Form.Group className={weighted ? "col-md-2" : "col-md-2 d-none"} controlId={`route-weight-${index}`}>
+                      <Form.Label className="small text-body-secondary">weight</Form.Label>
+                      <Form.Control
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={route.weight}
+                        onChange={(event) =>
+                          setForm({
+                            ...form,
+                            routes: form.routes.map((row, i) =>
+                              i === index ? { ...row, weight: event.target.value } : row,
+                            ),
+                          })
+                        }
+                        required={weighted}
+                        placeholder="w"
+                      />
+                    </Form.Group>
+                    <div className="col-md-2">
+                      {/* the control-only column: the row's bottom
+                          alignment pins the button to the selects'
+                          bottoms; mb-1 (4px) lifts it by half the 7px
+                          btn-sm height gap so its center stays on theirs */}
+                      <Button
+                        type="button"
+                        variant="outline-danger"
+                        size="sm"
+                        className="d-inline-flex align-items-center gap-1 mb-1"
+                        onClick={() =>
+                          setForm({ ...form, routes: form.routes.filter((_, i) => i !== index) })
+                        }
+                        disabled={form.routes.length === 1}
+                        title={form.routes.length === 1 ? "At least one route is required" : "Remove route"}
+                      >
+                        <Trash2 aria-hidden="true" size={14} />
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                  {/* the catalog status renders below the row — it moves
+                      only what follows the row, never the row's columns */}
+                  <RouteCatalogStatus catalog={catalog} />
+                </div>
+              );
+            })}
+          </div>
+          <Button
+            type="button"
+            variant="outline-secondary"
+            size="sm"
+            className="mt-2 d-inline-flex align-items-center gap-1"
+            onClick={() => setForm({ ...form, routes: [...form.routes, emptyRoute()] })}
+          >
+            <Plus aria-hidden="true" size={14} />
+            Add route
+          </Button>
+          {upstreams.length === 0 && (
+            <div className="form-text">
+              No upstreams configured — add one under Upstreams first; every route names a configured upstream id.
             </div>
+          )}
 
-            <div className="d-flex gap-2 mt-3">
-              <Button
-                type="submit"
-                variant="primary"
-                className="d-inline-flex align-items-center gap-1"
-                disabled={busy}
-              >
-                {busy && <Spinner as="span" animation="border" size="sm" aria-hidden="true" />}
-                {editing ? <Save aria-hidden="true" size={16} /> : <Plus aria-hidden="true" size={16} />}
-                {editing ? "Save" : "Create"}
-              </Button>
-              <Button
-                type="button"
-                variant="outline-secondary"
-                className="d-inline-flex align-items-center gap-1"
-                onClick={close}
-                disabled={busy}
-              >
-                <X aria-hidden="true" size={16} />
-                Cancel
-              </Button>
-            </div>
-            <p className="form-text mb-0 mt-2">
-              Saving validates and persists to config.json, then hot-applies —
-              update replaces routes, balance and limits wholesale; the alias
-              itself is immutable.
-            </p>
-          </Card.Body>
-        </Card>
-      )}
+          <div className="row g-3 mt-1">
+            <Form.Group className="col-md-3" controlId="model-limits-context">
+              <Form.Label>limits.context</Form.Label>
+              <Form.Control
+                type="number"
+                min={1}
+                step={1}
+                value={form.context}
+                onChange={(event) => setForm({ ...form, context: event.target.value })}
+                placeholder="optional"
+              />
+            </Form.Group>
+            <Form.Group className="col-md-3" controlId="model-limits-output">
+              <Form.Label>limits.output</Form.Label>
+              <Form.Control
+                type="number"
+                min={1}
+                step={1}
+                value={form.output}
+                onChange={(event) => setForm({ ...form, output: event.target.value })}
+                placeholder="optional"
+              />
+              <div className="form-text">Optional manual budgets; both empty = no limits block.</div>
+            </Form.Group>
+          </div>
+
+          <p className="form-text mb-0">
+            Saving validates and persists to config.json, then hot-applies —
+            update replaces routes, balance and limits wholesale; the alias
+            itself is immutable.
+          </p>
+      </EditorModal>
 
       <ConfirmModal dialog={dialog} onDismiss={() => setDialog(null)} />
     </section>

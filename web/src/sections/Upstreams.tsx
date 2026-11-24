@@ -12,7 +12,10 @@
  * successful run swaps the upstream's metadata slice, visible in the
  * Models section's `meta` rows on their next read).
  *
- * The form is inline (below the table): create fills every field, edit
+ * The form is a modal pop-up over the table (the shared EditorModal; the
+ * static backdrop and the disabled Esc keep a typed editing session —
+ * closing is explicit via Cancel or the header close button): create
+ * fills every field, edit
  * disables the immutable id and leaves the key fields empty — an empty
  * `apiKey` is omitted from the request body, which the boundary reads as
  * "keep the stored credential" (ADR-014 D7; sending the `[Configured]`
@@ -24,7 +27,7 @@
  * ConfirmModal (Esc / backdrop / Cancel dismiss; only Delete proceeds).
  */
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { Copy, Download, Pencil, Plus, RefreshCw, Save, Search, Trash2, X } from "lucide-react";
+import { Copy, Download, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { Alert, Badge, Button, Card, Form, Spinner, Table } from "react-bootstrap";
 import {
   CONFIGURED_MASK,
@@ -41,6 +44,7 @@ import {
   type UpstreamWriteResponse,
 } from "../api.ts";
 import { ConfirmModal, type ConfirmDialog } from "../ui/ConfirmModal.tsx";
+import { EditorModal } from "../ui/EditorModal.tsx";
 
 /** The one upstream implementation type the config grammar accepts today. */
 const UPSTREAM_TYPES = ["openai-compatible"] as const;
@@ -496,7 +500,8 @@ export function UpstreamsSection(): ReactNode {
         Discover re-probes that one upstream.
       </p>
 
-      {error !== null && <Alert variant="danger">{error}</Alert>}
+      {/* Page-level failures (refresh, delete) — submit errors render inside the editor modal. */}
+      {editor === null && error !== null && <Alert variant="danger">{error}</Alert>}
 
       {probe !== null && (
         <Alert variant={probe.ok ? "success" : "warning"} className="py-2" role="status">
@@ -599,110 +604,90 @@ export function UpstreamsSection(): ReactNode {
         </>
       )}
 
-      {editor !== null && (
-        <Card as="form" className="mt-3" onSubmit={submit}>
-          <Card.Body>
-            <Card.Title as="h2" className="h5">
-              {editing ? `Edit upstream ${editor}` : "Add upstream"}
-            </Card.Title>
-            <div className="row g-3">
-              <Form.Group as="div" className="col-md-4" controlId="upstream-type">
-                <Form.Label>type</Form.Label>
-                <Form.Select
-                  value={form.type}
-                  onChange={(event) => setForm({ ...form, type: event.target.value })}
-                >
-                  {UPSTREAM_TYPES.map((type) => (
-                    <option key={type} value={type}>
-                      {type}
-                    </option>
-                  ))}
-                </Form.Select>
-              </Form.Group>
-              <Form.Group as="div" className="col-md-4" controlId="upstream-id">
-                <Form.Label>id</Form.Label>
-                <Form.Control
-                  value={form.id}
-                  onChange={(event) => setForm({ ...form, id: event.target.value })}
-                  disabled={editing}
-                  required={!editing}
-                />
-                {editing && (
-                  <div className="form-text">The id is immutable — the path parameter owns it.</div>
-                )}
-              </Form.Group>
-              <Form.Group as="div" className="col-md-4" controlId="upstream-base-url">
-                <Form.Label>baseUrl</Form.Label>
-                <Form.Control
-                  type="url"
-                  value={form.baseUrl}
-                  onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
-                  required
-                  placeholder="https://api.example.com/v1"
-                />
-              </Form.Group>
-              <Form.Group as="div" className="col-md-6" controlId="upstream-api-key">
-                <Form.Label>
-                  apiKey {editing && <span className="text-body-secondary">(пусто = не менять)</span>}
-                </Form.Label>
-                <Form.Control
-                  type="password"
-                  autoComplete="new-password"
-                  value={form.apiKey}
-                  onChange={(event) => setForm({ ...form, apiKey: event.target.value })}
-                  required={!editing}
-                  placeholder={editing ? `пусто = не менять (сейчас ${CONFIGURED_MASK})` : "provider API key"}
-                />
-                <div className="form-text">
-                  {editing
-                    ? "Leave empty to keep the stored credential — the stored value is never served back."
-                    : "Required on create; stored once, served back only as the mask."}
-                </div>
-              </Form.Group>
-              <Form.Group as="div" className="col-md-6" controlId="upstream-tls-pin">
-                <Form.Label>
-                  tlsFingerprint {editing && <span className="text-body-secondary">(пусто = не менять)</span>}
-                </Form.Label>
-                <Form.Control
-                  className="font-monospace"
-                  value={form.tlsFingerprint}
-                  onChange={(event) => setForm({ ...form, tlsFingerprint: event.target.value })}
-                  placeholder={editing ? `пусто = не менять${upstreams?.find((u) => u.id === editor)?.tlsFingerprint == null ? " (сейчас не задан)" : ` (сейчас ${CONFIGURED_MASK})`}` : "optional SHA-256 pin"}
-                />
-                <div className="form-text">
-                  Optional TLS certificate pin. Leave empty to keep the stored pin.
-                </div>
-              </Form.Group>
-            </div>
-            <div className="d-flex gap-2 mt-3">
-              <Button
-                type="submit"
-                variant="primary"
-                className="d-inline-flex align-items-center gap-1"
-                disabled={busy}
+      {/* The create/edit editor — the shared EditorModal shell over the table. */}
+      <EditorModal
+        show={editor !== null}
+        title={editing ? `Edit upstream ${editor}` : "Add upstream"}
+        editing={editing}
+        busy={busy}
+        onClose={close}
+        onSubmit={submit}
+      >
+          {error !== null && <Alert variant="danger">{error}</Alert>}
+          <div className="row g-3">
+            <Form.Group as="div" className="col-md-4" controlId="upstream-type">
+              <Form.Label>type</Form.Label>
+              <Form.Select
+                value={form.type}
+                onChange={(event) => setForm({ ...form, type: event.target.value })}
               >
-                {busy && <Spinner as="span" size="sm" aria-hidden="true" />}
-                {editing ? <Save aria-hidden="true" size={16} /> : <Plus aria-hidden="true" size={16} />}
-                {editing ? "Save" : "Create"}
-              </Button>
-              <Button
-                type="button"
-                variant="outline-secondary"
-                className="d-inline-flex align-items-center gap-1"
-                onClick={close}
-                disabled={busy}
-              >
-                <X aria-hidden="true" size={16} />
-                Cancel
-              </Button>
-            </div>
-            <p className="form-text mb-0 mt-2">
-              Saving probes the upstream synchronously (within the probe budget) — a failed
-              probe is reported, not cancelled: the change still lands.
-            </p>
-          </Card.Body>
-        </Card>
-      )}
+                {UPSTREAM_TYPES.map((type) => (
+                  <option key={type} value={type}>
+                    {type}
+                  </option>
+                ))}
+              </Form.Select>
+            </Form.Group>
+            <Form.Group as="div" className="col-md-4" controlId="upstream-id">
+              <Form.Label>id</Form.Label>
+              <Form.Control
+                value={form.id}
+                onChange={(event) => setForm({ ...form, id: event.target.value })}
+                disabled={editing}
+                required={!editing}
+              />
+              {editing && (
+                <div className="form-text">The id is immutable — the path parameter owns it.</div>
+              )}
+            </Form.Group>
+            <Form.Group as="div" className="col-md-4" controlId="upstream-base-url">
+              <Form.Label>baseUrl</Form.Label>
+              <Form.Control
+                type="url"
+                value={form.baseUrl}
+                onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
+                required
+                placeholder="https://api.example.com/v1"
+              />
+            </Form.Group>
+            <Form.Group as="div" className="col-md-6" controlId="upstream-api-key">
+              <Form.Label>
+                apiKey {editing && <span className="text-body-secondary">(пусто = не менять)</span>}
+              </Form.Label>
+              <Form.Control
+                type="password"
+                autoComplete="new-password"
+                value={form.apiKey}
+                onChange={(event) => setForm({ ...form, apiKey: event.target.value })}
+                required={!editing}
+                placeholder={editing ? `пусто = не менять (сейчас ${CONFIGURED_MASK})` : "provider API key"}
+              />
+              <div className="form-text">
+                {editing
+                  ? "Leave empty to keep the stored credential — the stored value is never served back."
+                  : "Required on create; stored once, served back only as the mask."}
+              </div>
+            </Form.Group>
+            <Form.Group as="div" className="col-md-6" controlId="upstream-tls-pin">
+              <Form.Label>
+                tlsFingerprint {editing && <span className="text-body-secondary">(пусто = не менять)</span>}
+              </Form.Label>
+              <Form.Control
+                className="font-monospace"
+                value={form.tlsFingerprint}
+                onChange={(event) => setForm({ ...form, tlsFingerprint: event.target.value })}
+                placeholder={editing ? `пусто = не менять${upstreams?.find((u) => u.id === editor)?.tlsFingerprint == null ? " (сейчас не задан)" : ` (сейчас ${CONFIGURED_MASK})`}` : "optional SHA-256 pin"}
+              />
+              <div className="form-text">
+                Optional TLS certificate pin. Leave empty to keep the stored pin.
+              </div>
+            </Form.Group>
+          </div>
+          <p className="form-text mb-0">
+            Saving probes the upstream synchronously (within the probe budget) — a failed
+            probe is reported, not cancelled: the change still lands.
+          </p>
+      </EditorModal>
 
       <ConfirmModal dialog={dialog} onDismiss={() => setDialog(null)} />
     </section>
