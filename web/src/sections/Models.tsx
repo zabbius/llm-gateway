@@ -24,6 +24,7 @@
  * runs live on the Upstreams section.
  */
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Pencil, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
 import {
   createModel,
   deleteModel,
@@ -323,6 +324,7 @@ function AliasTable({
                   onClick={() => onEdit(entry)}
                   disabled={locked}
                 >
+                  <Pencil aria-hidden="true" className="me-1 align-text-bottom" size={14} />
                   Edit
                 </button>
                 <button
@@ -331,6 +333,7 @@ function AliasTable({
                   onClick={() => onDelete(entry)}
                   disabled={locked}
                 >
+                  <Trash2 aria-hidden="true" className="me-1 align-text-bottom" size={14} />
                   Delete
                 </button>
               </span>
@@ -524,6 +527,7 @@ export function ModelsSection(): ReactNode {
             onClick={openCreate}
             disabled={editor !== null}
           >
+            <Plus aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             Add alias
           </button>
           <button
@@ -532,6 +536,7 @@ export function ModelsSection(): ReactNode {
             onClick={() => void refresh()}
             disabled={loading || editor !== null}
           >
+            <RefreshCw aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             Refresh
           </button>
         </span>
@@ -707,6 +712,7 @@ export function ModelsSection(): ReactNode {
                           disabled={form.routes.length === 1}
                           title={form.routes.length === 1 ? "At least one route is required" : "Remove route"}
                         >
+                          <Trash2 aria-hidden="true" className="me-1 align-text-bottom" size={14} />
                           Remove
                         </button>
                       </div>
@@ -723,6 +729,7 @@ export function ModelsSection(): ReactNode {
               className="btn btn-sm btn-outline-secondary mt-2"
               onClick={() => setForm({ ...form, routes: [...form.routes, emptyRoute()] })}
             >
+              <Plus aria-hidden="true" className="me-1 align-text-bottom" size={14} />
               Add route
             </button>
             {upstreams.length === 0 && (
@@ -768,9 +775,11 @@ export function ModelsSection(): ReactNode {
             <div className="d-flex gap-2 mt-3">
               <button className="btn btn-primary" type="submit" disabled={busy}>
                 {busy && <span className="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>}
+                {editing ? <Save aria-hidden="true" className="me-1 align-text-bottom" size={16} /> : <Plus aria-hidden="true" className="me-1 align-text-bottom" size={16} />}
                 {editing ? "Save" : "Create"}
               </button>
               <button className="btn btn-outline-secondary" type="button" onClick={close} disabled={busy}>
+                <X aria-hidden="true" className="me-1 align-text-bottom" size={16} />
                 Cancel
               </button>
             </div>

@@ -14,6 +14,7 @@
  * byte arrives from /api.
  */
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { LogOut } from "lucide-react";
 import {
   DEFAULT_SECTION,
   Link,
@@ -253,13 +254,14 @@ export function App(): ReactNode {
             <span className="fw-semibold">llm-gateway</span>
           </div>
           <nav className="nav nav-pills flex-column gap-1 mt-4" aria-label="Sections">
-            {SECTIONS.map(({ id, label }) => (
+            {SECTIONS.map(({ id, label, icon: Icon }) => (
               <Link
                 key={id}
                 to={sectionPath(id)}
-                className={`nav-link ${id === section ? "active" : "link-body-emphasis"}`}
+                className={`nav-link d-flex align-items-center gap-2 ${id === section ? "active" : "link-body-emphasis"}`}
                 aria-current={id === section ? "page" : undefined}
               >
+                <Icon aria-hidden="true" size={16} />
                 {label}
               </Link>
             ))}
@@ -267,11 +269,12 @@ export function App(): ReactNode {
           {auth.canLogout && (
             <button
               type="button"
-              className="btn btn-outline-secondary btn-sm w-100 mt-4"
+              className="btn btn-outline-secondary btn-sm d-flex align-items-center justify-content-center gap-2 w-100 mt-4"
               onClick={() => {
                 void submitLogout();
               }}
             >
+              <LogOut aria-hidden="true" size={14} />
               Log out
             </button>
           )}

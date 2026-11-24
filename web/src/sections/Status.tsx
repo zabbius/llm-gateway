@@ -10,6 +10,7 @@
  * an error.
  */
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { RefreshCw } from "lucide-react";
 import { fetchStatus, fetchUpstreams, type GatewayStatus, type ManagedUpstream } from "../api.ts";
 
 export function StatusSection(): ReactNode {
@@ -55,6 +56,7 @@ export function StatusSection(): ReactNode {
           onClick={() => void refresh()}
           disabled={loading}
         >
+          <RefreshCw aria-hidden="true" className="me-1 align-text-bottom" size={14} />
           Refresh
         </button>
       </div>

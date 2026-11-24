@@ -174,7 +174,7 @@ The core rule is the **two-place rule**: every credential exists in exactly two 
 
 ### Dependency Management
 
-- Runtime tree is deliberately minimal: `hono` (HTTP framework) and `pino` (logging). The descriptive OpenAPI-document generation behind `/docs` (`hono-openapi` + `zod`) is build-time only — devDependencies, run via `bun run apidocs` (ADR-013; a wire description must not delegate a security-critical function, and none does: it validates no request). The web package adds `react`, `react-dom`, `bootstrap`.
+- Runtime tree is deliberately minimal: `hono` (HTTP framework) and `pino` (logging). The descriptive OpenAPI-document generation behind `/docs` (`hono-openapi` + `zod`) is build-time only — devDependencies, run via `bun run apidocs` (ADR-013; a wire description must not delegate a security-critical function, and none does: it validates no request). The web package adds `react`, `react-dom`, `bootstrap`, and `lucide-react` (icon glyph components, bundled into the SPA build by Vite — the SPA never loads dependencies from an external server at runtime).
 - **MUST** keep dependency additions justified and minimal: a new runtime dependency requires a written rationale in the PR (what it does, why the platform APIs don't).
 - **MUST** keep lockfiles (`bun.lock`, `web/bun.lock`) committed, with integrity hashes intact; never hand-edit them.
 - **MUST** run `bun audit` (root and `web/`) before merging dependency changes; known-vulnerable versions of direct dependencies do not merge. (`bun audit` reported no known vulnerabilities across 39 packages when this policy was written, 2026-11-17 — a point-in-time fact, not a standing guarantee.)

@@ -17,6 +17,7 @@
  * `resource_in_use` class on this collection).
  */
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Pencil, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
 import {
   CONFIGURED_MASK,
   createClient,
@@ -161,6 +162,7 @@ export function ClientsSection(): ReactNode {
             onClick={openCreate}
             disabled={editor !== null}
           >
+            <Plus aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             Add client
           </button>
           <button
@@ -169,6 +171,7 @@ export function ClientsSection(): ReactNode {
             onClick={() => void refresh()}
             disabled={loading || editor !== null}
           >
+            <RefreshCw aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             Refresh
           </button>
         </span>
@@ -230,6 +233,7 @@ export function ClientsSection(): ReactNode {
                         onClick={() => openEdit(client)}
                         disabled={editor !== null}
                       >
+                        <Pencil aria-hidden="true" className="me-1 align-text-bottom" size={14} />
                         Edit
                       </button>
                       <button
@@ -238,6 +242,7 @@ export function ClientsSection(): ReactNode {
                         onClick={() => remove(client)}
                         disabled={busy || editor !== null}
                       >
+                        <Trash2 aria-hidden="true" className="me-1 align-text-bottom" size={14} />
                         Delete
                       </button>
                     </span>
@@ -334,9 +339,11 @@ export function ClientsSection(): ReactNode {
                 disabled={busy || form.models.length === 0 || (!editing && (form.name.trim() === "" || form.apiKey === ""))}
               >
                 {busy && <span className="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>}
+                {editing ? <Save aria-hidden="true" className="me-1 align-text-bottom" size={16} /> : <Plus aria-hidden="true" className="me-1 align-text-bottom" size={16} />}
                 {editing ? "Save" : "Create"}
               </button>
               <button className="btn btn-outline-secondary" type="button" onClick={close} disabled={busy}>
+                <X aria-hidden="true" className="me-1 align-text-bottom" size={16} />
                 Cancel
               </button>
             </div>

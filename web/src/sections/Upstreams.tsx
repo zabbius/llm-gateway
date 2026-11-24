@@ -23,6 +23,7 @@
  * envelope's message.
  */
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Copy, Download, Pencil, Plus, RefreshCw, Save, Search, Trash2, X } from "lucide-react";
 import {
   CONFIGURED_MASK,
   createUpstream,
@@ -134,6 +135,7 @@ function CopyableModelId({ id }: { id: string }): ReactNode {
       onClick={() => void copy()}
       title={`Copy model id "${id}"`}
     >
+      <Copy aria-hidden="true" className="me-1 align-text-bottom" size={12} />
       <code>{copied ? "copied ✓" : id}</code>
     </button>
   );
@@ -235,6 +237,7 @@ function UpstreamCard({
             disabled={discovering}
           >
             {discovering && <span className="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>}
+            <Search aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             Discover
           </button>
           <button
@@ -244,6 +247,7 @@ function UpstreamCard({
             disabled={loading}
           >
             {loading && <span className="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>}
+            <Download aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             {listing.kind === "loaded" ? "Reload models" : "Load models"}
           </button>
         </span>
@@ -447,6 +451,7 @@ export function UpstreamsSection(): ReactNode {
             onClick={openCreate}
             disabled={editor !== null}
           >
+            <Plus aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             Add upstream
           </button>
           <button
@@ -455,6 +460,7 @@ export function UpstreamsSection(): ReactNode {
             onClick={() => void refresh()}
             disabled={loading || editor !== null}
           >
+            <RefreshCw aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             Refresh
           </button>
         </span>
@@ -537,6 +543,7 @@ export function UpstreamsSection(): ReactNode {
                         onClick={() => openEdit(upstream)}
                         disabled={editor !== null}
                       >
+                        <Pencil aria-hidden="true" className="me-1 align-text-bottom" size={14} />
                         Edit
                       </button>
                       <button
@@ -545,6 +552,7 @@ export function UpstreamsSection(): ReactNode {
                         onClick={() => remove(upstream)}
                         disabled={busy || editor !== null}
                       >
+                        <Trash2 aria-hidden="true" className="me-1 align-text-bottom" size={14} />
                         Delete
                       </button>
                     </span>
@@ -662,9 +670,11 @@ export function UpstreamsSection(): ReactNode {
             <div className="d-flex gap-2 mt-3">
               <button className="btn btn-primary" type="submit" disabled={busy}>
                 {busy && <span className="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>}
+                {editing ? <Save aria-hidden="true" className="me-1 align-text-bottom" size={16} /> : <Plus aria-hidden="true" className="me-1 align-text-bottom" size={16} />}
                 {editing ? "Save" : "Create"}
               </button>
               <button className="btn btn-outline-secondary" type="button" onClick={close} disabled={busy}>
+                <X aria-hidden="true" className="me-1 align-text-bottom" size={16} />
                 Cancel
               </button>
             </div>

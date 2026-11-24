@@ -12,17 +12,18 @@ import {
   type AnchorHTMLAttributes,
   type ReactNode,
 } from "react";
+import { Activity, Info, KeyRound, Layers, Server } from "lucide-react";
 
 /** The SPA namespace — every SPA URL is this base plus an in-namespace path. */
 export const UI_BASE = "/ui";
 
 /** The SPA sections, in dock order. A new section = one entry here + a component. */
 export const SECTIONS = [
-  { id: "status", label: "Status" },
-  { id: "models", label: "Models" },
-  { id: "upstreams", label: "Upstreams" },
-  { id: "clients", label: "Clients" },
-  { id: "about", label: "About" },
+  { id: "status", label: "Status", icon: Activity },
+  { id: "models", label: "Models", icon: Layers },
+  { id: "upstreams", label: "Upstreams", icon: Server },
+  { id: "clients", label: "Clients", icon: KeyRound },
+  { id: "about", label: "About", icon: Info },
 ] as const;
 
 export type SectionId = (typeof SECTIONS)[number]["id"];
