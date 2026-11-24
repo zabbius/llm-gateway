@@ -20,10 +20,12 @@
  * probe's outcome arrives as data in the create/update answer (D8) and is
  * rendered next to the save confirmation. Every failure — including a `409`
  * `resource_in_use` delete — surfaces as an alert carrying the OpenAI
- * envelope's message.
+ * envelope's message. Deletion is confirmed through the shared
+ * ConfirmModal (Esc / backdrop / Cancel dismiss; only Delete proceeds).
  */
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Copy, Download, Pencil, Plus, RefreshCw, Save, Search, Trash2, X } from "lucide-react";
+import { Alert, Badge, Button, Card, Form, Spinner, Table } from "react-bootstrap";
 import {
   CONFIGURED_MASK,
   createUpstream,
@@ -38,6 +40,7 @@ import {
   type UpstreamWriteRequest,
   type UpstreamWriteResponse,
 } from "../api.ts";
+import { ConfirmModal, type ConfirmDialog } from "../ui/ConfirmModal.tsx";
 
 /** The one upstream implementation type the config grammar accepts today. */
 const UPSTREAM_TYPES = ["openai-compatible"] as const;
@@ -129,15 +132,17 @@ function CopyableModelId({ id }: { id: string }): ReactNode {
   }, [id]);
 
   return (
-    <button
+    <Button
       type="button"
-      className="btn btn-link btn-sm p-0 text-start align-baseline"
+      variant="link"
+      size="sm"
+      className="p-0 text-start align-baseline"
       onClick={() => void copy()}
       title={`Copy model id "${id}"`}
     >
       <Copy aria-hidden="true" className="me-1 align-text-bottom" size={12} />
       <code>{copied ? "copied ✓" : id}</code>
-    </button>
+    </Button>
   );
 }
 
@@ -151,9 +156,10 @@ function ModelList({ models, upstreamId }: { models: readonly UpstreamModel[]; u
 
   return (
     <>
-      <input
+      <Form.Control
         type="search"
-        className="form-control form-control-sm mb-2"
+        size="sm"
+        className="mb-2"
         placeholder="Filter by model id…"
         aria-label={`Filter models of upstream ${upstreamId}`}
         value={query}
@@ -164,7 +170,7 @@ function ModelList({ models, upstreamId }: { models: readonly UpstreamModel[]; u
       ) : visible.length === 0 ? (
         <p className="text-body-secondary small mb-0">No models match “{query.trim()}”.</p>
       ) : (
-        <table className="table table-sm align-middle mb-2">
+        <Table size="sm" className="align-middle mb-2">
           <thead>
             <tr>
               <th scope="col">model id</th>
@@ -187,7 +193,7 @@ function ModelList({ models, upstreamId }: { models: readonly UpstreamModel[]; u
               </tr>
             ))}
           </tbody>
-        </table>
+        </Table>
       )}
       <p className="text-body-secondary small mb-0">
         Click a model id to copy it — paste it as a route’s <code>model</code> on the Models
@@ -214,45 +220,43 @@ function UpstreamCard({
   const loading = listing.kind === "loading";
   const discovering = discover?.kind === "loading";
   return (
-    <div className="card mb-3">
-      <div className="card-header d-flex align-items-center justify-content-between gap-2">
+    <Card className="mb-3">
+      <Card.Header className="d-flex align-items-center justify-content-between gap-2">
         <span className="d-flex align-items-center gap-2">
           <code>{upstream.id}</code>
           <span className="text-body-secondary">{upstream.type}</span>
           {upstream.probe !== undefined && (
-            <span
-              className={`badge ${
-                upstream.probe === "ok" ? "text-bg-success" : "text-bg-danger"
-              }`}
-            >
+            <Badge bg={upstream.probe === "ok" ? "success" : "danger"} text="white">
               {upstream.probe}
-            </span>
+            </Badge>
           )}
         </span>
         <span className="d-flex align-items-center gap-2">
-          <button
+          <Button
             type="button"
-            className="btn btn-sm btn-outline-secondary"
+            variant="outline-secondary"
+            size="sm"
             onClick={() => onDiscover(upstream.id)}
             disabled={discovering}
           >
-            {discovering && <span className="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>}
+            {discovering && <Spinner as="span" size="sm" className="me-2" aria-hidden="true" />}
             <Search aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             Discover
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="btn btn-sm btn-outline-primary"
+            variant="outline-primary"
+            size="sm"
             onClick={() => onLoad(upstream.id)}
             disabled={loading}
           >
-            {loading && <span className="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>}
+            {loading && <Spinner as="span" size="sm" className="me-2" aria-hidden="true" />}
             <Download aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             {listing.kind === "loaded" ? "Reload models" : "Load models"}
-          </button>
+          </Button>
         </span>
-      </div>
-      <div className="card-body">
+      </Card.Header>
+      <Card.Body>
         <DiscoverOutcome run={discover} />
         {listing.kind === "idle" && (
           <p className="text-body-secondary small mb-0">
@@ -260,9 +264,9 @@ function UpstreamCard({
           </p>
         )}
         {listing.kind === "error" && (
-          <div className="alert alert-danger py-2 small mb-0" role="alert">
+          <Alert variant="danger" className="py-2 small mb-0">
             Failed to load models: {listing.message}
-          </div>
+          </Alert>
         )}
         {listing.kind === "loaded" && (
           <>
@@ -273,8 +277,8 @@ function UpstreamCard({
             <ModelList models={listing.models} upstreamId={upstream.id} />
           </>
         )}
-      </div>
-    </div>
+      </Card.Body>
+    </Card>
   );
 }
 
@@ -291,6 +295,8 @@ export function UpstreamsSection(): ReactNode {
   const [listings, setListings] = useState<Record<string, Listing>>({});
   /** Discover runs by upstream id (ADR-014 D4). */
   const [runs, setRuns] = useState<Record<string, DiscoverRun>>({});
+  /** The pending delete confirmation — open exactly while non-null (ConfirmModal). */
+  const [dialog, setDialog] = useState<ConfirmDialog | null>(null);
 
   const refresh = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -365,21 +371,33 @@ export function UpstreamsSection(): ReactNode {
   };
 
   const remove = (upstream: ManagedUpstream): void => {
-    if (!window.confirm(`Delete upstream "${upstream.id}"?`)) return;
-    setBusy(true);
-    setError(null);
-    void (async (): Promise<void> => {
-      try {
-        await deleteUpstream(upstream.id);
-        await refresh();
-      } catch (cause) {
-        // The 409 resource_in_use envelope's message (the referencing
-        // models) and every other refusal land here, as an alert.
-        setError(cause instanceof Error ? cause.message : String(cause));
-      } finally {
-        setBusy(false);
-      }
-    })();
+    setDialog({
+      title: "Delete upstream",
+      body: (
+        <>
+          Delete upstream <code>{upstream.id}</code>?
+        </>
+      ),
+      confirmLabel: "Delete",
+      destructive: true,
+      onConfirm: () => {
+        setDialog(null);
+        setBusy(true);
+        setError(null);
+        void (async (): Promise<void> => {
+          try {
+            await deleteUpstream(upstream.id);
+            await refresh();
+          } catch (cause) {
+            // The 409 resource_in_use envelope's message (the referencing
+            // models) and every other refusal land here, as an alert.
+            setError(cause instanceof Error ? cause.message : String(cause));
+          } finally {
+            setBusy(false);
+          }
+        })();
+      },
+    });
   };
 
   /** One discover run per upstream: the always-200 verdict is the outcome
@@ -445,24 +463,26 @@ export function UpstreamsSection(): ReactNode {
           Upstreams
         </h1>
         <span className="d-flex align-items-center gap-2">
-          <button
+          <Button
             type="button"
-            className="btn btn-sm btn-primary"
+            variant="primary"
+            size="sm"
             onClick={openCreate}
             disabled={editor !== null}
           >
             <Plus aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             Add upstream
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="btn btn-sm btn-outline-secondary"
+            variant="outline-secondary"
+            size="sm"
             onClick={() => void refresh()}
             disabled={loading || editor !== null}
           >
             <RefreshCw aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             Refresh
-          </button>
+          </Button>
         </span>
       </div>
       <p className="text-body-secondary">
@@ -472,21 +492,17 @@ export function UpstreamsSection(): ReactNode {
         Discover re-probes that one upstream.
       </p>
 
-      {error !== null && (
-        <div className="alert alert-danger" role="alert">
-          {error}
-        </div>
-      )}
+      {error !== null && <Alert variant="danger">{error}</Alert>}
 
       {probe !== null && (
-        <div className={`alert ${probe.ok ? "alert-success" : "alert-warning"} py-2`} role="status">
+        <Alert variant={probe.ok ? "success" : "warning"} className="py-2" role="status">
           Saved. Probe: {probe.ok ? "ok" : `failed — ${probe.reason ?? "unknown reason"}`}
-        </div>
+        </Alert>
       )}
 
       {loading && (
         <div className="d-flex justify-content-center py-5" role="status">
-          <div className="spinner-border" aria-hidden="true"></div>
+          <Spinner animation="border" aria-hidden="true" />
           <span className="visually-hidden">Loading…</span>
         </div>
       )}
@@ -495,7 +511,7 @@ export function UpstreamsSection(): ReactNode {
         upstreams.length === 0 ? (
           <p className="text-body-secondary">No upstreams configured — add the first one.</p>
         ) : (
-          <table className="table align-middle">
+          <Table className="align-middle">
             <thead>
               <tr>
                 <th scope="col">id</th>
@@ -519,13 +535,9 @@ export function UpstreamsSection(): ReactNode {
                     {upstream.probe === undefined ? (
                       "—"
                     ) : (
-                      <span
-                        className={`badge ${
-                          upstream.probe === "ok" ? "text-bg-success" : "text-bg-danger"
-                        }`}
-                      >
+                      <Badge bg={upstream.probe === "ok" ? "success" : "danger"} text="white">
                         {upstream.probe}
-                      </span>
+                      </Badge>
                     )}
                   </td>
                   <td>{upstream.reason ?? "—"}</td>
@@ -537,30 +549,32 @@ export function UpstreamsSection(): ReactNode {
                   <td>{upstream.tlsFingerprint ?? "—"}</td>
                   <td>
                     <span className="d-inline-flex gap-1">
-                      <button
+                      <Button
                         type="button"
-                        className="btn btn-sm btn-outline-secondary"
+                        variant="outline-secondary"
+                        size="sm"
                         onClick={() => openEdit(upstream)}
                         disabled={editor !== null}
                       >
                         <Pencil aria-hidden="true" className="me-1 align-text-bottom" size={14} />
                         Edit
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         type="button"
-                        className="btn btn-sm btn-outline-danger"
+                        variant="outline-danger"
+                        size="sm"
                         onClick={() => remove(upstream)}
                         disabled={busy || editor !== null}
                       >
                         <Trash2 aria-hidden="true" className="me-1 align-text-bottom" size={14} />
                         Delete
-                      </button>
+                      </Button>
                     </span>
                   </td>
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         )
       )}
 
@@ -580,17 +594,15 @@ export function UpstreamsSection(): ReactNode {
       )}
 
       {editor !== null && (
-        <form className="card mt-3" onSubmit={submit}>
-          <div className="card-body">
-            <h2 className="h5 card-title">{editing ? `Edit upstream ${editor}` : "Add upstream"}</h2>
+        <Card as="form" className="mt-3" onSubmit={submit}>
+          <Card.Body>
+            <Card.Title as="h2" className="h5">
+              {editing ? `Edit upstream ${editor}` : "Add upstream"}
+            </Card.Title>
             <div className="row g-3">
-              <div className="col-md-4">
-                <label className="form-label" htmlFor="upstream-type">
-                  type
-                </label>
-                <select
-                  id="upstream-type"
-                  className="form-select"
+              <Form.Group as="div" className="col-md-4" controlId="upstream-type">
+                <Form.Label>type</Form.Label>
+                <Form.Select
                   value={form.type}
                   onChange={(event) => setForm({ ...form, type: event.target.value })}
                 >
@@ -599,15 +611,11 @@ export function UpstreamsSection(): ReactNode {
                       {type}
                     </option>
                   ))}
-                </select>
-              </div>
-              <div className="col-md-4">
-                <label className="form-label" htmlFor="upstream-id">
-                  id
-                </label>
-                <input
-                  id="upstream-id"
-                  className="form-control"
+                </Form.Select>
+              </Form.Group>
+              <Form.Group as="div" className="col-md-4" controlId="upstream-id">
+                <Form.Label>id</Form.Label>
+                <Form.Control
                   value={form.id}
                   onChange={(event) => setForm({ ...form, id: event.target.value })}
                   disabled={editing}
@@ -616,28 +624,22 @@ export function UpstreamsSection(): ReactNode {
                 {editing && (
                   <div className="form-text">The id is immutable — the path parameter owns it.</div>
                 )}
-              </div>
-              <div className="col-md-4">
-                <label className="form-label" htmlFor="upstream-base-url">
-                  baseUrl
-                </label>
-                <input
-                  id="upstream-base-url"
-                  className="form-control"
+              </Form.Group>
+              <Form.Group as="div" className="col-md-4" controlId="upstream-base-url">
+                <Form.Label>baseUrl</Form.Label>
+                <Form.Control
                   type="url"
                   value={form.baseUrl}
                   onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
                   required
                   placeholder="https://api.example.com/v1"
                 />
-              </div>
-              <div className="col-md-6">
-                <label className="form-label" htmlFor="upstream-api-key">
+              </Form.Group>
+              <Form.Group as="div" className="col-md-6" controlId="upstream-api-key">
+                <Form.Label>
                   apiKey {editing && <span className="text-body-secondary">(пусто = не менять)</span>}
-                </label>
-                <input
-                  id="upstream-api-key"
-                  className="form-control"
+                </Form.Label>
+                <Form.Control
                   type="password"
                   autoComplete="new-password"
                   value={form.apiKey}
@@ -650,14 +652,13 @@ export function UpstreamsSection(): ReactNode {
                     ? "Leave empty to keep the stored credential — the stored value is never served back."
                     : "Required on create; stored once, served back only as the mask."}
                 </div>
-              </div>
-              <div className="col-md-6">
-                <label className="form-label" htmlFor="upstream-tls-pin">
+              </Form.Group>
+              <Form.Group as="div" className="col-md-6" controlId="upstream-tls-pin">
+                <Form.Label>
                   tlsFingerprint {editing && <span className="text-body-secondary">(пусто = не менять)</span>}
-                </label>
-                <input
-                  id="upstream-tls-pin"
-                  className="form-control font-monospace"
+                </Form.Label>
+                <Form.Control
+                  className="font-monospace"
                   value={form.tlsFingerprint}
                   onChange={(event) => setForm({ ...form, tlsFingerprint: event.target.value })}
                   placeholder={editing ? `пусто = не менять${upstreams?.find((u) => u.id === editor)?.tlsFingerprint == null ? " (сейчас не задан)" : ` (сейчас ${CONFIGURED_MASK})`}` : "optional SHA-256 pin"}
@@ -665,26 +666,28 @@ export function UpstreamsSection(): ReactNode {
                 <div className="form-text">
                   Optional TLS certificate pin. Leave empty to keep the stored pin.
                 </div>
-              </div>
+              </Form.Group>
             </div>
             <div className="d-flex gap-2 mt-3">
-              <button className="btn btn-primary" type="submit" disabled={busy}>
-                {busy && <span className="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>}
+              <Button type="submit" variant="primary" disabled={busy}>
+                {busy && <Spinner as="span" size="sm" className="me-2" aria-hidden="true" />}
                 {editing ? <Save aria-hidden="true" className="me-1 align-text-bottom" size={16} /> : <Plus aria-hidden="true" className="me-1 align-text-bottom" size={16} />}
                 {editing ? "Save" : "Create"}
-              </button>
-              <button className="btn btn-outline-secondary" type="button" onClick={close} disabled={busy}>
+              </Button>
+              <Button type="button" variant="outline-secondary" onClick={close} disabled={busy}>
                 <X aria-hidden="true" className="me-1 align-text-bottom" size={16} />
                 Cancel
-              </button>
+              </Button>
             </div>
             <p className="form-text mb-0 mt-2">
               Saving probes the upstream synchronously (within the probe budget) — a failed
               probe is reported, not cancelled: the change still lands.
             </p>
-          </div>
-        </form>
+          </Card.Body>
+        </Card>
       )}
+
+      <ConfirmModal dialog={dialog} onDismiss={() => setDialog(null)} />
     </section>
   );
 }

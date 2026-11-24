@@ -15,6 +15,7 @@
  */
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { LogOut } from "lucide-react";
+import { Alert, Button, Card, Form, Nav, Spinner } from "react-bootstrap";
 import {
   DEFAULT_SECTION,
   Link,
@@ -111,52 +112,44 @@ function LoginCard({
 
   return (
     <div className="container-fluid d-flex justify-content-center align-items-center" style={{ minHeight: "100vh" }}>
-      <form className="card shadow-sm" style={{ width: "22rem" }} onSubmit={submit}>
-        <div className="card-body">
-          <h1 className="h5 card-title mb-2 d-flex align-items-center gap-2 text-body-emphasis">
+      <Card as="form" className="shadow-sm" style={{ width: "22rem" }} onSubmit={submit}>
+        <Card.Body>
+          <Card.Title as="h1" className="h5 mb-2 d-flex align-items-center gap-2 text-body-emphasis">
             <BrandGlyph />
             llm-gateway
-          </h1>
+          </Card.Title>
           <p className="text-body-secondary small mb-3">Sign in to the management surface.</p>
           {error !== null && (
-            <div className="alert alert-danger py-2 small" role="alert">
+            <Alert variant="danger" className="py-2 small">
               {error}
-            </div>
+            </Alert>
           )}
-          <div className="mb-3">
-            <label className="form-label" htmlFor="login-user">
-              Login
-            </label>
-            <input
-              id="login-user"
-              className="form-control"
+          <Form.Group className="mb-3" controlId="login-user">
+            <Form.Label>Login</Form.Label>
+            <Form.Control
               autoComplete="username"
               value={user}
               onChange={(event) => setUser(event.target.value)}
               required
               autoFocus
             />
-          </div>
-          <div className="mb-3">
-            <label className="form-label" htmlFor="login-password">
-              Password
-            </label>
-            <input
-              id="login-password"
+          </Form.Group>
+          <Form.Group className="mb-3" controlId="login-password">
+            <Form.Label>Password</Form.Label>
+            <Form.Control
               type="password"
-              className="form-control"
               autoComplete="current-password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
               required
             />
-          </div>
-          <button className="btn btn-primary w-100" type="submit" disabled={busy || user === "" || password === ""}>
-            {busy && <span className="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>}
+          </Form.Group>
+          <Button variant="primary" type="submit" className="w-100" disabled={busy || user === "" || password === ""}>
+            {busy && <Spinner as="span" animation="border" size="sm" className="me-2" aria-hidden="true" />}
             Sign in
-          </button>
-        </div>
-      </form>
+          </Button>
+        </Card.Body>
+      </Card>
     </div>
   );
 }
@@ -224,7 +217,7 @@ export function App(): ReactNode {
   if (auth.kind === "checking") {
     return (
       <div className="container-fluid d-flex justify-content-center align-items-center" style={{ minHeight: "100vh" }}>
-        <div className="spinner-border" role="status" aria-hidden="true"></div>
+        <Spinner animation="border" aria-hidden="true" />
         <span className="visually-hidden">Loading…</span>
       </div>
     );
@@ -253,7 +246,7 @@ export function App(): ReactNode {
             <BrandGlyph />
             <span className="fw-semibold">llm-gateway</span>
           </div>
-          <nav className="nav nav-pills flex-column gap-1 mt-4" aria-label="Sections">
+          <Nav as="nav" variant="pills" className="flex-column gap-1 mt-4" aria-label="Sections">
             {SECTIONS.map(({ id, label, icon: Icon }) => (
               <Link
                 key={id}
@@ -265,18 +258,20 @@ export function App(): ReactNode {
                 {label}
               </Link>
             ))}
-          </nav>
+          </Nav>
           {auth.canLogout && (
-            <button
+            <Button
               type="button"
-              className="btn btn-outline-secondary btn-sm d-flex align-items-center justify-content-center gap-2 w-100 mt-4"
+              variant="outline-secondary"
+              size="sm"
+              className="d-flex align-items-center justify-content-center gap-2 w-100 mt-4"
               onClick={() => {
                 void submitLogout();
               }}
             >
               <LogOut aria-hidden="true" size={14} />
               Log out
-            </button>
+            </Button>
           )}
         </aside>
         <main className="col py-4 px-4">

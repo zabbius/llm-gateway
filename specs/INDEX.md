@@ -23,7 +23,7 @@ Navigation for the specification system. One glance to find the right document f
 | Change log levels or logging behavior | [domains/observability.md](./domains/observability.md), [decisions/003-pino-stderr-logging.md](./decisions/003-pino-stderr-logging.md) | [domains/configuration.md](./domains/configuration.md) (`logLevel`) |
 | Change the startup / wiring sequence | [architecture/data-flow.md](./architecture/data-flow.md), [architecture/layers.md](./architecture/layers.md) | [domains/configuration.md](./domains/configuration.md) |
 | Touch credentials, key handling, or log redaction | [architecture/security-model.md](./architecture/security-model.md) | [domains/observability.md](./domains/observability.md), [contracts/gateway-upstream.md](./contracts/gateway-upstream.md) (Authorization policy) |
-| Work on the frontend (SPA) | [domains/frontend.md](./domains/frontend.md) | [decisions/005-gateway-surface-namespace.md](./decisions/005-gateway-surface-namespace.md) (`/ui/*` mount, client-side routing), [contracts/gateway-management.md](./contracts/gateway-management.md) (the management API the UI consumes) |
+| Work on the frontend (SPA) | [domains/frontend.md](./domains/frontend.md) | [decisions/005-gateway-surface-namespace.md](./decisions/005-gateway-surface-namespace.md) (`/ui/*` mount, client-side routing), [decisions/015-adopt-react-bootstrap.md](./decisions/015-adopt-react-bootstrap.md) (the `react-bootstrap` component layer), [contracts/gateway-management.md](./contracts/gateway-management.md) (the management API the UI consumes) |
 | Decide whether a change needs an ADR, or record one | [META.md](./META.md) (Update Protocol → ADR bar) | [decisions/_template.md](./decisions/_template.md), existing ADRs in `decisions/` |
 | Create or restructure a spec document | [META.md](./META.md) (formats, update rules) | this INDEX (keep the listing current) |
 
@@ -100,7 +100,7 @@ specs/
 │   ├── model-metadata.md                        per-alias limits/capabilities: the detector field contract (c0wrk port), aggregation, surface shapes, the discover mount and the CRUD probes' seed/clear
 │   ├── configuration.md                         config file location, JSON schema, startup validation, the runtime store's write-back (ADR-014)
 │   ├── observability.md                         leveled pino logging to stderr
-│   ├── frontend.md                              SPA shell (React + Bootstrap), /ui/* client-side routing + management sections
+│   ├── frontend.md                              SPA shell (React + Bootstrap via react-bootstrap), /ui/* client-side routing + management sections
 │   └── api-docs.md                              the /docs documentation surface: build-time OpenAPI artifact + Swagger UI shell, wire-schema module
 │
 ├── contracts/
@@ -123,7 +123,8 @@ specs/
     ├── 011-management-live-model-listing.md     operator-triggered live model listing on the management surface (ADR-011)
     ├── 012-alias-model-metadata.md              alias model metadata: c0wrk detector port, discovery at start + on demand, min-rule limits, capability-AND (ADR-012)
     ├── 013-openapi-docs-surface.md              the /docs documentation surface: build-time-generated OpenAPI artifact + Swagger UI shell, ungated static metadata (ADR-013)
-    └── 014-runtime-management-crud.md           runtime management CRUD on /api: config.json write-back (tmp + atomic rename), hot apply, discover replacement, the mutation ADR (ADR-014)
+    ├── 014-runtime-management-crud.md           runtime management CRUD on /api: config.json write-back (tmp + atomic rename), hot apply, discover replacement, the mutation ADR (ADR-014)
+    └── 015-adopt-react-bootstrap.md             react-bootstrap as the SPA's component layer over the Bootstrap CSS, the shared ConfirmModal (ADR-015)
 ```
 
-All 30 spec files (3 architecture + 10 domain + 3 contracts + 14 ADRs) are listed above, alongside META.md, this INDEX, and the ADR template. After adding or removing a spec file, update this listing — see [META.md](./META.md), Update Protocol.
+All 31 spec files (3 architecture + 10 domain + 3 contracts + 15 ADRs) are listed above, alongside META.md, this INDEX, and the ADR template. After adding or removing a spec file, update this listing — see [META.md](./META.md), Update Protocol.

@@ -11,6 +11,7 @@
  */
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
+import { Alert, Badge, Button, Spinner, Table } from "react-bootstrap";
 import { fetchStatus, fetchUpstreams, type GatewayStatus, type ManagedUpstream } from "../api.ts";
 
 export function StatusSection(): ReactNode {
@@ -45,34 +46,31 @@ export function StatusSection(): ReactNode {
         <h1 className="h3 mb-0 d-flex align-items-center gap-2" id="status-heading">
           Status
           {verdict !== null && verdict.status !== "" && (
-            <span className="badge text-bg-secondary" title="GET /api/status verdict">
+            <Badge bg="secondary" text="white" title="GET /api/status verdict">
               {verdict.status}
-            </span>
+            </Badge>
           )}
         </h1>
-        <button
+        <Button
           type="button"
-          className="btn btn-sm btn-outline-secondary"
+          variant="outline-secondary"
+          size="sm"
           onClick={() => void refresh()}
           disabled={loading}
         >
           <RefreshCw aria-hidden="true" className="me-1 align-text-bottom" size={14} />
           Refresh
-        </button>
+        </Button>
       </div>
       <p className="text-body-secondary">
         Every configured upstream with its probe outcome, in config order.
       </p>
 
-      {error !== null && (
-        <div className="alert alert-danger" role="alert">
-          Failed to load status: {error}
-        </div>
-      )}
+      {error !== null && <Alert variant="danger">Failed to load status: {error}</Alert>}
 
       {loading && (
         <div className="d-flex justify-content-center py-5" role="status">
-          <div className="spinner-border" aria-hidden="true"></div>
+          <Spinner animation="border" aria-hidden="true" />
           <span className="visually-hidden">Loading…</span>
         </div>
       )}
@@ -81,7 +79,7 @@ export function StatusSection(): ReactNode {
         upstreams.length === 0 ? (
           <p className="text-body-secondary">No upstreams configured — add one under Upstreams.</p>
         ) : (
-          <table className="table align-middle">
+          <Table className="align-middle">
             <thead>
               <tr>
                 <th scope="col">id</th>
@@ -102,13 +100,9 @@ export function StatusSection(): ReactNode {
                     {upstream.probe === undefined ? (
                       "—"
                     ) : (
-                      <span
-                        className={`badge ${
-                          upstream.probe === "ok" ? "text-bg-success" : "text-bg-danger"
-                        }`}
-                      >
+                      <Badge bg={upstream.probe === "ok" ? "success" : "danger"} text="white">
                         {upstream.probe}
-                      </span>
+                      </Badge>
                     )}
                   </td>
                   <td>{upstream.reason ?? "—"}</td>
@@ -118,7 +112,7 @@ export function StatusSection(): ReactNode {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         )
       )}
     </section>

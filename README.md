@@ -324,7 +324,7 @@ bun run dev           # bun --watch src/index.ts
 Tests live next to the sources (`*.test.ts`); `src/index.test.ts` is the end-to-end smoke
 test (a real gateway process against a mock upstream).
 
-The frontend (`web/` — React 19, Bootstrap 5, Vite) builds to `web/dist`, which the
+The frontend (`web/` — React 19, Bootstrap 5 via `react-bootstrap`, Vite) builds to `web/dist`, which the
 gateway serves at `/`:
 
 ```sh
@@ -351,7 +351,7 @@ tools/
   tls-fingerprint.ts — prints (or with --expect verifies) the tlsFingerprint SPKI pin
   hash-password.ts — generates the `auth` block: argon2id hash + ready-to-paste snippet
   generate-tls-cert.sh — self-signed TLS pair for the listener (`server.tls`): cert.pem + key.pem
-web/            — static SPA served at /ui (React 19, Bootstrap 5, Vite)
+web/            — static SPA served at /ui (React 19, Bootstrap 5 via react-bootstrap, Vite)
 specs/          — design contracts; start at specs/INDEX.md
 ```
 

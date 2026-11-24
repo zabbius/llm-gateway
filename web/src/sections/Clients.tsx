@@ -11,13 +11,16 @@
  * the boundary reads as "keep the stored credential" (ADR-014 D7; sending
  * the `[Configured]` mask back is refused). Create requires a key; edit
  * leaves the field empty unless the operator wants a rotation. The name is
- * immutable. Every failure — the store's value-free `400` problem lines
- * included — surfaces as an alert carrying the OpenAI envelope's message
- * (deleting the last client is the store's `400` refusal; there is no
- * `resource_in_use` class on this collection).
+ * immutable. Deleting asks through the shared ConfirmModal (destructive —
+ * its confirm button renders red) before the store call. Every failure —
+ * the store's value-free `400` problem lines included — surfaces as an
+ * alert carrying the OpenAI envelope's message (deleting the last client
+ * is the store's `400` refusal; there is no `resource_in_use` class on
+ * this collection).
  */
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Pencil, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
+import { Alert, Button, Card, Form, Spinner, Table } from "react-bootstrap";
 import {
   CONFIGURED_MASK,
   createClient,
@@ -28,6 +31,7 @@ import {
   type ManagedClient,
   type ClientWriteRequest,
 } from "../api.ts";
+import { ConfirmModal, type ConfirmDialog } from "../ui/ConfirmModal.tsx";
 
 /** One open editor: `null` = closed, `NEW` = create, otherwise the name being edited. */
 const NEW_CLIENT = Symbol("new");
@@ -49,6 +53,8 @@ export function ClientsSection(): ReactNode {
   const [editor, setEditor] = useState<Editor>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [busy, setBusy] = useState(false);
+  // The pending delete confirmation — open exactly while non-null.
+  const [dialog, setDialog] = useState<ConfirmDialog | null>(null);
 
   const refresh = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -130,7 +136,6 @@ export function ClientsSection(): ReactNode {
   };
 
   const remove = (client: ManagedClient): void => {
-    if (!window.confirm(`Delete client "${client.name}"? Its key stops working on the next request.`)) return;
     setBusy(true);
     setError(null);
     void (async (): Promise<void> => {
@@ -147,6 +152,19 @@ export function ClientsSection(): ReactNode {
     })();
   };
 
+  const requestRemove = (client: ManagedClient): void => {
+    setDialog({
+      title: `Delete client "${client.name}"?`,
+      body: "Its key stops working on the next request.",
+      confirmLabel: "Delete",
+      destructive: true,
+      onConfirm: () => {
+        setDialog(null);
+        remove(client);
+      },
+    });
+  };
+
   const editing = typeof editor === "string";
 
   return (
@@ -156,24 +174,26 @@ export function ClientsSection(): ReactNode {
           Clients
         </h1>
         <span className="d-flex align-items-center gap-2">
-          <button
+          <Button
             type="button"
-            className="btn btn-sm btn-primary"
+            variant="primary"
+            size="sm"
             onClick={openCreate}
             disabled={editor !== null}
           >
             <Plus aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             Add client
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="btn btn-sm btn-outline-secondary"
+            variant="outline-secondary"
+            size="sm"
             onClick={() => void refresh()}
             disabled={loading || editor !== null}
           >
             <RefreshCw aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             Refresh
-          </button>
+          </Button>
         </span>
       </div>
       <p className="text-body-secondary">
@@ -182,15 +202,11 @@ export function ClientsSection(): ReactNode {
         restart (a deleted key answers 401 on the next request).
       </p>
 
-      {error !== null && (
-        <div className="alert alert-danger" role="alert">
-          {error}
-        </div>
-      )}
+      {error !== null && <Alert variant="danger">{error}</Alert>}
 
       {loading && (
         <div className="d-flex justify-content-center py-5" role="status">
-          <div className="spinner-border" aria-hidden="true"></div>
+          <Spinner animation="border" aria-hidden="true" />
           <span className="visually-hidden">Loading…</span>
         </div>
       )}
@@ -199,7 +215,7 @@ export function ClientsSection(): ReactNode {
         clients.length === 0 ? (
           <p className="text-body-secondary">No clients configured — add the first one.</p>
         ) : (
-          <table className="table align-middle">
+          <Table className="align-middle">
             <thead>
               <tr>
                 <th scope="col">name</th>
@@ -227,61 +243,59 @@ export function ClientsSection(): ReactNode {
                   </td>
                   <td>
                     <span className="d-inline-flex gap-1">
-                      <button
+                      <Button
                         type="button"
-                        className="btn btn-sm btn-outline-secondary"
+                        variant="outline-secondary"
+                        size="sm"
                         onClick={() => openEdit(client)}
                         disabled={editor !== null}
                       >
                         <Pencil aria-hidden="true" className="me-1 align-text-bottom" size={14} />
                         Edit
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         type="button"
-                        className="btn btn-sm btn-outline-danger"
-                        onClick={() => remove(client)}
+                        variant="outline-danger"
+                        size="sm"
+                        onClick={() => requestRemove(client)}
                         disabled={busy || editor !== null}
                       >
                         <Trash2 aria-hidden="true" className="me-1 align-text-bottom" size={14} />
                         Delete
-                      </button>
+                      </Button>
                     </span>
                   </td>
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         )
       )}
 
       {editor !== null && (
-        <form className="card mt-3" onSubmit={submit}>
-          <div className="card-body">
-            <h2 className="h5 card-title">{editing ? `Edit client ${editor}` : "Add client"}</h2>
+        <Card as="form" className="mt-3" onSubmit={submit}>
+          <Card.Body>
+            <Card.Title as="h2" className="h5">
+              {editing ? `Edit client ${editor}` : "Add client"}
+            </Card.Title>
             <div className="row g-3">
-              <div className="col-md-4">
-                <label className="form-label" htmlFor="client-name">
-                  name
-                </label>
-                <input
-                  id="client-name"
-                  className="form-control"
+              <Form.Group className="col-md-4" controlId="client-name">
+                <Form.Label>name</Form.Label>
+                <Form.Control
                   value={form.name}
                   onChange={(event) => setForm({ ...form, name: event.target.value })}
                   disabled={editing}
                   required={!editing}
                 />
                 {editing && (
-                  <div className="form-text">The name is immutable — the path parameter owns it.</div>
+                  <Form.Text as="div">The name is immutable — the path parameter owns it.</Form.Text>
                 )}
-              </div>
-              <div className="col-md-4">
-                <label className="form-label" htmlFor="client-api-key">
+              </Form.Group>
+              <Form.Group className="col-md-4" controlId="client-api-key">
+                <Form.Label>
                   apiKey {editing && <span className="text-body-secondary">(пусто = не менять)</span>}
-                </label>
-                <input
-                  id="client-api-key"
-                  className="form-control"
+                </Form.Label>
+                <Form.Control
                   type="password"
                   autoComplete="new-password"
                   value={form.apiKey}
@@ -289,21 +303,19 @@ export function ClientsSection(): ReactNode {
                   required={!editing}
                   placeholder={editing ? `пусто = не менять (сейчас ${CONFIGURED_MASK})` : "client Bearer key"}
                 />
-                <div className="form-text">
+                <Form.Text as="div">
                   {editing
                     ? "Leave empty to keep the stored key — the stored value is never served back."
                     : "Required on create; stored once, served back only as the mask."}
-                </div>
-              </div>
-              <div className="col-md-4">
-                <label className="form-label" htmlFor="client-models">
-                  models (ACL)
-                </label>
+                </Form.Text>
+              </Form.Group>
+              <Form.Group className="col-md-4" controlId="client-models">
+                <Form.Label>models (ACL)</Form.Label>
                 {aliases.length === 0 ? (
-                  <div className="form-text">
+                  <Form.Text as="div">
                     No aliases configured — create one under Models first; the ACL must name
                     existing aliases.
-                  </div>
+                  </Form.Text>
                 ) : (
                   <div
                     id="client-models"
@@ -312,48 +324,48 @@ export function ClientsSection(): ReactNode {
                     role="group"
                     aria-label="Allowed aliases"
                   >
-                    {aliases.map((alias) => (
-                      <label key={alias} className="form-check form-check-inline mb-0 small">
-                        <input
-                          className="form-check-input"
-                          type="checkbox"
-                          checked={form.models.includes(alias)}
-                          onChange={(event) => toggleModel(alias, event.target.checked)}
-                        />
-                        <span>
-                          <code>{alias}</code>
-                        </span>
-                      </label>
+                    {aliases.map((alias, index) => (
+                      <Form.Check
+                        key={alias}
+                        id={`client-models-${index}`}
+                        inline
+                        className="mb-0 small"
+                        checked={form.models.includes(alias)}
+                        onChange={(event) => toggleModel(alias, event.target.checked)}
+                        label={<code>{alias}</code>}
+                      />
                     ))}
                   </div>
                 )}
-                <div className="form-text">
+                <Form.Text as="div">
                   The aliases this client may request — at least one, each an existing alias.
-                </div>
-              </div>
+                </Form.Text>
+              </Form.Group>
             </div>
             <div className="d-flex gap-2 mt-3">
-              <button
-                className="btn btn-primary"
+              <Button
+                variant="primary"
                 type="submit"
                 disabled={busy || form.models.length === 0 || (!editing && (form.name.trim() === "" || form.apiKey === ""))}
               >
-                {busy && <span className="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>}
+                {busy && <Spinner as="span" animation="border" size="sm" className="me-2" aria-hidden="true" />}
                 {editing ? <Save aria-hidden="true" className="me-1 align-text-bottom" size={16} /> : <Plus aria-hidden="true" className="me-1 align-text-bottom" size={16} />}
                 {editing ? "Save" : "Create"}
-              </button>
-              <button className="btn btn-outline-secondary" type="button" onClick={close} disabled={busy}>
+              </Button>
+              <Button variant="outline-secondary" type="button" onClick={close} disabled={busy}>
                 <X aria-hidden="true" className="me-1 align-text-bottom" size={16} />
                 Cancel
-              </button>
+              </Button>
             </div>
             <p className="form-text mb-0 mt-2">
               Saving validates and persists to config.json, then hot-applies into the gate —
               the very next request admits or refuses with the new key set.
             </p>
-          </div>
-        </form>
+          </Card.Body>
+        </Card>
       )}
+
+      <ConfirmModal dialog={dialog} onDismiss={() => setDialog(null)} />
     </section>
   );
 }

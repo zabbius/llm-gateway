@@ -35,7 +35,7 @@ export function AboutSection(): ReactNode {
           Gateway: TypeScript on Bun, Hono as the HTTP framework, pino logging
           to stderr
         </li>
-        <li>This UI: React 19 + Bootstrap 5.3, built by Vite — no other runtime dependency</li>
+        <li>This UI: React 19 + Bootstrap 5.3 via react-bootstrap, built by Vite</li>
       </ul>
 
       <h2 className="h5 mt-4">Documents</h2>

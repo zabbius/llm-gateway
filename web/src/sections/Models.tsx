@@ -13,9 +13,10 @@
  * strategy/weight consistency, the limits rules); the store stays
  * authoritative — its value-free `400` problem lines surface as the
  * envelope's message in the alert, as do `404` (unknown alias) and the `409`
- * `resource_in_use` delete refusals naming the referencing clients.
- * A route's `model` takes no manual input: the row's select is fed by the
- * upstream's live catalog — opening the dropdown fires the one
+ * `resource_in_use` delete refusals naming the referencing clients. Deletion
+ * is gated by the shared ConfirmModal (the styled replacement for the
+ * native confirm dialog). A route's `model` takes no manual input: the row's select is
+ * fed by the upstream's live catalog — opening the dropdown fires the one
  * `GET /api/upstreams/:id/models` fetch per upstream per editor visit
  * (ADR-011 semantics — fired only by the operator opening the select,
  * never on mount or form open), and picking a listed id sets the field; a
@@ -25,6 +26,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Pencil, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
+import { Alert, Badge, Button, Card, Form, Spinner, Table } from "react-bootstrap";
 import {
   createModel,
   deleteModel,
@@ -38,6 +40,7 @@ import {
   type ModelAliasWriteRequest,
   type UpstreamModel,
 } from "../api.ts";
+import { ConfirmModal, type ConfirmDialog } from "../ui/ConfirmModal.tsx";
 
 /** The load-balancing strategies an entry's `balance` block may select
  * between — the config grammar's vocabulary (src/config/schema.ts). */
@@ -122,9 +125,12 @@ const IDLE_CATALOG: Catalog = { kind: "idle" };
  * the upstream's live catalog (fetched by the select's open gesture,
  * ADR-011); a stored value renders as a plain option (no catalog
  * annotation) until the loaded catalog supersedes it, and the loading /
- * error / empty states are options inside the dropdown. The loaded / error
- * status text lives in `RouteCatalogStatus`, below the row — this
- * component renders the select alone so its states never shift it. */
+ * error / empty states are options inside the dropdown. `Form.Select`
+ * renders the native `<select>` (props pass straight through), so the open
+ * gesture's handlers (`onMouseDown`/`onFocus`) ride the same DOM element
+ * they always did. The loaded / error status text lives in
+ * `RouteCatalogStatus`, below the row — this component renders the select
+ * alone so its states never shift it. */
 function RouteModelSelect({
   domId,
   route,
@@ -141,9 +147,8 @@ function RouteModelSelect({
   const catalogIds =
     catalog.kind === "loaded" ? [...new Set(catalog.models.map((model) => model.id))] : [];
   return (
-    <select
+    <Form.Select
       id={domId}
-      className="form-select"
       value={route.model}
       onChange={(event) => onChange(event.target.value)}
       onMouseDown={onOpen}
@@ -172,7 +177,7 @@ function RouteModelSelect({
           {id}
         </option>
       ))}
-    </select>
+    </Form.Select>
   );
 }
 
@@ -255,12 +260,9 @@ function CapabilityBadges({ capabilities }: { capabilities: AliasCapabilities })
   return (
     <span className="d-inline-flex flex-wrap gap-1">
       {flags.map((flag) => (
-        <span
-          key={flag.label}
-          className={`badge ${flag.on ? "text-bg-success" : "text-bg-light border"}`}
-        >
+        <Badge key={flag.label} bg={flag.on ? "success" : "light"} text={flag.on ? "white" : "dark"} className={flag.on ? undefined : "border"}>
           {flag.label}
-        </span>
+        </Badge>
       ))}
     </span>
   );
@@ -284,7 +286,7 @@ function AliasTable({
   locked: boolean;
 }): ReactNode {
   return (
-    <table className="table table-sm align-middle">
+    <Table size="sm" className="align-middle">
       <thead>
         <tr>
           <th scope="col">alias</th>
@@ -318,30 +320,32 @@ function AliasTable({
             </td>
             <td>
               <span className="d-inline-flex gap-1">
-                <button
+                <Button
                   type="button"
-                  className="btn btn-sm btn-outline-secondary"
+                  variant="outline-secondary"
+                  size="sm"
                   onClick={() => onEdit(entry)}
                   disabled={locked}
                 >
                   <Pencil aria-hidden="true" className="me-1 align-text-bottom" size={14} />
                   Edit
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
-                  className="btn btn-sm btn-outline-danger"
+                  variant="outline-danger"
+                  size="sm"
                   onClick={() => onDelete(entry)}
                   disabled={locked}
                 >
                   <Trash2 aria-hidden="true" className="me-1 align-text-bottom" size={14} />
                   Delete
-                </button>
+                </Button>
               </span>
             </td>
           </tr>
         ))}
       </tbody>
-    </table>
+    </Table>
   );
 }
 
@@ -353,6 +357,8 @@ export function ModelsSection(): ReactNode {
   const [editor, setEditor] = useState<null | typeof NEW_ALIAS | string>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [busy, setBusy] = useState(false);
+  /** The one pending delete confirmation; open exactly while non-null. */
+  const [dialog, setDialog] = useState<ConfirmDialog | null>(null);
   /** Per-upstream live-catalog state within this editor visit (ADR-011). */
   const [catalogs, setCatalogs] = useState<Record<string, Catalog>>({});
   /** Synchronous snapshot of `catalogs` for the open-gesture guard, and the
@@ -491,8 +497,10 @@ export function ModelsSection(): ReactNode {
     })();
   };
 
-  const remove = (entry: ManagedModelAlias): void => {
-    if (!window.confirm(`Delete alias "${entry.alias}"? The next /llm/v1 request naming it answers 404.`)) return;
+  /** The delete itself — once the ConfirmModal's confirm button clears the
+   * dialog; `409 resource_in_use` (a client's ACL names the alias) and the
+   * last-entry `400` land as alerts. */
+  const deleteAlias = (entry: ManagedModelAlias): void => {
     setBusy(true);
     setError(null);
     void (async (): Promise<void> => {
@@ -502,13 +510,26 @@ export function ModelsSection(): ReactNode {
         // (the row is gone; the editor state resets with the table).
         await refresh();
       } catch (cause) {
-        // 409 resource_in_use (a client's ACL names the alias), 400 on the
-        // block's last entry — the envelope's message, as an alert.
         setError(cause instanceof Error ? cause.message : String(cause));
       } finally {
         setBusy(false);
       }
     })();
+  };
+
+  /** The delete affordance — opens the shared ConfirmModal instead of the
+   * native confirm dialog; Esc / backdrop / Cancel merely dismiss. */
+  const requestRemove = (entry: ManagedModelAlias): void => {
+    setDialog({
+      title: "Delete alias",
+      body: <>Delete alias "{entry.alias}"? The next /llm/v1 request naming it answers 404.</>,
+      destructive: true,
+      confirmLabel: "Delete",
+      onConfirm: () => {
+        setDialog(null);
+        deleteAlias(entry);
+      },
+    });
   };
 
   const editing = typeof editor === "string";
@@ -521,24 +542,20 @@ export function ModelsSection(): ReactNode {
           Models
         </h1>
         <span className="d-flex align-items-center gap-2">
-          <button
-            type="button"
-            className="btn btn-sm btn-primary"
-            onClick={openCreate}
-            disabled={editor !== null}
-          >
+          <Button type="button" variant="primary" size="sm" onClick={openCreate} disabled={editor !== null}>
             <Plus aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             Add alias
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="btn btn-sm btn-outline-secondary"
+            variant="outline-secondary"
+            size="sm"
             onClick={() => void refresh()}
             disabled={loading || editor !== null}
           >
             <RefreshCw aria-hidden="true" className="me-1 align-text-bottom" size={14} />
             Refresh
-          </button>
+          </Button>
         </span>
       </div>
       <p className="text-body-secondary">
@@ -549,15 +566,11 @@ export function ModelsSection(): ReactNode {
         runs live on the Upstreams section.
       </p>
 
-      {error !== null && (
-        <div className="alert alert-danger" role="alert">
-          {error}
-        </div>
-      )}
+      {error !== null && <Alert variant="danger">{error}</Alert>}
 
       {loading && (
         <div className="d-flex justify-content-center py-5" role="status">
-          <div className="spinner-border" aria-hidden="true"></div>
+          <Spinner animation="border" aria-hidden="true" />
           <span className="visually-hidden">Loading…</span>
         </div>
       )}
@@ -566,22 +579,20 @@ export function ModelsSection(): ReactNode {
         models.length === 0 ? (
           <p className="text-body-secondary">No aliases configured — add the first one.</p>
         ) : (
-          <AliasTable models={models} onEdit={openEdit} onDelete={remove} locked={editor !== null || busy} />
+          <AliasTable models={models} onEdit={openEdit} onDelete={requestRemove} locked={editor !== null || busy} />
         )
       )}
 
       {editor !== null && (
-        <form className="card mt-3" onSubmit={submit}>
-          <div className="card-body">
-            <h2 className="h5 card-title">{editing ? `Edit alias ${editor}` : "Add alias"}</h2>
+        <Card as="form" className="mt-3" onSubmit={submit}>
+          <Card.Body>
+            <Card.Title as="h2" className="h5">
+              {editing ? `Edit alias ${editor}` : "Add alias"}
+            </Card.Title>
             <div className="row g-3">
-              <div className="col-md-4">
-                <label className="form-label" htmlFor="model-alias">
-                  alias
-                </label>
-                <input
-                  id="model-alias"
-                  className="form-control"
+              <Form.Group className="col-md-4" controlId="model-alias">
+                <Form.Label>alias</Form.Label>
+                <Form.Control
                   value={form.alias}
                   onChange={(event) => setForm({ ...form, alias: event.target.value })}
                   disabled={editing}
@@ -593,14 +604,10 @@ export function ModelsSection(): ReactNode {
                 ) : (
                   <div className="form-text">No whitespace, no “/” (the upstream-prefix separator); unique.</div>
                 )}
-              </div>
-              <div className="col-md-4">
-                <label className="form-label" htmlFor="model-strategy">
-                  balance.strategy
-                </label>
-                <select
-                  id="model-strategy"
-                  className="form-select"
+              </Form.Group>
+              <Form.Group className="col-md-4" controlId="model-strategy">
+                <Form.Label>balance.strategy</Form.Label>
+                <Form.Select
                   value={form.strategy}
                   onChange={(event) =>
                     setForm({ ...form, strategy: event.target.value as BalanceStrategy })
@@ -611,13 +618,13 @@ export function ModelsSection(): ReactNode {
                       {strategy}
                     </option>
                   ))}
-                </select>
+                </Form.Select>
                 <div className="form-text">
                   {weighted
                     ? "Weighted rotation — every route needs a positive integer weight."
                     : "Routes rotate in config order; weights are not allowed."}
                 </div>
-              </div>
+              </Form.Group>
             </div>
 
             <label className="form-label mt-3">routes</label>
@@ -628,13 +635,9 @@ export function ModelsSection(): ReactNode {
                 return (
                   <div key={index}>
                     <div className="row g-2 align-items-end">
-                      <div className="col-md-4">
-                        <label className="form-label small text-body-secondary" htmlFor={`route-upstream-${index}`}>
-                          upstream {index + 1}
-                        </label>
-                        <select
-                          id={`route-upstream-${index}`}
-                          className="form-select"
+                      <Form.Group className="col-md-4" controlId={`route-upstream-${index}`}>
+                        <Form.Label className="small text-body-secondary">upstream {index + 1}</Form.Label>
+                        <Form.Select
                           value={route.upstream}
                           onChange={(event) =>
                             // a model belongs to its upstream — switching resets the pick
@@ -655,12 +658,10 @@ export function ModelsSection(): ReactNode {
                               {upstream.id}
                             </option>
                           ))}
-                        </select>
-                      </div>
-                      <div className="col-md-4">
-                        <label className="form-label small text-body-secondary" htmlFor={`route-model-${index}`}>
-                          model
-                        </label>
+                        </Form.Select>
+                      </Form.Group>
+                      <Form.Group className="col-md-4" controlId={`route-model-${index}`}>
+                        <Form.Label className="small text-body-secondary">model</Form.Label>
                         <RouteModelSelect
                           domId={`route-model-${index}`}
                           route={route}
@@ -675,14 +676,10 @@ export function ModelsSection(): ReactNode {
                           }
                           onOpen={() => ensureCatalog(route.upstream)}
                         />
-                      </div>
-                      <div className={weighted ? "col-md-2" : "col-md-2 d-none"}>
-                        <label className="form-label small text-body-secondary" htmlFor={`route-weight-${index}`}>
-                          weight
-                        </label>
-                        <input
-                          id={`route-weight-${index}`}
-                          className="form-control"
+                      </Form.Group>
+                      <Form.Group className={weighted ? "col-md-2" : "col-md-2 d-none"} controlId={`route-weight-${index}`}>
+                        <Form.Label className="small text-body-secondary">weight</Form.Label>
+                        <Form.Control
                           type="number"
                           min={1}
                           step={1}
@@ -698,14 +695,15 @@ export function ModelsSection(): ReactNode {
                           required={weighted}
                           placeholder="w"
                         />
-                      </div>
+                      </Form.Group>
                       <div className="col-md-2">
                         {/* the control-only column: the full-size button
                             matches the selects' height, so the row's shared
                             bottom alignment centers it on their centers */}
-                        <button
+                        <Button
                           type="button"
-                          className="btn btn-outline-danger w-100"
+                          variant="outline-danger"
+                          className="w-100"
                           onClick={() =>
                             setForm({ ...form, routes: form.routes.filter((_, i) => i !== index) })
                           }
@@ -714,7 +712,7 @@ export function ModelsSection(): ReactNode {
                         >
                           <Trash2 aria-hidden="true" className="me-1 align-text-bottom" size={14} />
                           Remove
-                        </button>
+                        </Button>
                       </div>
                     </div>
                     {/* the catalog status renders below the row — it moves
@@ -724,14 +722,16 @@ export function ModelsSection(): ReactNode {
                 );
               })}
             </div>
-            <button
+            <Button
               type="button"
-              className="btn btn-sm btn-outline-secondary mt-2"
+              variant="outline-secondary"
+              size="sm"
+              className="mt-2"
               onClick={() => setForm({ ...form, routes: [...form.routes, emptyRoute()] })}
             >
               <Plus aria-hidden="true" className="me-1 align-text-bottom" size={14} />
               Add route
-            </button>
+            </Button>
             {upstreams.length === 0 && (
               <div className="form-text">
                 No upstreams configured — add one under Upstreams first; every route names a configured upstream id.
@@ -739,13 +739,9 @@ export function ModelsSection(): ReactNode {
             )}
 
             <div className="row g-3 mt-1">
-              <div className="col-md-3">
-                <label className="form-label" htmlFor="model-limits-context">
-                  limits.context
-                </label>
-                <input
-                  id="model-limits-context"
-                  className="form-control"
+              <Form.Group className="col-md-3" controlId="model-limits-context">
+                <Form.Label>limits.context</Form.Label>
+                <Form.Control
                   type="number"
                   min={1}
                   step={1}
@@ -753,14 +749,10 @@ export function ModelsSection(): ReactNode {
                   onChange={(event) => setForm({ ...form, context: event.target.value })}
                   placeholder="optional"
                 />
-              </div>
-              <div className="col-md-3">
-                <label className="form-label" htmlFor="model-limits-output">
-                  limits.output
-                </label>
-                <input
-                  id="model-limits-output"
-                  className="form-control"
+              </Form.Group>
+              <Form.Group className="col-md-3" controlId="model-limits-output">
+                <Form.Label>limits.output</Form.Label>
+                <Form.Control
                   type="number"
                   min={1}
                   step={1}
@@ -769,28 +761,30 @@ export function ModelsSection(): ReactNode {
                   placeholder="optional"
                 />
                 <div className="form-text">Optional manual budgets; both empty = no limits block.</div>
-              </div>
+              </Form.Group>
             </div>
 
             <div className="d-flex gap-2 mt-3">
-              <button className="btn btn-primary" type="submit" disabled={busy}>
-                {busy && <span className="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>}
+              <Button type="submit" variant="primary" disabled={busy}>
+                {busy && <Spinner as="span" animation="border" size="sm" className="me-2" aria-hidden="true" />}
                 {editing ? <Save aria-hidden="true" className="me-1 align-text-bottom" size={16} /> : <Plus aria-hidden="true" className="me-1 align-text-bottom" size={16} />}
                 {editing ? "Save" : "Create"}
-              </button>
-              <button className="btn btn-outline-secondary" type="button" onClick={close} disabled={busy}>
+              </Button>
+              <Button type="button" variant="outline-secondary" onClick={close} disabled={busy}>
                 <X aria-hidden="true" className="me-1 align-text-bottom" size={16} />
                 Cancel
-              </button>
+              </Button>
             </div>
             <p className="form-text mb-0 mt-2">
               Saving validates and persists to config.json, then hot-applies —
               update replaces routes, balance and limits wholesale; the alias
               itself is immutable.
             </p>
-          </div>
-        </form>
+          </Card.Body>
+        </Card>
       )}
+
+      <ConfirmModal dialog={dialog} onDismiss={() => setDialog(null)} />
     </section>
   );
 }
