@@ -1,12 +1,21 @@
 import { useId, type FormEvent, type ReactNode } from "react";
-import { Button, Modal, Spinner } from "react-bootstrap";
+import { Button, Form, Modal, Spinner } from "react-bootstrap";
 import { Plus, Save, X } from "lucide-react";
 import "./modal.css";
 
 /**
- * The CRUD sections' shared create/edit dialog shell: a react-bootstrap
- * Modal rooted as a form (`as="form"` lands on `.modal-dialog`, so the
- * footer's submit button works and Enter in an input submits implicitly),
+ * The CRUD sections' shared create/edit dialog shell: a real `<form>`
+ * (react-bootstrap `Form`) inside the modal body carries the caller's
+ * `onSubmit`, and the footer's submit button binds to it through the HTML
+ * `form` attribute — `Modal` itself must NOT be asked to root the dialog as
+ * a form (`as="form"` is not consumed by `Modal`; it leaks as an inert
+ * attribute onto the `.modal-dialog` div, no `<form>` element exists, and a
+ * `type="submit"` button with no form owner is a dead button: the click
+ * fires nothing and the refusal is silent). The footer button submits
+ * through that association; Enter in an input submits via the form's
+ * explicit `onKeyDown` → `requestSubmit()` — Chromium scopes native implicit
+ * submission to buttons inside the `<form>` element and ignores an
+ * out-of-form default button even when it is form-associated. Dialog is
  * 90% of the viewport wide, with a static backdrop and Esc disabled — a
  * typed editing session survives stray gestures and closing stays
  * explicit: Cancel or the header close button, both `onClose`. The footer
@@ -41,12 +50,11 @@ export function EditorModal({
   children: ReactNode;
 }): ReactNode {
   const titleId = useId();
+  const formId = useId();
   return (
     <Modal
-      as="form"
       show={show}
       onHide={onClose}
-      onSubmit={onSubmit}
       aria-labelledby={titleId}
       dialogClassName="modal-90w"
       centered
@@ -59,10 +67,28 @@ export function EditorModal({
           {title}
         </Modal.Title>
       </Modal.Header>
-      <Modal.Body>{children}</Modal.Body>
+      <Modal.Body>
+        <Form
+          id={formId}
+          onSubmit={onSubmit}
+          onKeyDown={(event) => {
+            // Enter in an input submits explicitly: Chromium scopes implicit
+            // submission to buttons INSIDE the <form> element and ignores the
+            // out-of-form default button even with the form association, so
+            // the platform affordance cannot be relied on here.
+            if (event.key === "Enter" && event.target instanceof HTMLInputElement) {
+              event.preventDefault();
+              event.currentTarget.requestSubmit();
+            }
+          }}
+        >
+          {children}
+        </Form>
+      </Modal.Body>
       <Modal.Footer>
         <Button
           type="submit"
+          form={formId}
           variant="primary"
           className="d-inline-flex align-items-center gap-1"
           disabled={busy || submitDisabled}

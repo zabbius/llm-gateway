@@ -21,7 +21,11 @@
  * "keep the stored credential" (ADR-014 D7; sending the `[Configured]`
  * mask back is refused, so the field is never pre-filled). The blocking
  * probe's outcome arrives as data in the create/update answer (D8) and is
- * rendered next to the save confirmation. Every failure — including a `409`
+ * rendered next to the save confirmation. Client-side checks mirror the
+ * store's create grammar (the id pattern, the absolute http(s) baseUrl, the
+ * non-empty create apiKey) and surface their refusals as the in-modal
+ * alert — a refused create is operator-readable, never a silent no-op.
+ * Every failure — including a `409`
  * `resource_in_use` delete — surfaces as an alert carrying the OpenAI
  * envelope's message. Deletion is confirmed through the shared
  * ConfirmModal (Esc / backdrop / Cancel dismiss; only Delete proceeds).
@@ -72,6 +76,55 @@ function formFor(upstream: ManagedUpstream): FormState {
     apiKey: "",
     tlsFingerprint: "",
   };
+}
+
+/**
+ * The upstream id grammar — mirrors `UPSTREAM_ID_PATTERN` in
+ * src/config/schema.ts, where the store re-validates authoritatively:
+ * lowercase letters, digits, hyphens; never "/" (ids ride URL paths).
+ */
+const UPSTREAM_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+/** An absolute http(s) URL — the store's `baseUrl` rule (schema's `isHttpUrl`). */
+function isHttpUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return url.protocol === "http:" || url.protocol === "https:";
+}
+
+/**
+ * The client-side pass over the store's entry grammar — convenience only,
+ * exactly like the Models section's: every violation surfaces as a visible
+ * in-modal alert, never a silent refusal (a refused create stays
+ * operator-readable — the SPA contract's "never silent" rule), and the
+ * store re-validates the submitted body authoritatively (its value-free
+ * `400` problem lines land as the alert through the same error state).
+ */
+function validateForm(form: FormState, editing: boolean): string | null {
+  if (!editing) {
+    const id = form.id.trim();
+    if (id === "") return "id is required.";
+    if (!UPSTREAM_ID_PATTERN.test(id)) {
+      return `id "${id}" must match ^[a-z0-9][a-z0-9-]*$ (lowercase letters, digits, hyphens; never "/").`;
+    }
+  }
+  const baseUrl = form.baseUrl.trim();
+  if (baseUrl === "") return "baseUrl is required.";
+  if (!isHttpUrl(baseUrl)) {
+    return `baseUrl "${baseUrl}" must be an absolute http(s) URL including the API root with "/v1" (e.g. http://localhost:8080/v1).`;
+  }
+  // The grammar demands a non-empty apiKey on create even for a keyless
+  // local server — the value rides upstream as the Bearer credential only,
+  // so any placeholder works; on edit an empty field means "keep the
+  // stored credential" (D7) and needs no check.
+  if (!editing && form.apiKey.trim() === "") {
+    return 'apiKey is required on create — even a keyless local server needs a non-empty value; any placeholder (e.g. "sk-local") works.';
+  }
+  return null;
 }
 
 /** One upstream's live listing state within this section visit. */
@@ -318,7 +371,13 @@ export function UpstreamsSection(): ReactNode {
       ...(form.apiKey !== "" ? { apiKey: form.apiKey } : {}),
       ...(form.tlsFingerprint !== "" ? { tlsFingerprint: form.tlsFingerprint } : {}),
     };
-    if (!editing && (form.id.trim() === "" || form.apiKey === "")) return; // create requires both
+    // The client-side grammar pass — a refusal lands as the in-modal alert,
+    // never a silent no-op; the store stays authoritative on the body.
+    const problem = validateForm(form, editing);
+    if (problem !== null) {
+      setError(problem);
+      return;
+    }
 
     setBusy(true);
     setProbe(null);
@@ -572,7 +631,6 @@ export function UpstreamsSection(): ReactNode {
                 value={form.id}
                 onChange={(event) => setForm({ ...form, id: event.target.value })}
                 disabled={editing}
-                required={!editing}
               />
               {editing && (
                 <div className="form-text">The id is immutable — the path parameter owns it.</div>
@@ -581,10 +639,8 @@ export function UpstreamsSection(): ReactNode {
             <Form.Group as="div" className="col-md-4" controlId="upstream-base-url">
               <Form.Label>baseUrl</Form.Label>
               <Form.Control
-                type="url"
                 value={form.baseUrl}
                 onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
-                required
                 placeholder="https://api.example.com/v1"
               />
             </Form.Group>
@@ -597,13 +653,12 @@ export function UpstreamsSection(): ReactNode {
                 autoComplete="new-password"
                 value={form.apiKey}
                 onChange={(event) => setForm({ ...form, apiKey: event.target.value })}
-                required={!editing}
                 placeholder={editing ? `пусто = не менять (сейчас ${CONFIGURED_MASK})` : "provider API key"}
               />
               <div className="form-text">
                 {editing
                   ? "Leave empty to keep the stored credential — the stored value is never served back."
-                  : "Required on create; stored once, served back only as the mask."}
+                  : 'Required on create — even a keyless local server takes any placeholder (e.g. "sk-local"); stored once, served back only as the mask.'}
               </div>
             </Form.Group>
             <Form.Group as="div" className="col-md-6" controlId="upstream-tls-pin">
