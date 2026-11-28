@@ -12,6 +12,11 @@
  *  - delete refuses an in-use upstream with the `409 resource_in_use`
  *    envelope (D6) and removes an unreferenced one everywhere (store, disk,
  *    registry, metadata slice);
+ *  - the write-body wire grammar over HTTP: an absent `apiKey` / pin /
+ *    proxy keeps the stored value; `null` or `""` clears a pin or a proxy
+ *    but never the required `apiKey` (400 `cannot be cleared`); a
+ *    whitespace-only value is refused (400); the mask literal is never an
+ *    input;
  *  - the live listing with `discover=1` runs one `listModels()` within the
  *    budget and swaps the alias-metadata slice wholesale before the answer
  *    (retain-last-good on failure — the 502 envelope, store untouched);
@@ -319,10 +324,11 @@ describe("POST /api/upstreams", () => {
     expect(Object.hasOwn(onDisk.upstreams.find((entry) => entry.id === "blank-pin") ?? {}, "tlsFingerprint")).toBe(false);
   });
 
-  test("a null body value is the key not set over HTTP: null pin/proxy land without keys, a null apiKey keeps on update and is reported missing on create", async () => {
+  test("a null body value is the key not set over HTTP — except the wire grammar: null pin/proxy land without keys, a null id is inherited, a null apiKey is refused on update and reported missing on create", async () => {
     const { app, configPath } = await gateway();
 
-    // create — null optional keys leave the entry without them
+    // create — null optional keys are the clear signal, which on a create
+    // reads as absent: the entry lands without them
     const created = await app.request("/api/upstreams", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -342,29 +348,59 @@ describe("POST /api/upstreams", () => {
     expect(createdBody.upstream.tlsFingerprint).toBeNull();
     expect(createdBody.upstream.proxy).toBeNull();
 
-    // update — a null apiKey (and a null id) read exactly like omitted ones: the
-    // stored credential is kept, the id inherited (D7)
+    // update — a null id is inherited like an omitted one, and an absent
+    // apiKey keeps the stored credential (D7)
     const update = await app.request("/api/upstreams/nulls", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "openai-compatible", baseUrl: "https://nulls.example.com/v1", id: null, apiKey: null }),
+      body: JSON.stringify({ type: "openai-compatible", baseUrl: "https://nulls.example.com/v1", id: null }),
     });
     expect(update.status).toBe(200);
 
-    const onDisk = JSON.parse(readFileSync(configPath, "utf8")) as { upstreams: Record<string, unknown>[] };
-    const entry = onDisk.upstreams.find((candidate) => candidate.id === "nulls") ?? {};
-    expect(entry.apiKey).toBe("sk-upstream-synthetic-nulls");
-    expect(Object.hasOwn(entry, "tlsFingerprint")).toBe(false);
-    expect(Object.hasOwn(entry, "proxy")).toBe(false);
+    const onDisk = (): Record<string, unknown> =>
+      (JSON.parse(readFileSync(configPath, "utf8")) as { upstreams: Record<string, unknown>[] }).upstreams.find(
+        (candidate) => candidate.id === "nulls",
+      ) ?? {};
+    expect(onDisk().apiKey).toBe("sk-upstream-synthetic-nulls");
+    expect(Object.hasOwn(onDisk(), "tlsFingerprint")).toBe(false);
+    expect(Object.hasOwn(onDisk(), "proxy")).toBe(false);
 
-    // create — a null required key is the 400 envelope, reported missing like an absent one
-    const refused = await app.request("/api/upstreams", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "openai-compatible", id: "nokey", baseUrl: "https://x.example.com/v1", apiKey: null }),
-    });
-    expect(refused.status).toBe(400);
-    expect((JSON.parse(await bodyText(refused)) as Envelope).error.message).toContain('missing required key "apiKey"');
+    // update — the clear signal on the required credential is refused: a
+    // null or an empty apiKey cannot be cleared, a whitespace-only one is
+    // not a value — the stored key and the file survive every refusal
+    const before = readFileSync(configPath, "utf8");
+    for (const [apiKey, expected] of [
+      [null, "cannot be cleared"],
+      ["", "cannot be cleared"],
+      ["   ", "must not be whitespace-only"],
+    ] as const) {
+      const refused = await app.request("/api/upstreams/nulls", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "openai-compatible", baseUrl: "https://nulls.example.com/v1", apiKey }),
+      });
+      expect(refused.status).toBe(400);
+      const envelope = JSON.parse(await bodyText(refused)) as Envelope;
+      expect(envelope.error.type).toBe("invalid_request_error");
+      expect(envelope.error.message).toContain(expected);
+    }
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+
+    // create — a null required key is the 400 envelope, reported missing
+    // like an absent one; the empty string is reported empty, a blank refused
+    for (const [apiKey, expected] of [
+      [null, 'missing required key "apiKey"'],
+      ["", "must be a non-empty string"],
+      ["   ", "must not be whitespace-only"],
+    ] as const) {
+      const refused = await app.request("/api/upstreams", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "openai-compatible", id: "nokey", baseUrl: "https://x.example.com/v1", apiKey }),
+      });
+      expect(refused.status).toBe(400);
+      expect((JSON.parse(await bodyText(refused)) as Envelope).error.message).toContain(expected);
+    }
   });
 
   test("validation refusals are the 400 envelope and mutate nothing (duplicate id, grammar, mask literal)", async () => {
@@ -469,32 +505,58 @@ describe("PUT /api/upstreams/:id", () => {
     expect(unknown.status).toBe(404);
   });
 
-  test("an empty tlsFingerprint is no pin: the answer and the file carry no key — never the mask, never \"\"", async () => {
+  test("an empty or null tlsFingerprint/proxy is the clear signal — the answer reads null and the file carries no key; a whitespace-only one is refused and leaves the stored value", async () => {
     const { app, configPath } = await gateway();
-    const storedPin = (): unknown =>
-      (JSON.parse(readFileSync(configPath, "utf8")) as { upstreams: Record<string, unknown>[] }).upstreams.find((entry) => entry.id === "openai")?.tlsFingerprint;
-    const put = (tlsFingerprint: string) =>
+    const stored = (key: "tlsFingerprint" | "proxy"): unknown =>
+      (JSON.parse(readFileSync(configPath, "utf8")) as { upstreams: Record<string, unknown>[] }).upstreams.find((entry) => entry.id === "openai")?.[key];
+    const put = (patch: Record<string, unknown>) =>
       app.request("/api/upstreams/openai", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ type: "openai-compatible", id: "openai", baseUrl: "https://openai.example.com/v1", tlsFingerprint }),
+        body: JSON.stringify({ type: "openai-compatible", id: "openai", baseUrl: "https://openai.example.com/v1", ...patch }),
       });
-    const answerPin = async (response: Response): Promise<string | null> =>
-      (JSON.parse(await bodyText(response)) as { upstream: { tlsFingerprint: string | null } }).upstream.tlsFingerprint;
+    const answer = async (response: Response): Promise<{ tlsFingerprint: string | null; proxy: string | null }> =>
+      (JSON.parse(await bodyText(response)) as { upstream: { tlsFingerprint: string | null; proxy: string | null } }).upstream;
+    const PROXY = "http://proxy.example.com:3128";
 
-    // a set pin answers with the mask (D7: the view never carries the value)
-    expect(await answerPin(await put(SYNTHETIC_PIN))).toBe("[Configured]");
-    expect(storedPin()).toBe(SYNTHETIC_PIN);
+    // a set pin answers with the mask (D7: the view never carries the value);
+    // a set proxy — not a credential, the grammar forbids userinfo (ADR-017) —
+    // rides the view verbatim
+    expect((await answer(await put({ tlsFingerprint: SYNTHETIC_PIN }))).tlsFingerprint).toBe("[Configured]");
+    expect(stored("tlsFingerprint")).toBe(SYNTHETIC_PIN);
+    expect((await answer(await put({ proxy: PROXY }))).proxy).toBe(PROXY);
+    expect(stored("proxy")).toBe(PROXY);
 
-    // the grammar's empty value is "no pin" — it clears the stored pin like an explicit null
-    for (const empty of ["", "   "]) {
-      expect(await answerPin(await put(SYNTHETIC_PIN))).toBe("[Configured]");
-      expect(await answerPin(await put(empty))).toBeNull(); // absent, never the mask
-      expect(storedPin()).toBeUndefined(); // the file carries no key at all — never ""
+    // a whitespace-only value is neither a value nor a clear: refused, the
+    // stored pin / proxy and the file untouched
+    const before = readFileSync(configPath, "utf8");
+    for (const patch of [{ tlsFingerprint: "   " }, { proxy: "   " }]) {
+      const refused = await put(patch);
+      expect(refused.status).toBe(400);
+      const envelope = JSON.parse(await bodyText(refused)) as Envelope;
+      expect(envelope.error.type).toBe("invalid_request_error");
+      expect(envelope.error.message).toContain("must not be whitespace-only");
+    }
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+
+    // the clear signal — null or the exact empty string, one signal — lands
+    // as absent: the answer reads null, the file carries no key at all
+    // (never the mask, never ""), and the list agrees
+    for (const clear of [null, ""]) {
+      expect((await answer(await put({ tlsFingerprint: SYNTHETIC_PIN }))).tlsFingerprint).toBe("[Configured]");
+      expect((await answer(await put({ tlsFingerprint: clear }))).tlsFingerprint).toBeNull();
+      expect(stored("tlsFingerprint")).toBeUndefined();
+
+      expect((await answer(await put({ proxy: PROXY }))).proxy).toBe(PROXY);
+      expect((await answer(await put({ proxy: clear }))).proxy).toBeNull();
+      expect(stored("proxy")).toBeUndefined();
+
       const list = await app.request("/api/upstreams");
-      expect(
-        ((await list.json()) as { upstreams: { id: string; tlsFingerprint: string | null }[] }).upstreams.find((entry) => entry.id === "openai")?.tlsFingerprint,
-      ).toBeNull();
+      const entry = (
+        (await list.json()) as { upstreams: { id: string; tlsFingerprint: string | null; proxy: string | null }[] }
+      ).upstreams.find((candidate) => candidate.id === "openai");
+      expect(entry?.tlsFingerprint).toBeNull();
+      expect(entry?.proxy).toBeNull();
     }
   });
 

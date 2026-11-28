@@ -86,21 +86,26 @@ export interface UpstreamConfig {
   /**
  * Optional TLS SPKI pin: base64 (standard alphabet) of the SHA-256 digest
  * of the upstream certificate's SubjectPublicKeyInfo DER — exactly 32 bytes
- * decoded. Absent, `null`, empty or whitespace-only → the system CA pool
- * verifies the upstream certificate (the null rule and the empty-string
- * normalization leave the entry without the key, never with `null` or
- * `""`); otherwise → ONLY the pinned key is accepted (ADR-004). Inert on a
- * plain-http baseUrl. Compute with `tools/tls-fingerprint.ts`.
+ * decoded. Absent, `null` or `""` → the system CA pool verifies the
+ * upstream certificate (the null rule and the empty-string normalization
+ * leave the entry without the key, never with `null` or `""`); a
+ * whitespace-only value is NOT "no pin" — it fails validation, so a
+ * half-deleted entry never silently widens trust; otherwise → ONLY the
+ * pinned key is accepted (ADR-004). Whitespace inside a non-empty pin is
+ * stripped before validation (a pin pasted with line wraps still matches).
+ * Inert on a plain-http baseUrl. Compute with `tools/tls-fingerprint.ts`.
  */
   tlsFingerprint?: string;
   /**
    * Optional outbound proxy this upstream's requests go through (ADR-017):
    * an `http:` or `socks5:` URL with a non-empty host, an explicit port in
    * 1..65535, no username/password (proxy credentials never enter the
-   * config) and no path (beyond `/`), query or fragment. Absent, `null`,
-   * empty or whitespace-only → a direct connection (normalized to
-   * `undefined`); otherwise stored trimmed. The value is never echoed into
-   * a problem line — a pasted `user:pass@host` URL must not reach stderr.
+   * config) and no path (beyond `/`), query or fragment. Absent, `null` or
+   * `""` → a direct connection (normalized to `undefined`); a
+   * whitespace-only value is NOT "direct" — it fails validation, so a
+   * half-deleted entry never silently changes the egress topology;
+   * otherwise stored trimmed. The value is never echoed into a problem line
+   * — a pasted `user:pass@host` URL must not reach stderr.
    */
   proxy?: string;
 }
@@ -302,11 +307,32 @@ export function isValidPasswordHash(value: string): boolean {
 const TLS_FINGERPRINT_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
 
 /**
- * Normalize an upstream `tlsFingerprint` value: absent, `null`, empty or
- * whitespace-only → `undefined` (no pin — the grammar's own "no pin", never
- * an empty string on the entry); a string → stripped of every whitespace
- * character (a pin pasted with line wraps still matches). Exported so
- * `src/config/store.ts` applies the same normalization to its runtime
+ * True when `value` is a string that is not empty yet trims to nothing —
+ * spaces, tabs, newlines and no other character. The FILE grammar has
+ * exactly one way to say "no value" for an optional credential-like field
+ * (`tlsFingerprint`, `proxy`): absent, `null` or `""`; a required credential
+ * (`apiKey`) has no "no value" form at all. A whitespace-only string is
+ * therefore a validation problem at startup — a half-deleted entry or a
+ * placeholder must fail loudly, never read as "unset". Checked BEFORE
+ * normalization in `validateGatewayConfig`: `normalizeTlsFingerprint` /
+ * `normalizeProxy` still map whitespace-only to `undefined` because the
+ * management surface's clear-on-write path relies on that reading
+ * (ADR-014 D7) — it never reaches them from the file path.
+ */
+function isWhitespaceOnly(value: unknown): boolean {
+  return typeof value === "string" && value !== "" && value.trim() === "";
+}
+
+/**
+ * Normalize an upstream `tlsFingerprint` value: a non-string (absent /
+ * `null`), `""` — and, so the management surface's clear-on-write path keeps
+ * working (ADR-014 D7), a whitespace-only string — → `undefined` (no pin,
+ * never an empty string on the entry); any other string → stripped of every
+ * whitespace character (a pin pasted with line wraps still matches). In the
+ * FILE grammar a whitespace-only value is a validation problem:
+ * `validateGatewayConfig` checks it BEFORE calling this, so only the
+ * management surface ever reaches the whitespace-only branch here. Exported
+ * so `src/config/store.ts` applies the same normalization to its runtime
  * writes as the startup loader does.
  */
 export function normalizeTlsFingerprint(value: unknown): string | undefined {
@@ -316,11 +342,14 @@ export function normalizeTlsFingerprint(value: unknown): string | undefined {
 }
 
 /**
- * True when `value` is an acceptable `tlsFingerprint` input: the empty or
- * whitespace-only string (no pin), or a base64 (standard alphabet) string
- * decoding to exactly 32 bytes. A syntactically wrong pin fails config
- * validation — typos fail loudly at startup, never at the first request
- * (specs/domains/configuration.md).
+ * True when `value` is an acceptable `tlsFingerprint` pin input: the empty
+ * string (no pin), or a base64 (standard alphabet) string decoding to
+ * exactly 32 bytes. A whitespace-only string also reads as true here (it
+ * normalizes to "no pin"), but the file validator rejects it before this
+ * predicate runs (`isWhitespaceOnly`), so the FILE grammar never accepts it;
+ * the management surface's clear path relies on the lenient reading. A
+ * syntactically wrong pin fails config validation — typos fail loudly at
+ * startup, never at the first request (specs/domains/configuration.md).
  */
 export function isValidTlsFingerprint(value: string): boolean {
   const normalized = normalizeTlsFingerprint(value);
@@ -393,10 +422,15 @@ export function normalizeBaseUrl(url: string): string {
 export const PROXY_SCHEMES = ["http:", "socks5:"] as const;
 
 /**
- * Normalize an upstream `proxy` value: absent, `null`, empty or
- * whitespace-only → `undefined` (a direct connection); a string → trimmed.
- * Exported so `src/config/store.ts` can apply the same normalization to its
- * runtime writes as the startup loader does.
+ * Normalize an upstream `proxy` value: a non-string (absent / `null`), `""`
+ * — and, so the management surface's clear-on-write path keeps working
+ * (ADR-014 D7), a whitespace-only string — → `undefined` (a direct
+ * connection); any other string → trimmed. In the FILE grammar a
+ * whitespace-only value is a validation problem: `validateGatewayConfig`
+ * checks it BEFORE calling this, so only the management surface ever reaches
+ * the whitespace-only branch here. Exported so `src/config/store.ts` can
+ * apply the same normalization to its runtime writes as the startup loader
+ * does.
  */
 export function normalizeProxy(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -444,7 +478,9 @@ export function isValidProxyUrl(value: string): boolean {
 
 /**
  * Copy a normalized `proxy` into an upstream entry — only when one is
- * configured; an absent/null/empty value yields no key at all.
+ * configured; an absent/null/empty value yields no key at all (a
+ * whitespace-only value never reaches this from the file path — the
+ * validator rejects it first).
  */
 function normalizedProxy(value: unknown): { proxy: string } | {} {
   const trimmed = normalizeProxy(value);
@@ -453,8 +489,9 @@ function normalizedProxy(value: unknown): { proxy: string } | {} {
 
 /**
  * Copy a normalized `tlsFingerprint` into an upstream entry — only when a
- * pin is configured; an absent value or an empty / whitespace-only string
- * (the grammar's own "no pin") yields no key at all.
+ * pin is configured; an absent/null/empty value yields no key at all (a
+ * whitespace-only value never reaches this from the file path — the
+ * validator rejects it first).
  */
 function normalizedTlsFingerprint(value: unknown): { tlsFingerprint: string } | {} {
   const pin = normalizeTlsFingerprint(value);
@@ -646,11 +683,12 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
 
       // The client apiKey value is never echoed into a problem line — it must
       // never reach stderr or any log, exactly like an upstream apiKey
-      // (specs/architecture/security-model.md).
+      // (specs/architecture/security-model.md). A whitespace-only value is
+      // not a credential either: it fails exactly like the empty string.
       const clientKey = entry.apiKey;
       if (clientKey === undefined) {
         problems.push(`clients[${index}]: missing required key "apiKey"`);
-      } else if (typeof clientKey !== "string" || clientKey.length === 0) {
+      } else if (typeof clientKey !== "string" || clientKey.trim().length === 0) {
         problems.push(`clients[${index}]: apiKey must be a non-empty string`);
       }
 
@@ -934,25 +972,34 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     }
 
     // The apiKey value is never echoed into a problem line — it must never
-    // reach stderr or any log (specs/architecture/security-model.md).
+    // reach stderr or any log (specs/architecture/security-model.md). A
+    // whitespace-only value is not a credential either: it fails exactly
+    // like the empty string.
     const apiKey = entry.apiKey;
     if (apiKey === undefined) {
       problems.push(`upstreams[${index}]: missing required key "apiKey"`);
-    } else if (typeof apiKey !== "string" || apiKey.length === 0) {
+    } else if (typeof apiKey !== "string" || apiKey.trim().length === 0) {
       problems.push(`upstreams[${index}]: apiKey must be a non-empty string`);
     }
 
     // The problem line names the key and the rule but never echoes the
     // configured value — validation output stays free of pin material the
-    // same way it stays free of apiKey. An absent, `null`, empty or
-    // whitespace-only value means no pin (the null rule and the empty-string
-    // normalization below — the entry never carries `""` or `null`); a pin
-    // on a plain-http baseUrl stays valid but is inert (ADR-004).
+    // same way it stays free of apiKey. "No pin" is expressed only as
+    // absent, `null` or `""` (the null rule and the empty-string
+    // normalization below — the entry never carries `""` or `null`); a
+    // whitespace-only value is a problem, never read as "no pin" — checked
+    // BEFORE `isValidTlsFingerprint`, which is lenient about it for the
+    // management surface's clear path. A pin on a plain-http baseUrl stays
+    // valid but is inert (ADR-004).
     const tlsFingerprint = entry.tlsFingerprint;
     if (tlsFingerprint !== undefined) {
       if (typeof tlsFingerprint !== "string") {
         problems.push(
           `upstreams[${index}]: tlsFingerprint must be a string — base64 of the SHA-256 SPKI digest (32 bytes)`,
+        );
+      } else if (isWhitespaceOnly(tlsFingerprint)) {
+        problems.push(
+          `upstreams[${index}]: tlsFingerprint must not be whitespace-only — omit the key, use null or "" for no value`,
         );
       } else if (!isValidTlsFingerprint(tlsFingerprint)) {
         problems.push(
@@ -963,13 +1010,20 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
 
     // The proxy value is never echoed into a problem line — a pasted
     // `user:pass@host` URL carries credentials that must not reach stderr or
-    // any log (specs/architecture/security-model.md, ADR-017). Absent, null,
-    // empty or whitespace-only means a direct connection.
+    // any log (specs/architecture/security-model.md, ADR-017). "Direct
+    // connection" is expressed only as absent, `null` or `""`; a
+    // whitespace-only value is a problem, never read as "direct" — checked
+    // BEFORE `normalizeProxy`, which maps it to "no value" for the
+    // management surface's clear path.
     const proxy = entry.proxy;
     if (proxy !== undefined) {
       if (typeof proxy !== "string") {
         problems.push(
           `upstreams[${index}]: proxy must be a string — an http: or socks5: URL with an explicit port, or null for a direct connection`,
+        );
+      } else if (isWhitespaceOnly(proxy)) {
+        problems.push(
+          `upstreams[${index}]: proxy must not be whitespace-only — omit the key, use null or "" for no value`,
         );
       } else {
         const trimmed = normalizeProxy(proxy);

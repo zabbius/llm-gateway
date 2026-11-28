@@ -62,7 +62,8 @@ specs/
     ├── 014-runtime-management-crud.md      runtime management CRUD on /api: write-back, hot apply, the status-probe shrink
     ├── 015-adopt-react-bootstrap.md         react-bootstrap as the SPA component layer, the shared ConfirmModal
     ├── 016-discover-folded-into-live-listing.md discover folded into the live listing (discover=1)
-    └── 017-per-upstream-outbound-proxy.md   per-upstream outbound proxy: the optional `proxy` field (http:/socks5: URL, explicit port, no userinfo)
+    ├── 017-per-upstream-outbound-proxy.md   per-upstream outbound proxy: the optional `proxy` field (http:/socks5: URL, explicit port, no userinfo)
+    └── 018-uniform-optional-value-write-policy.md  uniform keep / clear / reject grammar for `apiKey` / `tlsFingerprint` / `proxy` on the file and the wire
 ```
 
 This tree is the canonical layout of the spec system: every spec file under `specs/` lands at the path shown here.

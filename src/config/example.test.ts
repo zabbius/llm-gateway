@@ -6,8 +6,11 @@
  * supported option, so it must never drift from `src/config/schema.ts`.
  * These tests fail when the schema gains, drops, or renames a key without
  * the example following, when a new upstream type is registered without a
- * sample entry, or when the example stops being a valid config — forcing
- * the example update into the same change as the schema change.
+ * sample entry, when the example stops being a valid config, or when an
+ * example `apiKey` / `tlsFingerprint` / `proxy` value becomes
+ * whitespace-only (the file grammar rejects it — only absent, `null` or
+ * `""` mean "no value") — forcing the example update into the same change
+ * as the schema change.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -41,6 +44,24 @@ describe("config.example.json", () => {
     expect(validated.config.server.listen).toBe("127.0.0.1:8080");
     expect(validated.config.logLevel).toBe("info");
     expect(validated.config.upstreams.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("no apiKey / tlsFingerprint / proxy value is whitespace-only — the file grammar rejects it", () => {
+    // absent, `null` or `""` are the only "no value" forms; a whitespace-only
+    // value would make the copy-paste starting point fail its own validation
+    const example = readExample() as {
+      upstreams: Record<string, unknown>[];
+      clients: Record<string, unknown>[];
+    };
+    const whitespaceOnly = (value: unknown): boolean => typeof value === "string" && value !== "" && value.trim() === "";
+    for (const entry of example.upstreams) {
+      for (const key of ["apiKey", "tlsFingerprint", "proxy"]) {
+        expect(whitespaceOnly(entry[key])).toBe(false);
+      }
+    }
+    for (const entry of example.clients) {
+      expect(whitespaceOnly(entry.apiKey)).toBe(false);
+    }
   });
 
   test("covers every supported top-level key exactly", () => {

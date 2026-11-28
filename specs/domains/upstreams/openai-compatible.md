@@ -53,7 +53,7 @@ When the upstream response has `Content-Type: text/event-stream`:
 
 ### TLS pinning (`tlsFingerprint`) — ADR-004
 
-A non-empty `tlsFingerprint` on the config entry switches the upstream's only upstream fetch (`upstreamFetch` — shared by `forward()` and `fetchModels()`) to the pinned path; `http` baseUrls and absent/empty pins keep the plain fetch (the config grammar normalizes an empty or whitespace-only value away — a normalized entry carries either a full pin or no key, [Configuration](../configuration.md); the module keeps its own non-empty guard, so a directly constructed entry with `""` is unpinned as well):
+A non-empty `tlsFingerprint` on the config entry switches the upstream's only upstream fetch (`upstreamFetch` — shared by `forward()` and `fetchModels()`) to the pinned path; `http` baseUrls and absent / `null` / `""` pins keep the plain fetch (the config grammar normalizes `null` and `""` to absent and refuses whitespace-only — [ADR-018](../../decisions/018-uniform-optional-value-write-policy.md); a normalized entry carries either a full pin or no key, [Configuration](../configuration.md); the module keeps its own non-empty guard, so a directly constructed entry with `""` is unpinned as well):
 
 ```
 upstreamFetch on a pinned upstream (https baseUrl) — pinnedUpstreamRequest:

@@ -17,9 +17,12 @@
  * closing is explicit via Cancel or the header close button): create
  * fills every field, edit
  * disables the immutable id and leaves the key fields empty — an empty
- * `apiKey` is omitted from the request body, which the boundary reads as
- * "keep the stored credential" (ADR-014 D7; sending the `[Configured]`
- * mask back is refused, so the field is never pre-filled). The outbound
+ * `apiKey` (after trimming) is omitted from the request body, which the
+ * boundary reads as "keep the stored credential" (ADR-014 D7; sending the
+ * `[Configured]` mask back is refused, so the field is never pre-filled;
+ * a whitespace-only value is the store's `400`, so the field is trimmed
+ * before the emptiness decision and a filled one is sent trimmed, like the
+ * pin and the proxy). The outbound
  * `proxy` (ADR-017) is served verbatim — it is not secret, the grammar
  * admits no userinfo — so the edit form pre-fills it; an empty field is
  * omitted the same way (keep the stored proxy on edit, a direct connection
@@ -178,7 +181,8 @@ function validateForm(form: FormState, editing: boolean): string | null {
   }
   // The grammar demands a non-empty apiKey on create even for a keyless
   // local server — the value rides upstream as the Bearer credential only,
-  // so any placeholder works; on edit an empty field means "keep the
+  // so any placeholder works, but whitespace alone does not (the store's
+  // own classification trims first); on edit an empty field means "keep the
   // stored credential" (D7) and needs no check.
   if (!editing && form.apiKey.trim() === "") {
     return 'apiKey is required on create — even a keyless local server needs a non-empty value; any placeholder (e.g. "sk-local") works.';
@@ -435,11 +439,13 @@ export function UpstreamsSection(): ReactNode {
       baseUrl: form.baseUrl.trim(),
       // Empty = unchanged (D7): the fields ride the body only when filled —
       // an absent apiKey keeps the stored credential, an absent pin keeps
-      // the stored one; the mask literal is never submitted.
-      ...(form.apiKey !== "" ? { apiKey: form.apiKey } : {}),
-      // Empty after trimming = unchanged: the pin follows the proxy rule —
-      // a whitespace-only field is omitted rather than sent (the store would
-      // read it as the grammar's "no pin" and clear a stored one on edit).
+      // the stored one; the mask literal is never submitted. "Empty" is
+      // decided after trimming, uniformly for the three fields: on the wire
+      // an empty pin or proxy is the clear signal, while an empty or
+      // whitespace-only apiKey is refused (a required credential cannot be
+      // cleared) — so a blank field is omitted, never sent as typed, and a
+      // filled one is submitted trimmed (the store's own normalization).
+      ...(form.apiKey.trim() !== "" ? { apiKey: form.apiKey.trim() } : {}),
       ...(form.tlsFingerprint.trim() !== "" ? { tlsFingerprint: form.tlsFingerprint.trim() } : {}),
       // The proxy follows the same rule (ADR-017): filled → submitted
       // (trimmed, the store's own normalization); empty → omitted, so

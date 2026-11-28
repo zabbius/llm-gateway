@@ -15,6 +15,10 @@
  *    rebuilt — a new key admits immediately, a changed ACL cuts immediately
  *    (403 on the now-forbidden alias, upstream never contacted), a deleted
  *    key answers 401 invalid_api_key immediately;
+ *  - the write-body wire grammar over HTTP: an absent `apiKey` keeps the
+ *    stored credential; `null` or `""` is the clear signal, refused on the
+ *    required credential (400 `cannot be cleared`); a whitespace-only value
+ *    is refused (400); the mask literal is never an input;
  *  - rejection paths: 401 without a session (gate on), 400 validation
  *    (duplicate name, empty/mask-literal apiKey, empty or unknown-alias
  *    models, immutable name, the last-entry rule), 404 unknown name.
@@ -431,7 +435,7 @@ describe("PUT /api/clients/:name", () => {
     void store;
   });
 
-  test("an absent apiKey keeps the stored credential; a replaced key invalidates the old one immediately", async () => {
+  test("an absent apiKey keeps the stored credential; the clear signal on it is refused; a replaced key invalidates the old one immediately", async () => {
     const { app, configPath } = await gateway(true);
 
     // Absent apiKey (D7): only the models change — the old key keeps working.
@@ -446,17 +450,39 @@ describe("PUT /api/clients/:name", () => {
     const oldStillWorks = await app.request("/llm/v1/models", { headers: { authorization: `Bearer ${CLIENT_KEY}` } });
     expect(oldStillWorks.status).toBe(200);
 
-    // A null apiKey (and a null name) read exactly like omitted ones — the
-    // stored credential is kept, the name inherited (the null rule).
+    // A null name is inherited like an omitted one (the null rule) — the
+    // apiKey stays absent, so the stored credential is kept.
     const nullKept = await app.request("/api/clients/ci", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: null, apiKey: null, models: ["smart"] }),
+      body: JSON.stringify({ name: null, models: ["smart"] }),
     });
     expect(nullKept.status).toBe(200);
     const nullKeptBody = JSON.parse(await bodyText(nullKept)) as { client: { name: string; apiKey: string } };
     expect(nullKeptBody.client.name).toBe("ci");
     expect(nullKeptBody.client.apiKey).toBe("[Configured]");
+    expect((await app.request("/llm/v1/models", { headers: { authorization: `Bearer ${CLIENT_KEY}` } })).status).toBe(200);
+
+    // The clear signal on the required credential is refused — a null or an
+    // empty apiKey cannot be cleared, a whitespace-only one is not a value —
+    // and the file, the stored key and the gate survive every refusal.
+    const before = readFileSync(configPath, "utf8");
+    for (const [apiKey, expected] of [
+      [null, "cannot be cleared"],
+      ["", "cannot be cleared"],
+      ["   ", "must not be whitespace-only"],
+    ] as const) {
+      const refused = await app.request("/api/clients/ci", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "ci", apiKey, models: ["smart"] }),
+      });
+      expect(refused.status).toBe(400);
+      const envelope = JSON.parse(await bodyText(refused)) as Envelope;
+      expect(envelope.error.type).toBe("invalid_request_error");
+      expect(envelope.error.message).toContain(expected);
+    }
+    expect(readFileSync(configPath, "utf8")).toBe(before);
     expect((await app.request("/llm/v1/models", { headers: { authorization: `Bearer ${CLIENT_KEY}` } })).status).toBe(200);
 
     // A null required list is reported missing like an absent one.

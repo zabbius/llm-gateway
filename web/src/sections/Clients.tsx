@@ -10,9 +10,12 @@
  * closing is explicit via Cancel or the header close button): the ACL is
  * a multi-select fed by
  * the configured aliases (`GET /api/models`); the key field is never
- * pre-filled — an empty `apiKey` is omitted from the request body, which
- * the boundary reads as "keep the stored credential" (ADR-014 D7; sending
- * the `[Configured]` mask back is refused). Create requires a key; edit
+ * pre-filled — an empty `apiKey` (after trimming) is omitted from the
+ * request body, which the boundary reads as "keep the stored credential"
+ * (ADR-014 D7; sending the `[Configured]` mask back is refused, and a
+ * whitespace-only value is the store's `400` — so the field is trimmed
+ * before the emptiness decision and a filled one is sent trimmed). Create
+ * requires a key; edit
  * leaves the field empty unless the operator wants a rotation. The name is
  * immutable. Deleting asks through the shared ConfirmModal (destructive —
  * its confirm button renders red) before the store call. Every failure —
@@ -113,10 +116,14 @@ export function ClientsSection(): ReactNode {
     const body: ClientWriteRequest = {
       name: form.name.trim(),
       models: [...form.models],
-      // Empty = unchanged (D7): the key rides the body only when filled.
-      ...(form.apiKey !== "" ? { apiKey: form.apiKey } : {}),
+      // Empty = unchanged (D7): the key rides the body only when filled —
+      // "empty" is decided after trimming, the store's own classification:
+      // an empty or whitespace-only apiKey is refused over the wire (a
+      // required credential cannot be cleared), so a blank field is omitted
+      // rather than sent as typed, and a filled one is submitted trimmed.
+      ...(form.apiKey.trim() !== "" ? { apiKey: form.apiKey.trim() } : {}),
     };
-    if (!editing && (form.name.trim() === "" || form.apiKey === "")) return; // create requires both
+    if (!editing && (form.name.trim() === "" || form.apiKey.trim() === "")) return; // create requires both
     if (body.models.length === 0) return; // the grammar requires a non-empty ACL
 
     setBusy(true);
@@ -287,7 +294,7 @@ export function ClientsSection(): ReactNode {
         title={editing ? `Edit client ${editor}` : "Add client"}
         editing={editing}
         busy={busy}
-        submitDisabled={form.models.length === 0 || (!editing && (form.name.trim() === "" || form.apiKey === ""))}
+        submitDisabled={form.models.length === 0 || (!editing && (form.name.trim() === "" || form.apiKey.trim() === ""))}
         onClose={close}
         onSubmit={submit}
       >

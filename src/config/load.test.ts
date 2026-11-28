@@ -864,14 +864,15 @@ test("absolute http and https baseUrls are accepted, with or without /v1", () =>
 // apiKey — the value itself must never reach a problem line
 // ---------------------------------------------------------------------------
 
-test("a missing, empty, or non-string apiKey is rejected without echoing the value", () => {
-  for (const apiKey of [undefined, "", 42, null]) {
+test("a missing, empty, whitespace-only, or non-string apiKey is rejected without echoing the value", () => {
+  for (const apiKey of [undefined, "", "   \n\t ", 42, null]) {
     const log = capture();
     const result = loadConfig({ path: configFixture(validConfig([upstreamWith("apiKey", apiKey)])), log });
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    // a `null` key is the key not set — the same problem line as a missing one
+    // a `null` key is the key not set — the same problem line as a missing one;
+    // "" and whitespace-only are both "not a credential" — the non-empty rule
     expect(result.problems).toEqual([
       apiKey === undefined || apiKey === null
         ? 'upstreams[0]: missing required key "apiKey"'
@@ -1071,8 +1072,8 @@ test("a valid tlsFingerprint pin is accepted and whitespace-stripped in the norm
   expect(result.config.upstreams[0]?.tlsFingerprint).toBe(VALID_PIN);
 });
 
-test("an absent, null, empty, or whitespace-only tlsFingerprint means no pin — the normalized entry carries no key", () => {
-  for (const tlsFingerprint of [undefined, null, "", "   \n\t "]) {
+test("an absent, null, or empty tlsFingerprint means no pin — the normalized entry carries no key", () => {
+  for (const tlsFingerprint of [undefined, null, ""]) {
     const result = loadConfig({
       path: configFixture(validConfig([{ ...VALID_UPSTREAM, tlsFingerprint }])),
     });
@@ -1084,6 +1085,26 @@ test("an absent, null, empty, or whitespace-only tlsFingerprint means no pin —
     expect(Object.hasOwn(entry ?? {}, "tlsFingerprint")).toBe(false); // never `null` or `""` on the entry
     // the view follows: an unset pin reads as absent, never as the mask
     expect(redactedConfigView(result.config).upstreams[0]?.tlsFingerprint).toBeNull();
+  }
+});
+
+test("a whitespace-only tlsFingerprint is a problem naming the key and rule, never the value", () => {
+  for (const tlsFingerprint of ["   ", " \n\t ", "\t"]) {
+    const log = capture();
+    const result = loadConfig({
+      path: configFixture(validConfig([{ ...VALID_UPSTREAM, tlsFingerprint }])),
+      log,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    // the file grammar's only "no value" forms are absent / null / "" — a
+    // whitespace-only string (a half-deleted entry, a placeholder) fails loudly
+    expect(result.problems).toEqual([
+      'upstreams[0]: tlsFingerprint must not be whitespace-only — omit the key, use null or "" for no value',
+    ]);
+    // one log line per problem — and the configured value never reaches one
+    expect(log.lines).toEqual(result.problems);
   }
 });
 
@@ -1136,14 +1157,18 @@ test("a non-string tlsFingerprint is rejected", () => {
 test("isValidTlsFingerprint and normalizeTlsFingerprint agree with the config-level rules", () => {
   expect(isValidTlsFingerprint(VALID_PIN)).toBe(true);
   expect(isValidTlsFingerprint("")).toBe(true);
-  expect(isValidTlsFingerprint("   ")).toBe(true); // whitespace-only: the grammar's own "no pin"
+  // lenient here on purpose: the file validator rejects whitespace-only BEFORE
+  // this predicate runs; the store's clear-on-write path relies on this reading
+  expect(isValidTlsFingerprint("   ")).toBe(true);
   expect(isValidTlsFingerprint(` ${VALID_PIN} `)).toBe(true);
   expect(normalizeTlsFingerprint(` ${VALID_PIN} `)).toBe(VALID_PIN);
   expect(isValidTlsFingerprint("nope")).toBe(false);
   expect(isValidTlsFingerprint(VALID_PIN.slice(0, -2))).toBe(false); // 31 bytes decoded
   expect(isValidTlsFingerprint(VALID_PIN.slice(0, -1))).toBe(true); // unpadded 43-char form, same 32 bytes
   expect(normalizeTlsFingerprint("k3/J9+vQ1 Z\nab==")).toBe("k3/J9+vQ1Zab==");
-  // empty / whitespace-only / non-string → undefined: never `""` on a normalized entry
+  // empty / whitespace-only / non-string → undefined: never `""` on a normalized
+  // entry (whitespace-only still normalizes away for the store's clear path —
+  // the file validator rejects it before normalizing)
   expect(normalizeTlsFingerprint("")).toBeUndefined();
   expect(normalizeTlsFingerprint(" \n\t ")).toBeUndefined();
   expect(normalizeTlsFingerprint(null)).toBeUndefined();
@@ -1177,14 +1202,31 @@ test("valid http and socks5 proxy values are accepted and stored trimmed", () =>
   }
 });
 
-test("an absent, null, empty, or whitespace-only proxy means a direct connection", () => {
-  for (const proxy of [undefined, null, "", "   \n\t "]) {
+test("an absent, null, or empty proxy means a direct connection", () => {
+  for (const proxy of [undefined, null, ""]) {
     const result = loadConfig({ path: configFixture(validConfig([upstreamWithProxy(proxy)])) });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.config.upstreams[0]?.proxy).toBeUndefined();
     expect("proxy" in result.config.upstreams[0]!).toBe(false);
+  }
+});
+
+test("a whitespace-only proxy is a problem naming the key and rule, never the value", () => {
+  for (const proxy of ["   ", " \n\t ", "\t"]) {
+    const log = capture();
+    const result = loadConfig({ path: configFixture(validConfig([upstreamWithProxy(proxy)])), log });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    // the file grammar's only "no value" forms are absent / null / "" — a
+    // whitespace-only string (a half-deleted entry, a placeholder) fails loudly
+    expect(result.problems).toEqual([
+      'upstreams[0]: proxy must not be whitespace-only — omit the key, use null or "" for no value',
+    ]);
+    // one log line per problem — and the configured value never reaches one
+    expect(log.lines).toEqual(result.problems);
   }
 });
 
@@ -1243,7 +1285,7 @@ test("isValidProxyUrl and normalizeProxy agree with the config-level rules", () 
   expect(normalizeProxy(undefined)).toBeUndefined();
   expect(normalizeProxy(null)).toBeUndefined();
   expect(normalizeProxy("")).toBeUndefined();
-  expect(normalizeProxy("  \n")).toBeUndefined();
+  expect(normalizeProxy("  \n")).toBeUndefined(); // the store's clear-on-write reading — the file validator rejects whitespace-only first
   expect(normalizeProxy(" http://proxy.example:8080 ")).toBe("http://proxy.example:8080");
   expect(isValidProxyUrl("http://proxy.example:8080")).toBe(true);
   expect(isValidProxyUrl("socks5://proxy.example:1080")).toBe(true);
@@ -1265,8 +1307,9 @@ test("all problems of one config are collected, printed, and returned together",
     logLevel: "loud", // invalid logLevel
     server: { listen: "localhost" }, // malformed server.listen
     upstreams: [
-      // unknown key, unknown type, bad id, bad baseUrl, empty apiKey
-      { type: "azure", id: "Bad_ID", baseUrl: "ftp://x/v1", apiKey: "", retry: true },
+      // unknown key, unknown type, bad id, bad baseUrl, whitespace-only
+      // apiKey / pin / proxy — the three "no value" rules fail in one pass
+      { type: "azure", id: "Bad_ID", baseUrl: "ftp://x/v1", apiKey: "   ", retry: true, tlsFingerprint: "   ", proxy: "   " },
       // entry 1 is valid
       { type: "openai-compatible", id: "acme", baseUrl: "https://a.example/v1", apiKey: "k-one" },
       // duplicate id "acme" (with entry 1)
@@ -1282,7 +1325,7 @@ test("all problems of one config are collected, printed, and returned together",
 
   expect(result.ok).toBe(false);
   if (result.ok) return;
-  expect(result.problems).toHaveLength(10);
+  expect(result.problems).toHaveLength(12);
 
   const all = result.problems.join("\n");
   expect(all).toContain('unknown top-level key "listern"');
@@ -1293,6 +1336,8 @@ test("all problems of one config are collected, printed, and returned together",
   expect(all).toContain('upstream id "Bad_ID" must match ^[a-z0-9][a-z0-9-]*$');
   expect(all).toContain('upstreams[0]: baseUrl "ftp://x/v1" must be an absolute http(s) URL');
   expect(all).toContain("upstreams[0]: apiKey must be a non-empty string");
+  expect(all).toContain('upstreams[0]: tlsFingerprint must not be whitespace-only — omit the key, use null or "" for no value');
+  expect(all).toContain('upstreams[0]: proxy must not be whitespace-only — omit the key, use null or "" for no value');
   expect(all).toContain('duplicate upstream id "acme" (entries 1, 2)');
   expect(all).toContain("upstreams[4] must be a JSON object");
 

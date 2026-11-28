@@ -250,24 +250,29 @@ export const UpstreamListSchema = z.object({
 
 /**
  * The create/update request body — the config entry's grammar
- * (src/config/schema.ts owns validation): `type`, `id`, `baseUrl`,
- * `apiKey` required (create requires a key; update with an absent
- * `apiKey` keeps the stored credential — D7), `tlsFingerprint` optional
- * (absent keeps the stored pin; explicit `null` — or the grammar's empty /
- * whitespace-only value, which normalizes to "no pin" — clears it), and `proxy`
- * optional (ADR-017 — an `http:` or `socks5:` URL with an explicit port
- * and no userinfo; absent keeps the stored proxy on update and means a
- * direct connection on create, explicit `null` clears it). A JSON `null`
- * on any other key is the key not set — it reads exactly as if omitted (a
- * required key is reported missing, an inherited one is inherited); the
- * contract admits it for `apiKey`, the inherited key an update may carry.
- * Unknown keys are rejected by the store.
+ * (`src/config/store.ts` owns validation under the management contract's
+ * write-body wire grammar, specs/contracts/gateway-management.md):
+ * `type`, `id`, `baseUrl` required. `apiKey` is a plain string, never
+ * `null` on the wire: required on create, absent on update keeps the stored
+ * credential (D7 — the masked view never carries it back), and the clear
+ * signal (`null` or the exact `""`) is refused — 400 `cannot be cleared`,
+ * because there is no credential-less upstream (on create `null` reads as
+ * missing and `""` as empty — 400 either way). `tlsFingerprint` and
+ * `proxy` are optional (ADR-017 for the proxy — an `http:` or `socks5:`
+ * URL with an explicit port and no userinfo): absent keeps the stored value
+ * on update, `null` or the exact `""` clears it (on create the same as
+ * absent). A whitespace-only string is neither a value nor a clear for any
+ * of the three — 400 `must not be whitespace-only` — and the view's mask
+ * literal `[Configured]` is a display fact, never an input — 400. A JSON
+ * `null` on any other key is the key not set — it reads exactly as if
+ * omitted (a required key is reported missing, an inherited one is
+ * inherited). Unknown keys are rejected by the store.
  */
 export const UpstreamWriteRequestSchema = z.object({
   type: z.enum(["openai-compatible"]),
   id: z.string(),
   baseUrl: z.string(),
-  apiKey: z.string().nullable().optional(),
+  apiKey: z.string().optional(),
   tlsFingerprint: z.union([z.string(), z.null()]).optional(),
   proxy: z.string().nullable().optional(),
 });
@@ -389,17 +394,24 @@ export const ClientListSchema = z.object({
 
 /**
  * The create/update request body — the config entry's grammar
- * (src/config/store.ts owns validation): `name`, `models` (a non-empty
- * array of existing aliases) required; `apiKey` required on create, absent
- * on update keeps the stored credential (D7). A JSON `null` is the key not
- * set — it reads exactly as if omitted, so a `null` `apiKey` on update keeps
- * the stored credential (the contract admits it there) and a `null`
- * required key is reported missing. Unknown keys are rejected by the store;
- * the name itself is immutable.
+ * (`src/config/store.ts` owns validation under the management contract's
+ * write-body wire grammar, specs/contracts/gateway-management.md): `name`
+ * and `models` (a non-empty array of existing aliases) required. `apiKey`
+ * is a plain string, never `null` on the wire: required on create, absent
+ * on update keeps the stored credential (D7 — the masked view never
+ * carries it back), and the clear signal (`null` or the exact `""`) is
+ * refused — 400 `cannot be cleared`, because there is no credential-less
+ * client (on create `null` reads as missing and `""` as empty — 400 either
+ * way). A whitespace-only string is neither a value nor a clear — 400
+ * `must not be whitespace-only` — and the view's mask literal
+ * `[Configured]` is a display fact, never an input — 400. A JSON `null` on
+ * any other key is the key not set — it reads exactly as if omitted, so a
+ * `null` required key is reported missing and a `null` `name` is inherited.
+ * Unknown keys are rejected by the store; the name itself is immutable.
  */
 export const ClientWriteRequestSchema = z.object({
   name: z.string(),
-  apiKey: z.string().nullable().optional(),
+  apiKey: z.string().optional(),
   models: z.array(z.string()),
 });
 
@@ -477,6 +489,31 @@ const CLIENT_NAME_PARAMETER = {
   schema: { type: "string" },
   description: "The configured client name (exact match — identifies the entry, never a credential).",
 } as const;
+
+/**
+ * The write-body wire grammar — ONE policy for every management write
+ * (`POST`/`PUT /api/upstreams`, `POST`/`PUT /api/clients`). The runtime
+ * source is `src/config/store.ts` (the write-specific rules block; the
+ * contract table is specs/contracts/gateway-management.md). It is stated
+ * here once and appended verbatim to each write route's description, so
+ * the document cannot carry four drifting variants of one rule:
+ *   - absent = keep — an omitted `apiKey`, `tlsFingerprint` or `proxy`
+ *     keeps the stored value on update (on create a missing `apiKey` is
+ *     the 400 "missing" line, a missing pin or proxy is simply not set);
+ *   - `null` or the exact empty string `""` = clear — one signal. On the
+ *     optional `tlsFingerprint` / `proxy` it clears the value; on the
+ *     required `apiKey` it is refused with 400 `cannot be cleared` —
+ *     there is no credential-less entry, so the only honest "unchanged" is
+ *     the absent field (on create `null` reads as missing, `""` as empty);
+ *   - a whitespace-only string is neither a value nor a clear — 400
+ *     `must not be whitespace-only`;
+ *   - the view's mask literal `[Configured]` is a display fact, never a
+ *     credential — 400.
+ * Every refusal is a value-free problem line: no key, pin or proxy value
+ * is ever echoed back.
+ */
+const WRITE_GRAMMAR_POLICY =
+  "Write-body wire grammar (one policy for every management write): absent = keep — an omitted `apiKey`, `tlsFingerprint` or `proxy` keeps the stored value on update (on create a missing `apiKey` is the 400 \"missing\" line; a missing pin or proxy is simply not set). `null` or the exact empty string `\"\"` = clear — one signal: on the optional `tlsFingerprint` / `proxy` it clears the value; on the required `apiKey` it is refused with 400 `cannot be cleared` — there is no credential-less entry, so send a new value, or omit the field to keep the stored one (on create `null` reads as missing and `\"\"` as empty — 400 either way). A whitespace-only string is neither a value nor a clear — 400 `must not be whitespace-only`. The view's mask literal `[Configured]` is a display fact, never a credential — 400. Every refusal is a value-free problem line.";
 
 /* ------------------------------------------------------------------ *
  * Route descriptions — every route of specs/contracts/client-gateway.md
@@ -658,7 +695,8 @@ export const ROUTE_DESCRIPTIONS = {
     operationId: "createUpstream",
     summary: "Create an upstream",
     description:
-      "Creates an upstream entry (ADR-014): the runtime store validates against the config grammar (strict keys, duplicate id refused, the mask literal \"[Configured]\" rejected as a key — D7), persists via sibling-temp-file + atomic rename onto the config file (the single source of truth, D1), then hot-applies without a restart (D2): a fresh upstream instance is constructed through the startup factory map, probed within the startup probe budget — the probe is blocking and its outcome is data in the answer, never a cancellation (D8) — and registered; the alias-metadata slice follows. The new upstream serves `/llm/v1` on the next request. A JSON `null` on any key is the key not set — an optional key is absent from the entry, a required one is reported missing exactly like an absent one.",
+      "Creates an upstream entry (ADR-014): the runtime store validates against the config grammar (strict keys, duplicate id refused, the mask literal \"[Configured]\" rejected as a key — D7), persists via sibling-temp-file + atomic rename onto the config file (the single source of truth, D1), then hot-applies without a restart (D2): a fresh upstream instance is constructed through the startup factory map, probed within the startup probe budget — the probe is blocking and its outcome is data in the answer, never a cancellation (D8) — and registered; the alias-metadata slice follows. The new upstream serves `/llm/v1` on the next request. `apiKey` is required here (a create has no stored credential to keep); a `proxy` value is an `http:` or `socks5:` URL with an explicit port and no userinfo (ADR-017). A JSON `null` on any key outside the wire grammar (`type`, `id`, `baseUrl`) is the key not set — a required one is reported missing exactly like an absent one. " +
+        WRITE_GRAMMAR_POLICY,
     security: [{ cookieAuth: [] }],
     requestBody: {
       required: true,
@@ -670,7 +708,7 @@ export const ROUTE_DESCRIPTIONS = {
         content: { "application/json": { schema: resolver(UpstreamWriteResponseSchema) } },
       },
       "400": errorEnvelope(
-        "Validation refused the entry — grammar, duplicate id, or the `[Configured]` mask literal as a credential (D7); the message carries value-free problem lines.",
+        "Validation refused the entry — grammar, duplicate id, a missing or empty `apiKey`, a whitespace-only value, or the `[Configured]` mask literal as a credential (D7); the message carries value-free problem lines.",
       ),
       "401": errorEnvelope("No valid session cookie while the session gate is mounted (ADR-007)."),
       "413": errorEnvelope("The body exceeds `server.maxRequestBodyBytes` — code `request_too_large`."),
@@ -702,7 +740,8 @@ export const ROUTE_DESCRIPTIONS = {
     operationId: "updateUpstream",
     summary: "Update an upstream",
     description:
-      "Replaces an upstream entry (ADR-014): same validate → persist → hot-apply sequence as create. Every field is required except `apiKey` (absent keeps the stored credential — the masked view never echoes it back, D7), `tlsFingerprint` (absent keeps the pin; explicit `null` — or the grammar's empty / whitespace-only value, which normalizes to no pin and never lands as an empty string — clears it, never a silent trust-widening) and `proxy` (ADR-017 — absent keeps the stored outbound proxy, explicit `null` clears it to a direct connection, never a silent egress-topology change; the value is an `http:` or `socks5:` URL with an explicit port and no userinfo, rejected value-free otherwise); the id is immutable. A fresh instance replaces the old one under the same id and is probed within the startup probe budget (D8 — the outcome rides the answer as data); the next `/llm/v1` selection resolves the replacement — no restart. Beyond those two keys a JSON `null` is the key not set — it reads exactly as if omitted, so a `null` `apiKey` keeps the stored credential and a `null` `id` is inherited.",
+      "Replaces an upstream entry (ADR-014): same validate → persist → hot-apply sequence as create. `type`, `baseUrl` required; the id is immutable. The three wire-grammar keys follow the one policy below: absent keeps the stored credential, pin and proxy (never a silent trust-widening by dropping a pin, ADR-004; never a silent egress-topology change by dropping a proxy, ADR-017); the clear signal clears a pin or a proxy — a cleared pin lands as absent, never as an empty string — but never the required credential; a whitespace-only value and the view's mask literal are never an input. A `proxy` value is an `http:` or `socks5:` URL with an explicit port and no userinfo, rejected value-free otherwise. Beyond those three keys a JSON `null` is the key not set — it reads exactly as if omitted, so a `null` `id` is inherited. A fresh instance replaces the old one under the same id and is probed within the startup probe budget (D8 — the outcome rides the answer as data); the next `/llm/v1` selection resolves the replacement — no restart. " +
+        WRITE_GRAMMAR_POLICY,
     security: [{ cookieAuth: [] }],
     parameters: [UPSTREAM_ID_PARAMETER],
     requestBody: {
@@ -715,7 +754,7 @@ export const ROUTE_DESCRIPTIONS = {
         content: { "application/json": { schema: resolver(UpstreamWriteResponseSchema) } },
       },
       "400": errorEnvelope(
-        "Validation refused the update — grammar, or a forbidden change (the mask literal as a credential); value-free problem lines.",
+        "Validation refused the update — grammar, a forbidden change (the mask literal as a credential), a clear signal on the required `apiKey` (`cannot be cleared`), or a whitespace-only value; value-free problem lines.",
       ),
       "401": errorEnvelope("No valid session cookie while the session gate is mounted (ADR-007)."),
       "404": errorEnvelope("The upstream id is not configured — `invalid_request_error`, no code, before any validation or contact."),
@@ -882,7 +921,8 @@ export const ROUTE_DESCRIPTIONS = {
     operationId: "createClient",
     summary: "Create a client",
     description:
-      "Creates a client entry (ADR-014): the runtime store validates against the config grammar (strict keys, duplicate name refused, `models` a non-empty array of existing aliases, the mask literal \"[Configured]\" rejected as a key — D7), persists via sibling-temp-file + atomic rename onto the config file (the single source of truth, D1 — the block is created when absent), then hot-applies without a restart (D2): the LLM gate's digest registry is rebuilt from the store's current entries and the new key admits `/llm/v1` on the very next request. Until the first client exists the mounted gate answers every `/llm/v1` request 401 — fail-closed, the surface never opens. A JSON `null` is the key not set — a required key reads as missing, exactly like an absent one.",
+      "Creates a client entry (ADR-014): the runtime store validates against the config grammar (strict keys, duplicate name refused, `models` a non-empty array of existing aliases, the mask literal \"[Configured]\" rejected as a key — D7), persists via sibling-temp-file + atomic rename onto the config file (the single source of truth, D1 — the block is created when absent), then hot-applies without a restart (D2): the LLM gate's digest registry is rebuilt from the store's current entries and the new key admits `/llm/v1` on the very next request. Until the first client exists the mounted gate answers every `/llm/v1` request 401 — fail-closed, the surface never opens. `apiKey` is required here (a create has no stored credential to keep). A JSON `null` on any key outside the wire grammar (`name`, `models`) is the key not set — a required key reads as missing, exactly like an absent one. " +
+        WRITE_GRAMMAR_POLICY,
     security: [{ cookieAuth: [] }],
     requestBody: {
       required: true,
@@ -894,7 +934,7 @@ export const ROUTE_DESCRIPTIONS = {
         content: { "application/json": { schema: resolver(ClientWriteResponseSchema) } },
       },
       "400": errorEnvelope(
-        "Validation refused the entry — grammar, duplicate name, an empty or unknown-alias `models[]`, or the `[Configured]` mask literal as a credential (D7); the message carries value-free problem lines.",
+        "Validation refused the entry — grammar, duplicate name, an empty or unknown-alias `models[]`, a missing or empty `apiKey`, a whitespace-only value, or the `[Configured]` mask literal as a credential (D7); the message carries value-free problem lines.",
       ),
       "401": errorEnvelope("No valid session cookie while the session gate is mounted (ADR-007)."),
       "413": errorEnvelope("The body exceeds `server.maxRequestBodyBytes` — code `request_too_large`."),
@@ -926,7 +966,8 @@ export const ROUTE_DESCRIPTIONS = {
     operationId: "updateClient",
     summary: "Update a client",
     description:
-      "Replaces a client entry (ADR-014): same validate → persist → hot-apply sequence as create. `models` is replaced wholesale (every listed alias must exist); `apiKey` absent keeps the stored credential — the masked view never echoes it back, D7; the name is immutable. The LLM gate's digest registry is rebuilt from the store's current entries (D2), so an ACL change cuts on the very next request and a replaced key invalidates the old one — no restart. A JSON `null` is the key not set — a `null` `apiKey` keeps the stored credential like an omitted one, a `null` required key is reported missing.",
+      "Replaces a client entry (ADR-014): same validate → persist → hot-apply sequence as create. `models` is replaced wholesale (every listed alias must exist); the name is immutable. The wire-grammar `apiKey` follows the one policy below: absent keeps the stored credential — the masked view never echoes it back (D7) — and the clear signal cannot remove it. Beyond that key a JSON `null` is the key not set — a `null` `name` is inherited like an omitted one, a `null` required key is reported missing. The LLM gate's digest registry is rebuilt from the store's current entries (D2), so an ACL change cuts on the very next request and a replaced key invalidates the old one — no restart. " +
+        WRITE_GRAMMAR_POLICY,
     security: [{ cookieAuth: [] }],
     parameters: [CLIENT_NAME_PARAMETER],
     requestBody: {
@@ -939,7 +980,7 @@ export const ROUTE_DESCRIPTIONS = {
         content: { "application/json": { schema: resolver(ClientWriteResponseSchema) } },
       },
       "400": errorEnvelope(
-        "Validation refused the update — grammar, a forbidden change (an unknown-alias `models[]`, the mask literal as a credential, a body name differing from the path's immutable one); value-free problem lines.",
+        "Validation refused the update — grammar, a forbidden change (an unknown-alias `models[]`, the mask literal as a credential, a body name differing from the path's immutable one), a clear signal on the required `apiKey` (`cannot be cleared`), or a whitespace-only value; value-free problem lines.",
       ),
       "401": errorEnvelope("No valid session cookie while the session gate is mounted (ADR-007)."),
       "404": errorEnvelope("The client name is not configured — `invalid_request_error`, no code, before any validation."),

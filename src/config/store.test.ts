@@ -4,8 +4,11 @@
  * (grammar, unknown keys, strategy/weight consistency, limits rules),
  * uniqueness within a collection, the cross-collection references
  * (`routes[].upstream` → `upstreams[].id`, `client.models` →
- * `models[].alias`), the keep-existing rule for an absent `apiKey`, the
- * rejection of the `[Configured]` mask literal, the in-use removal refusal,
+ * `models[].alias`), the wire grammar of `apiKey` / `tlsFingerprint` /
+ * `proxy` (absent = keep on update; `null` and `""` = one clear signal,
+ * refused for the required credential; a whitespace-only value and the
+ * `[Configured]` mask literal are refused — table-driven over field × body
+ * value × operation), the in-use removal refusal,
  * and the atomic write-back — a sibling temp file renamed onto the config
  * file, applied to memory only after the write succeeded, with the
  * operator-owned sections preserved verbatim and every written file still
@@ -138,6 +141,36 @@ function expectFileValidates(path: string): void {
   if (!validated.ok) {
     throw new Error(`written config file fails startup validation: ${validated.problems.join("; ")}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// the wire grammar table — one cell per field × body value × operation
+// ---------------------------------------------------------------------------
+
+/** The table's "the key is not sent" cell — distinct from a sent `null` or `""`. */
+const ABSENT = Symbol("absent");
+
+/** What one table cell expects of the write. */
+type WireOutcome =
+  | { reject: RegExp } // refused with a value-free problem line matching the pattern
+  | { stored: string } // accepted: the varied field carries exactly this value
+  | { cleared: true }; // accepted: the varied field carries no key at all
+
+const WIRE_FIELDS = ["apiKey", "tlsFingerprint", "proxy"] as const;
+type WireField = (typeof WIRE_FIELDS)[number];
+
+/** Value-free problem lines: none of them carries any of the synthetic secrets in play. */
+function expectNoLeak(lines: readonly string[], secrets: readonly string[]): void {
+  for (const line of lines) {
+    for (const secret of secrets) {
+      expect(line.includes(secret)).toBe(false);
+    }
+  }
+}
+
+/** A table cell's body value, readable in a test name. */
+function describeWireValue(body: unknown): string {
+  return body === ABSENT ? "absent" : JSON.stringify(body);
 }
 
 afterAll(() => {
@@ -298,7 +331,7 @@ describe("ConfigStore — upstream writes", () => {
     expectFileValidates(f.path);
   });
 
-  test("a null body value is the key not set: inherited keys read as omitted, pin/proxy keep their explicit clear", () => {
+  test("a null body value is the key not set: inherited keys read as omitted, pin/proxy keep their explicit clear, a null apiKey cannot clear the credential", () => {
     const f = makeStore({
       upstreams: [
         rawUpstream("openai", { tlsFingerprint: VALID_PIN, proxy: "http://proxy.example:8080" }),
@@ -313,7 +346,6 @@ describe("ConfigStore — upstream writes", () => {
         type: "openai-compatible",
         baseUrl: "https://openai.example.com/v1",
         id: null,
-        apiKey: null,
         tlsFingerprint: null,
       }),
     );
@@ -323,6 +355,18 @@ describe("ConfigStore — upstream writes", () => {
     expect(stored?.tlsFingerprint).toBeUndefined();
     expect(stored?.proxy).toBe("http://proxy.example:8080");
     expectFileValidates(f.path);
+
+    // update — `null` apiKey is the clear signal, and a credential cannot be
+    // cleared (the wire grammar): refused, the stored key untouched
+    const cannotClear = problems(
+      f.store.updateUpstream("openai", {
+        type: "openai-compatible",
+        baseUrl: "https://openai.example.com/v1",
+        apiKey: null,
+      }),
+    );
+    expect(cannotClear.join("\n")).toContain("apiKey cannot be cleared");
+    expect(f.store.findUpstream("openai")?.apiKey).toBe(`${UPSTREAM_KEY}-openai`);
 
     // create — `null` on a required key is reported missing, exactly like an absent one
     expect(problems(f.store.addUpstream(rawUpstream("new", { type: null }))).join("\n")).toContain('missing required key "type"');
@@ -336,34 +380,47 @@ describe("ConfigStore — upstream writes", () => {
     expectFileValidates(f.path);
   });
 
-  test("an empty or whitespace-only tlsFingerprint is no pin: create stores no key, update clears like null, the view reads null", () => {
+  test("an empty tlsFingerprint is the clear signal: create stores no key, update clears like null; a whitespace-only one is refused", () => {
     const f = makeStore({ upstreams: [rawUpstream("openai", { tlsFingerprint: VALID_PIN }), rawUpstream("ollama")] });
     const onDisk = (id: string): Record<string, unknown> | undefined =>
       (fileJson(f.path).upstreams as Record<string, unknown>[]).find((entry) => entry.id === id);
 
-    // create: "" and "  " are the grammar's own "no pin" — no key on the store, on disk, or in the view
-    for (const [id, value] of [
-      ["blank", ""],
-      ["spaces", " \n\t "],
-    ] as const) {
-      ok(
+    // create: "" is the clear signal, on a create the same as absent — no key
+    // on the store, on disk, or in the view
+    ok(
+      f.store.addUpstream({
+        type: "openai-compatible",
+        id: "blank",
+        baseUrl: "https://blank.example.com/v1",
+        apiKey: "sk-blank-synthetic",
+        tlsFingerprint: "",
+      }),
+    );
+    const blank = f.store.findUpstream("blank");
+    expect(blank?.tlsFingerprint).toBeUndefined();
+    expect(Object.hasOwn(blank ?? {}, "tlsFingerprint")).toBe(false); // never `""` on the entry
+    expect(Object.hasOwn(onDisk("blank") ?? {}, "tlsFingerprint")).toBe(false);
+    expect(f.store.view.upstreams.find((upstream) => upstream.id === "blank")?.tlsFingerprint).toBeNull(); // absent, never the mask
+
+    // create: a whitespace-only value is neither a pin nor a clear signal —
+    // refused, and nothing lands
+    for (const value of ["   ", " \n\t "]) {
+      const refused = problems(
         f.store.addUpstream({
           type: "openai-compatible",
-          id,
-          baseUrl: `https://${id}.example.com/v1`,
-          apiKey: `sk-${id}-synthetic`,
+          id: "spaces",
+          baseUrl: "https://spaces.example.com/v1",
+          apiKey: "sk-spaces-synthetic",
           tlsFingerprint: value,
         }),
       );
-      const stored = f.store.findUpstream(id);
-      expect(stored?.tlsFingerprint).toBeUndefined();
-      expect(Object.hasOwn(stored ?? {}, "tlsFingerprint")).toBe(false); // never `""` on the entry
-      expect(Object.hasOwn(onDisk(id) ?? {}, "tlsFingerprint")).toBe(false);
-      expect(f.store.view.upstreams.find((upstream) => upstream.id === id)?.tlsFingerprint).toBeNull(); // absent, never the mask
+      expect(refused.join("\n")).toContain("tlsFingerprint must not be whitespace-only");
     }
+    expect(f.store.findUpstream("spaces")).toBeUndefined();
+    expect(f.store.upstreams.length).toBe(3); // openai, ollama, blank — "spaces" never landed
 
-    // update: an empty value clears a stored pin exactly like an explicit null —
-    // the same end state the startup loader produces for that value
+    // update: "" clears a stored pin exactly like an explicit null — the same
+    // end state the startup loader produces for that value
     ok(f.store.updateUpstream("openai", { type: "openai-compatible", baseUrl: "https://openai.example.com/v1", tlsFingerprint: "" }));
     expect(f.store.findUpstream("openai")?.tlsFingerprint).toBeUndefined();
     expect(Object.hasOwn(onDisk("openai") ?? {}, "tlsFingerprint")).toBe(false);
@@ -371,9 +428,18 @@ describe("ConfigStore — upstream writes", () => {
     ok(f.store.updateUpstream("openai", { type: "openai-compatible", baseUrl: "https://openai.example.com/v1", tlsFingerprint: VALID_PIN }));
     expect(f.store.findUpstream("openai")?.tlsFingerprint).toBe(VALID_PIN);
 
-    ok(f.store.updateUpstream("openai", { type: "openai-compatible", baseUrl: "https://openai.example.com/v1", tlsFingerprint: "   " }));
-    expect(f.store.findUpstream("openai")?.tlsFingerprint).toBeUndefined();
-    expect(f.store.view.upstreams.find((upstream) => upstream.id === "openai")?.tlsFingerprint).toBeNull();
+    // update: a whitespace-only value is refused and the stored pin stays
+    const blankUpdate = problems(
+      f.store.updateUpstream("openai", {
+        type: "openai-compatible",
+        baseUrl: "https://openai.example.com/v1",
+        tlsFingerprint: "   ",
+      }),
+    );
+    expect(blankUpdate.join("\n")).toContain("tlsFingerprint must not be whitespace-only");
+    expect(f.store.findUpstream("openai")?.tlsFingerprint).toBe(VALID_PIN);
+    expect(Object.hasOwn(onDisk("openai") ?? {}, "tlsFingerprint")).toBe(true);
+    expect(f.store.view.upstreams.find((upstream) => upstream.id === "openai")?.tlsFingerprint).toBe("[Configured]");
     expectFileValidates(f.path);
   });
 
@@ -412,7 +478,7 @@ describe("ConfigStore — upstream writes", () => {
     expectFileValidates(f.path);
   });
 
-  test("update keeps the stored proxy when proxy is absent; explicit null and an empty string clear it (memory and file)", () => {
+  test("update keeps the stored proxy when proxy is absent; null and an empty string clear it; a whitespace-only value is refused (memory and file)", () => {
     const PROXY = "socks5://10.0.0.7:1080";
     const f = makeStore({ upstreams: [rawUpstream("openai", { proxy: PROXY }), rawUpstream("ollama")] });
 
@@ -421,12 +487,25 @@ describe("ConfigStore — upstream writes", () => {
     expect(f.store.findUpstream("openai")?.proxy).toBe(PROXY);
     expect((fileJson(f.path).upstreams as Record<string, unknown>[])[0]?.proxy).toBe(PROXY);
 
-    // an empty/whitespace value is the grammar's "direct connection" → clear
-    ok(
+    // a whitespace-only value is neither a URL nor a clear signal → refused,
+    // the stored proxy stays (memory and file)
+    const blank = problems(
       f.store.updateUpstream("openai", {
         type: "openai-compatible",
         baseUrl: "https://openai.example.com/v1",
         proxy: "   ",
+      }),
+    );
+    expect(blank.join("\n")).toContain("proxy must not be whitespace-only");
+    expect(f.store.findUpstream("openai")?.proxy).toBe(PROXY);
+    expect((fileJson(f.path).upstreams as Record<string, unknown>[])[0]?.proxy).toBe(PROXY);
+
+    // "" is the clear signal (the same as null) → a direct connection
+    ok(
+      f.store.updateUpstream("openai", {
+        type: "openai-compatible",
+        baseUrl: "https://openai.example.com/v1",
+        proxy: "",
       }),
     );
     expect(f.store.findUpstream("openai")?.proxy).toBeUndefined();
@@ -524,6 +603,111 @@ describe("ConfigStore — upstream writes", () => {
     expectFileValidates(f.path);
     expect(tempFiles(f.dir)).toEqual([]);
   });
+
+  // The wire grammar, table-driven: {apiKey, tlsFingerprint, proxy} × {absent,
+  // null, "", "   ", a valid value, "[Configured]"} × {create, update}. Every
+  // cell runs on a fresh fixture whose "openai" upstream carries all three
+  // values; the body varies ONE field, so every other field reads per its own
+  // row (absent = keep on update, not set on create). A refused cell leaves
+  // memory and file untouched and never echoes a value; an accepted cell lands
+  // exactly the expected entry, in memory and on disk.
+  const STORED_KEY = `${UPSTREAM_KEY}-openai`;
+  const PROBE_KEY = "sk-probe-synthetic-key";
+  const STORED_PIN = VALID_PIN;
+  const PROBE_PIN = Buffer.from(new Uint8Array(32).fill(7)).toString("base64");
+  // the pin cell sends an internal line wrap — the startup grammar still normalizes it
+  const WRAPPED_PROBE_PIN = `${PROBE_PIN.slice(0, 24)}\n  ${PROBE_PIN.slice(24)}`;
+  const STORED_PROXY = "http://forward-proxy.internal:3128";
+  const PROBE_PROXY = "socks5://10.0.0.7:1080";
+  const UPSTREAM_SECRETS = [STORED_KEY, PROBE_KEY, STORED_PIN, PROBE_PIN, STORED_PROXY, PROBE_PROXY];
+
+  const upstreamCells: { field: WireField; body: unknown; create: WireOutcome; update: WireOutcome }[] = [
+    // apiKey — a required credential: absent keeps on update; the clear signal cannot clear it
+    { field: "apiKey", body: ABSENT, create: { reject: /upstream: missing required key "apiKey"/ }, update: { stored: STORED_KEY } },
+    { field: "apiKey", body: null, create: { reject: /upstream: missing required key "apiKey"/ }, update: { reject: /upstream: apiKey cannot be cleared/ } },
+    { field: "apiKey", body: "", create: { reject: /upstream: apiKey must be a non-empty string/ }, update: { reject: /upstream: apiKey cannot be cleared/ } },
+    { field: "apiKey", body: "   ", create: { reject: /upstream: apiKey must not be whitespace-only/ }, update: { reject: /upstream: apiKey must not be whitespace-only/ } },
+    { field: "apiKey", body: PROBE_KEY, create: { stored: PROBE_KEY }, update: { stored: PROBE_KEY } },
+    { field: "apiKey", body: "[Configured]", create: { reject: /upstream: apiKey must not be the literal/ }, update: { reject: /upstream: apiKey must not be the literal/ } },
+    // tlsFingerprint — optional: absent keeps; null and "" are one clear signal; blank is refused
+    { field: "tlsFingerprint", body: ABSENT, create: { cleared: true }, update: { stored: STORED_PIN } },
+    { field: "tlsFingerprint", body: null, create: { cleared: true }, update: { cleared: true } },
+    { field: "tlsFingerprint", body: "", create: { cleared: true }, update: { cleared: true } },
+    { field: "tlsFingerprint", body: "   ", create: { reject: /upstream: tlsFingerprint must not be whitespace-only/ }, update: { reject: /upstream: tlsFingerprint must not be whitespace-only/ } },
+    { field: "tlsFingerprint", body: WRAPPED_PROBE_PIN, create: { stored: PROBE_PIN }, update: { stored: PROBE_PIN } },
+    { field: "tlsFingerprint", body: "[Configured]", create: { reject: /upstream: tlsFingerprint must not be the literal/ }, update: { reject: /upstream: tlsFingerprint must not be the literal/ } },
+    // proxy — optional, not a credential: absent keeps; null and "" clear; blank is refused
+    { field: "proxy", body: ABSENT, create: { cleared: true }, update: { stored: STORED_PROXY } },
+    { field: "proxy", body: null, create: { cleared: true }, update: { cleared: true } },
+    { field: "proxy", body: "", create: { cleared: true }, update: { cleared: true } },
+    { field: "proxy", body: "   ", create: { reject: /upstream: proxy must not be whitespace-only/ }, update: { reject: /upstream: proxy must not be whitespace-only/ } },
+    { field: "proxy", body: `  ${PROBE_PROXY}  `, create: { stored: PROBE_PROXY }, update: { stored: PROBE_PROXY } },
+    { field: "proxy", body: "[Configured]", create: { reject: /upstream: proxy must be an http: or socks5: URL/ }, update: { reject: /upstream: proxy must be an http: or socks5: URL/ } },
+  ];
+
+  for (const operation of ["create", "update"] as const) {
+    for (const cell of upstreamCells) {
+      const outcome = cell[operation];
+      const verdict =
+        "reject" in outcome ? `refused: ${outcome.reject.source}` : "stored" in outcome ? `stored ${JSON.stringify(outcome.stored)}` : "cleared";
+      test(`wire grammar — ${operation}, ${cell.field} = ${describeWireValue(cell.body)} → ${verdict}`, () => {
+        const f = makeStore({
+          upstreams: [
+            rawUpstream("openai", { tlsFingerprint: STORED_PIN, proxy: STORED_PROXY }),
+            rawUpstream("ollama"),
+          ],
+        });
+        const base =
+          operation === "create"
+            ? { type: "openai-compatible", id: "probe", baseUrl: "https://probe.example.com/v1", apiKey: PROBE_KEY }
+            : { type: "openai-compatible", baseUrl: "https://openai.example.com/v1" };
+        // the create base carries a valid key so the pin/proxy cells can land;
+        // the apiKey cell's ABSENT row must still send no key at all
+        const body: Record<string, unknown> = { ...base };
+        if (cell.body === ABSENT) delete body[cell.field];
+        else body[cell.field] = cell.body;
+        const targetId = operation === "create" ? "probe" : "openai";
+        const before = fileJson(f.path);
+        const storedBefore = operation === "create" ? undefined : f.store.findUpstream("openai");
+
+        const result = operation === "create" ? f.store.addUpstream(body) : f.store.updateUpstream("openai", body);
+
+        if ("reject" in outcome) {
+          expect(result.ok).toBe(false);
+          const lines = problems(result);
+          expect(lines.join("\n")).toMatch(outcome.reject);
+          expectNoLeak(lines, UPSTREAM_SECRETS);
+          // refused → nothing changed, in memory or on disk, and no temp file left behind
+          expect(fileJson(f.path)).toEqual(before);
+          expect(f.store.findUpstream(targetId)).toEqual(storedBefore);
+          expect(tempFiles(f.dir)).toEqual([]);
+          return;
+        }
+
+        ok(result);
+        const expected: Record<WireField, string | undefined> = {
+          ...(operation === "update"
+            ? { apiKey: STORED_KEY, tlsFingerprint: STORED_PIN, proxy: STORED_PROXY }
+            : { apiKey: PROBE_KEY, tlsFingerprint: undefined, proxy: undefined }),
+          [cell.field]: "stored" in outcome ? outcome.stored : undefined,
+        };
+        const entry = f.store.findUpstream(targetId);
+        const onDisk =
+          (fileJson(f.path).upstreams as Record<string, unknown>[]).find((candidate) => candidate.id === targetId) ?? {};
+        for (const field of WIRE_FIELDS) {
+          if (expected[field] === undefined) {
+            expect(Object.hasOwn(entry ?? {}, field)).toBe(false); // never "" or null on the entry
+            expect(Object.hasOwn(onDisk, field)).toBe(false);
+          } else {
+            expect(entry?.[field]).toBe(expected[field]);
+            expect(onDisk[field]).toBe(expected[field]);
+          }
+        }
+        expectFileValidates(f.path);
+        expect(tempFiles(f.dir)).toEqual([]);
+      });
+    }
+  }
 
   test("update refuses unknown ids and identity changes; the id is immutable", () => {
     const f = makeStore();
@@ -816,14 +1000,20 @@ describe("ConfigStore — client writes", () => {
     );
   });
 
-  test("a null body value is the key not set on client writes: null name/apiKey read as omitted, null models as missing", () => {
+  test("a null body value is the key not set on client writes: a null name reads as omitted, a null apiKey cannot clear the credential, null models as missing", () => {
     const f = makeStore();
 
-    ok(f.store.updateClient("local-dev", { name: null, apiKey: null, models: ["smart"] }));
+    ok(f.store.updateClient("local-dev", { name: null, models: ["smart"] }));
     const updated = f.store.findClient("local-dev");
     expect(updated?.name).toBe("local-dev");
     expect(updated?.apiKey).toBe(CLIENT_KEY);
     expectFileValidates(f.path);
+
+    // a null apiKey is the clear signal, and a credential cannot be cleared
+    // (the wire grammar): refused, the stored key untouched
+    const cannotClear = problems(f.store.updateClient("local-dev", { apiKey: null, models: ["smart"] }));
+    expect(cannotClear.join("\n")).toContain("client: apiKey cannot be cleared");
+    expect(f.store.findClient("local-dev")?.apiKey).toBe(CLIENT_KEY);
 
     expect(problems(f.store.addClient(rawClient({ name: "second", apiKey: null }))).join("\n")).toContain(
       'client: missing required key "apiKey"',
@@ -832,6 +1022,63 @@ describe("ConfigStore — client writes", () => {
       "client: models must be an array with at least one model alias",
     );
   });
+
+  // The wire grammar for a client's `apiKey`, table-driven — the same rows as
+  // an upstream's required credential: absent keeps on update; the clear
+  // signal cannot clear it; blank and the mask are refused; on a create `null`
+  // reads as missing and `""` as empty.
+  const PROBE_CLIENT_KEY = "ck-probe-synthetic-key";
+  const clientCells: { body: unknown; create: WireOutcome; update: WireOutcome }[] = [
+    { body: ABSENT, create: { reject: /client: missing required key "apiKey"/ }, update: { stored: CLIENT_KEY } },
+    { body: null, create: { reject: /client: missing required key "apiKey"/ }, update: { reject: /client: apiKey cannot be cleared/ } },
+    { body: "", create: { reject: /client: apiKey must be a non-empty string/ }, update: { reject: /client: apiKey cannot be cleared/ } },
+    { body: "   ", create: { reject: /client: apiKey must not be whitespace-only/ }, update: { reject: /client: apiKey must not be whitespace-only/ } },
+    { body: PROBE_CLIENT_KEY, create: { stored: PROBE_CLIENT_KEY }, update: { stored: PROBE_CLIENT_KEY } },
+    { body: "[Configured]", create: { reject: /client: apiKey must not be the literal/ }, update: { reject: /client: apiKey must not be the literal/ } },
+  ];
+
+  for (const operation of ["create", "update"] as const) {
+    for (const cell of clientCells) {
+      const outcome = cell[operation];
+      const verdict =
+        "reject" in outcome ? `refused: ${outcome.reject.source}` : "stored" in outcome ? `stored ${JSON.stringify(outcome.stored)}` : "cleared";
+      test(`wire grammar — client ${operation}, apiKey = ${describeWireValue(cell.body)} → ${verdict}`, () => {
+        const f = makeStore();
+        const base = operation === "create" ? { name: "probe", models: ["smart"] } : { models: ["smart"] };
+        const body: Record<string, unknown> = { ...base };
+        if (cell.body === ABSENT) delete body.apiKey;
+        else body.apiKey = cell.body;
+        const targetName = operation === "create" ? "probe" : "local-dev";
+        const before = fileJson(f.path);
+        const storedBefore = operation === "create" ? undefined : f.store.findClient("local-dev");
+
+        const result = operation === "create" ? f.store.addClient(body) : f.store.updateClient("local-dev", body);
+
+        if ("reject" in outcome) {
+          expect(result.ok).toBe(false);
+          const lines = problems(result);
+          expect(lines.join("\n")).toMatch(outcome.reject);
+          expectNoLeak(lines, [CLIENT_KEY, PROBE_CLIENT_KEY]);
+          expect(fileJson(f.path)).toEqual(before);
+          expect(f.store.findClient(targetName)).toEqual(storedBefore);
+          expect(tempFiles(f.dir)).toEqual([]);
+          return;
+        }
+
+        ok(result);
+        if ("cleared" in outcome) throw new Error("a client apiKey is never cleared — the table has no such cell");
+        const entry = f.store.findClient(targetName);
+        expect(entry?.apiKey).toBe(outcome.stored);
+        expect(entry?.name).toBe(targetName);
+        expect(entry?.models).toEqual(["smart"]);
+        const onDisk =
+          (fileJson(f.path).clients as Record<string, unknown>[]).find((candidate) => candidate.name === targetName) ?? {};
+        expect(onDisk.apiKey).toBe(outcome.stored);
+        expectFileValidates(f.path);
+        expect(tempFiles(f.dir)).toEqual([]);
+      });
+    }
+  }
 
   test("remove refuses the last client entry and unknown names", () => {
     const f = makeStore({

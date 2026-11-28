@@ -309,12 +309,17 @@ describe("the documenting surface: GET /docs and GET /docs/openapi.json", () => 
     // that says the mask is rejected as input (the upstreams and clients
     // surfaces; the models surface shares the upstreams prose shapes). Any
     // other occurrence — a leaked rendered config view, an example payload —
-    // fails here.
-    expect(raw.split(CONFIGURED_MASK).length - 1).toBe(18);
+    // fails here. The counts are a snapshot: 12 consts are the masked-entry
+    // schemas the four reads and the four write answers serve; the 8 prose
+    // restatements are the two list routes' masking rule, the two create
+    // routes' description (which names the mask twice — the "rejected as a
+    // key" sentence and the shared wire-grammar policy) and 400 line, and
+    // the two update routes' shared policy — 22 raw mentions in all.
+    expect(raw.split(CONFIGURED_MASK).length - 1).toBe(22);
     const document = JSON.parse(raw) as unknown;
     const occurrences: { pointer: string[]; value: string }[] = [];
     collectMaskStrings(document, [], occurrences);
-    expect(occurrences).toHaveLength(18);
+    expect(occurrences).toHaveLength(20);
     const designatedPaths = new Set([
       "/api/upstreams",
       "/api/upstreams/{id}",
@@ -326,7 +331,7 @@ describe("the documenting surface: GET /docs and GET /docs/openapi.json", () => 
       expect(designatedPaths.has(occurrence.pointer[1] ?? "")).toBe(true);
     }
     const prose = occurrences.filter((occurrence) => occurrence.pointer.at(-1) === "description");
-    expect(prose).toHaveLength(6);
+    expect(prose).toHaveLength(8);
     const consts = occurrences.filter((occurrence) => occurrence.value === CONFIGURED_MASK);
     expect(consts).toHaveLength(12);
 

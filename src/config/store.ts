@@ -20,36 +20,51 @@
  * after the first runtime mutation the store, not the editor, owns them
  * until the next restart.
  *
- * Write-specific rules (ADR-014 D6/D7):
- * - An absent `apiKey` on an update keeps the stored credential — the
- *   masked management view never carries the value back, so the absent
- *   field is the only honest "unchanged". Create requires a key.
- * - The literal mask `[Configured]` (`CONFIGURED_MASK`,
- *   `src/config/redact.ts`) is rejected wherever a credential-shaped value
- *   is expected (`apiKey`, `tlsFingerprint`): the mask is a display fact,
- *   never an acceptable credential.
- * - A JSON `null` body value is the key not set (`withoutNulls` — the
- *   startup grammar's rule, point-applied): a required or inherited field
- *   (`type`, `id`, `baseUrl`, `apiKey`, `name`, `models`, `routes`,
- *   `balance`) reads exactly as if omitted, and an optional field (a route
- *   `weight`, a single limit, the `limits` block) is absent from the result —
- *   on update that clears it, those blocks being replaced wholesale.
- *   `tlsFingerprint` / `proxy` are the two keys whose `null` is read
- *   explicitly (an absent one keeps the stored value on update, so their
- *   clear must not collapse into "omitted").
- * - An absent `tlsFingerprint` on an update keeps the stored pin (dropping
- *   a pin silently would widen upstream trust from fail-closed pinning to
- *   system-CA verification, ADR-004); an explicit `null` — or the grammar's
- *   empty / whitespace-only value, the startup loader's own "no pin" —
- *   clears it. An empty value is normalized to absent, so a stored entry
- *   never carries `tlsFingerprint: ""`.
- * - An absent `proxy` on an update keeps the stored outbound proxy (an
- *   omitted field must never silently change the egress topology, ADR-017);
- *   an explicit `null` — or the grammar's empty / whitespace-only value —
- *   clears it to a direct connection. The proxy URL is not a credential (the
- *   grammar admits no userinfo), so it rides the masked view verbatim, unlike
- *   `apiKey` / `tlsFingerprint`; a malformed one is still never echoed into a
- *   problem line.
+ * Write-specific rules (ADR-014 D6/D7) — one grammar, one table:
+ *
+ *   THE RULE. Every write body reads under the wire grammar of the management
+ *   contract (`specs/contracts/gateway-management.md`, "Optional values in a
+ *   write body — keep / clear / reject"): an ABSENT key means "keep" on an
+ *   update; `null` and the exact empty string `""` are ONE clear signal; a
+ *   whitespace-only string (`trim() === ""` but not `""`) is never a value and is refused;
+ *   the literal mask `[Configured]` (`CONFIGURED_MASK`, `src/config/redact.ts`)
+ *   is a display fact, never an acceptable credential. Every refusal is a
+ *   value-free problem line.
+ *
+ *   | body value      | `apiKey` (required credential)  | `tlsFingerprint` / `proxy` (optional)      |
+ *   |-----------------|---------------------------------|--------------------------------------------|
+ *   | absent          | update: keep the stored key     | update: keep the stored value              |
+ *   |                 | create: 400, missing            | create: not set                            |
+ *   | `null`          | update: 400, cannot be cleared  | clear (create: not set — as absent)        |
+ *   |                 | create: 400, missing            |                                            |
+ *   | `""` (exact)    | update: 400, cannot be cleared  | clear — the same signal as `null`          |
+ *   |                 | create: 400, non-empty          |                                            |
+ *   | whitespace-only | 400, whitespace-only            | 400, whitespace-only (send null or "")     |
+ *   | `[Configured]`  | 400, mask literal               | pin: 400, mask literal; proxy: 400, URL grammar |
+ *   | anything else   | a non-empty string, else 400    | the startup grammar (pin whitespace-normalized, URL trimmed), else 400 |
+ *
+ * - Why `apiKey` cannot be cleared: there is no credential-less upstream or
+ *   client, so the clear signal on an update is refused with a line saying
+ *   so; the absent field is the only honest "unchanged" because the masked
+ *   view never carries the value back. Create requires a key.
+ * - Why an absent pin / proxy keeps: dropping a pin silently would widen
+ *   upstream trust from fail-closed pinning to system-CA verification
+ *   (ADR-004), and an omitted field must never silently change the egress
+ *   topology (ADR-017). An empty value normalizes to absent, so a stored
+ *   entry never carries `tlsFingerprint: ""` or `proxy: ""`. The proxy URL
+ *   is not a credential (the grammar admits no userinfo), so it rides the
+ *   masked view verbatim, unlike `apiKey` / `tlsFingerprint`; a malformed
+ *   one is still never echoed into a problem line.
+ * - Every other key follows the null rule (`withoutNulls`, the startup
+ *   grammar's rule, point-applied): a JSON `null` body value is the key not
+ *   set — a required or inherited field (`type`, `id`, `baseUrl`, `name`,
+ *   `models`, `routes`, `balance`) reads exactly as if omitted, and an
+ *   optional field (a route `weight`, a single limit, the `limits` block) is
+ *   absent from the result — on update that clears it, those blocks being
+ *   replaced wholesale. The three wire-grammar keys are classified on the
+ *   RAW body, before the null rule; `tlsFingerprint` / `proxy` keep their
+ *   `null` through `withoutNulls` so an explicit clear never collapses into
+ *   "absent from the patch", which on update means keep.
  * - Deleting a resource that live configuration still references (an
  *   upstream named by a model route, a model named by a client's alias ACL)
  *   is refused with problem lines naming the referencing entries — the
@@ -443,13 +458,82 @@ export class ConfigStore {
 // ---------------------------------------------------------------------------
 
 /**
+ * How one body value reads under the wire grammar (the header's table):
+ * `absent` (the key was not sent), `clear` (`null` or the exact empty string
+ * — one signal), `blank` (whitespace-only but not `""` — never a value), or
+ * `value` (anything else, handed to the key's own grammar). Classified on
+ * the RAW body, before the null rule drops `null` keys.
+ */
+type WireKind = "absent" | "clear" | "blank" | "value";
+
+function wireKind(raw: unknown): WireKind {
+  if (raw === undefined) return "absent";
+  if (raw === null || raw === "") return "clear";
+  if (typeof raw === "string" && raw.trim() === "") return "blank";
+  return "value";
+}
+
+/** The value-free refusal for a whitespace-only optional value (`tlsFingerprint`, `proxy`). */
+function blankOptionalProblem(entry: "upstream", key: "tlsFingerprint" | "proxy"): string {
+  return `${entry}: ${key} must not be whitespace-only — send null or an empty string to clear, or a real value`;
+}
+
+/**
+ * Resolve the required `apiKey` of one entry under the wire grammar. `raw` is
+ * the body value before the null rule; `existing` is the stored credential on
+ * an update (absent on a create). Returns the credential the entry carries,
+ * or one value-free problem line. A credential can never be cleared, so the
+ * clear signal on an update is refused; on a create `null` reads as missing
+ * and `""` as empty — exactly the startup grammar. The mask literal is
+ * rejected as a display fact, never a credential.
+ */
+function resolveApiKey(
+  raw: unknown,
+  context: { entry: "upstream" | "client"; existing?: string },
+): { value: string } | { problem: string } {
+  const entry = context.entry;
+  const article = entry === "upstream" ? "an" : "a";
+  switch (wireKind(raw)) {
+    case "clear":
+      if (context.existing === undefined) {
+        return raw === null
+          ? { problem: `${entry}: missing required key "apiKey"` }
+          : { problem: `${entry}: apiKey must be a non-empty string` };
+      }
+      return {
+        problem: `${entry}: apiKey cannot be cleared — ${article} ${entry} requires a credential; send a new value, or omit the field to keep the stored one`,
+      };
+    case "blank":
+      return {
+        problem: `${entry}: apiKey must not be whitespace-only — send the real credential, or omit the field to keep the stored one`,
+      };
+    case "absent":
+      return context.existing === undefined
+        ? { problem: `${entry}: missing required key "apiKey"` }
+        : { value: context.existing };
+    case "value":
+      break;
+  }
+  if (typeof raw !== "string") {
+    return { problem: `${entry}: apiKey must be a non-empty string` };
+  }
+  if (raw === CONFIGURED_MASK) {
+    return {
+      problem: `${entry}: apiKey must not be the literal ${quoted(CONFIGURED_MASK)} mask — send the real credential, or omit the field to keep the stored one`,
+    };
+  }
+  return { value: raw };
+}
+
+/**
  * Validate one upstream entry for a create (`existing` absent) or an update
- * (`existing` present: an absent `apiKey` keeps the stored credential, an
- * absent `tlsFingerprint` keeps the stored pin while `null` or the grammar's
- * empty / whitespace-only value clears it, an absent `proxy` keeps the stored
- * proxy while `null` or empty clears it, and the id — given or inherited —
- * must not collide with `others`). A `null` value for any other key is the
- * key not set — it reads exactly as if omitted (the null rule). The returned
+ * (`existing` present). The three wire-grammar keys — `apiKey`,
+ * `tlsFingerprint`, `proxy` — are classified on the RAW body and resolved by
+ * the header's table: absent keeps the stored value on update; `null` and
+ * `""` are one clear signal (a refusal for the required credential, a clear
+ * for the two optional fields); a whitespace-only value and the mask literal
+ * are refused. Every other key follows the null rule through `withoutNulls`.
+ * The id — given or inherited — must not collide with `others`. The returned
  * entry is normalized the same way the startup validator normalizes
  * (`normalizeBaseUrl`, `normalizeTlsFingerprint`, `normalizeProxy`) — an
  * empty pin or proxy never reaches the entry as `""`.
@@ -470,10 +554,13 @@ function validateUpstreamEntry(
   }
 
   // The grammar's null rule, point-applied: a `null` body value is the key
-  // not set — `type`, `id`, `baseUrl` and `apiKey` read exactly as if
-  // omitted (the strict-key pass above still saw the raw body). The two
-  // optional fields keep their `null`: their explicit clear below must not
-  // collapse into "absent from the patch", which on update means keep (D7).
+  // not set — `type`, `id` and `baseUrl` read exactly as if omitted (the
+  // strict-key pass above still saw the raw body). The three wire-grammar
+  // keys are NOT read through it: `apiKey` is classified on the raw body
+  // below (a `null` must not read as "absent from the patch" on an update —
+  // a credential cannot be cleared), and the two optional fields keep their
+  // `null` so their explicit clear never collapses into "absent", which on
+  // update means keep (D7).
   const input = withoutNulls(given, ["tlsFingerprint", "proxy"]);
 
   const type = input.type;
@@ -524,38 +611,36 @@ function validateUpstreamEntry(
 
   // The apiKey value is never echoed into a problem line — it must never
   // reach a log, an error envelope or the management view
-  // (specs/architecture/security-model.md). Absent on update = keep-existing
-  // (ADR-014 D7); the view's own mask literal is rejected as input.
-  const apiKey = input.apiKey;
+  // (specs/architecture/security-model.md). Read on the RAW body, before the
+  // null rule, through the wire grammar: absent on update keeps the stored
+  // credential (ADR-014 D7), the clear signal cannot clear a credential, a
+  // whitespace-only value is refused, and the view's own mask literal is
+  // rejected as input.
   let validApiKey: string | undefined;
-  if (apiKey === undefined) {
-    if (context.existing === undefined) {
-      problems.push('upstream: missing required key "apiKey"');
-    } else {
-      validApiKey = context.existing.apiKey;
-    }
-  } else if (typeof apiKey !== "string" || apiKey.length === 0) {
-    problems.push("upstream: apiKey must be a non-empty string");
-  } else if (apiKey === CONFIGURED_MASK) {
-    problems.push(
-      `upstream: apiKey must not be the literal ${quoted(CONFIGURED_MASK)} mask — send the real credential, or omit the field to keep the stored one`,
-    );
+  const apiKey = resolveApiKey(given.apiKey, { entry: "upstream", existing: context.existing?.apiKey });
+  if ("problem" in apiKey) {
+    problems.push(apiKey.problem);
   } else {
-    validApiKey = apiKey;
+    validApiKey = apiKey.value;
   }
 
   // The pin value is never echoed into a problem line (apiKey-grade output
-  // care, ADR-004). Absent: create → no pin; update → keep the stored pin
-  // (never widen upstream trust by dropping a pin silently). An explicit
-  // `null` clears it; an empty or whitespace-only string is the grammar's
-  // own "no pin" and clears it too — the same normalization the startup
-  // loader applies, so a stored entry never carries `tlsFingerprint: ""`.
+  // care, ADR-004). The wire grammar on the RAW body: absent — create → no
+  // pin, update → keep the stored pin (never widen upstream trust by dropping
+  // a pin silently); `null` or the exact empty string — one clear signal (on
+  // create the same as absent); whitespace-only — refused (neither a value
+  // nor a clear); anything else — the startup grammar, which strips every
+  // whitespace character (a pin pasted with line wraps still matches), so a
+  // stored entry never carries `tlsFingerprint: ""`.
   const tlsFingerprint = input.tlsFingerprint;
   let validPin: string | undefined;
-  if (tlsFingerprint === undefined) {
+  const pinKind = wireKind(given.tlsFingerprint);
+  if (pinKind === "absent") {
     validPin = context.existing?.tlsFingerprint;
-  } else if (tlsFingerprint === null) {
+  } else if (pinKind === "clear") {
     validPin = undefined; // explicit clear
+  } else if (pinKind === "blank") {
+    problems.push(blankOptionalProblem("upstream", "tlsFingerprint"));
   } else if (typeof tlsFingerprint !== "string") {
     problems.push("upstream: tlsFingerprint must be a string — base64 of the SHA-256 SPKI digest (32 bytes)");
   } else if (tlsFingerprint === CONFIGURED_MASK) {
@@ -565,7 +650,7 @@ function validateUpstreamEntry(
   } else {
     const pin = normalizeTlsFingerprint(tlsFingerprint);
     if (pin === undefined) {
-      validPin = undefined; // empty / whitespace-only → no pin
+      validPin = undefined; // defensive: a non-blank string always normalizes to a value
     } else if (!isValidTlsFingerprint(pin)) {
       problems.push(
         "upstream: tlsFingerprint must be base64 (standard alphabet) decoding to exactly 32 bytes — compute it with tools/tls-fingerprint.ts",
@@ -577,17 +662,22 @@ function validateUpstreamEntry(
 
   // The proxy value is never echoed into a problem line — a pasted
   // `user:pass@host` URL carries credentials that must not reach an error
-  // envelope or a log (ADR-017). Absent: create → direct connection; update →
-  // keep the stored proxy (an omitted field must never silently change the
-  // egress topology). An explicit `null` clears it; an empty or
-  // whitespace-only string is the grammar's own "direct connection" and
-  // clears it too — the same normalization the startup loader applies.
+  // envelope or a log (ADR-017). The wire grammar on the RAW body: absent —
+  // create → direct connection, update → keep the stored proxy (an omitted
+  // field must never silently change the egress topology); `null` or the
+  // exact empty string — one clear signal (on create the same as absent);
+  // whitespace-only — refused; anything else — the startup grammar (trimmed,
+  // then the http:/socks5: URL rules). The mask literal is not a URL, so it
+  // fails that grammar.
   const proxy = input.proxy;
   let validProxy: string | undefined;
-  if (proxy === undefined) {
+  const proxyKind = wireKind(given.proxy);
+  if (proxyKind === "absent") {
     validProxy = context.existing?.proxy;
-  } else if (proxy === null) {
+  } else if (proxyKind === "clear") {
     validProxy = undefined; // explicit clear
+  } else if (proxyKind === "blank") {
+    problems.push(blankOptionalProblem("upstream", "proxy"));
   } else if (typeof proxy !== "string") {
     problems.push(
       "upstream: proxy must be a string — an http: or socks5: URL with an explicit port, or null for a direct connection",
@@ -595,7 +685,7 @@ function validateUpstreamEntry(
   } else {
     const trimmed = normalizeProxy(proxy);
     if (trimmed === undefined) {
-      validProxy = undefined; // empty / whitespace-only → a direct connection
+      validProxy = undefined; // defensive: a non-blank string always trims to a value
     } else if (!isValidProxyUrl(trimmed)) {
       problems.push(
         "upstream: proxy must be an http: or socks5: URL with a non-empty host, an explicit port in 1-65535, no username/password, and no path, query or fragment",
@@ -829,11 +919,13 @@ function validateModelEntry(
 
 /**
  * Validate one client entry for a create or an update. Every listed alias
- * must name a defined `models[].alias` (`context.aliases`); an absent
- * `apiKey` on update keeps the stored credential; the view's mask literal is
- * rejected as a key. A `null` body value is the key not set — it reads
- * exactly as if omitted (`apiKey` included: a required credential cannot be
- * cleared, so on update it keeps the stored one).
+ * must name a defined `models[].alias` (`context.aliases`). `apiKey` follows
+ * the same wire grammar as an upstream's (the header's table), read on the
+ * RAW body: absent keeps the stored credential on update, the clear signal
+ * (`null` / `""`) cannot clear it, a whitespace-only value and the view's
+ * mask literal are refused, and on a create `null` reads as missing and `""`
+ * as empty. Every other key follows the null rule — it reads exactly as if
+ * omitted.
  */
 function validateClientEntry(
   given: unknown,
@@ -873,23 +965,16 @@ function validateClientEntry(
   }
 
   // apiKey-grade output care: the value never reaches a problem line
-  // (specs/architecture/security-model.md). Absent on update = keep-existing.
-  const apiKey = input.apiKey;
+  // (specs/architecture/security-model.md). Read on the RAW body, before the
+  // null rule, through the wire grammar: absent on update keeps the stored
+  // credential, the clear signal cannot clear it, a whitespace-only value is
+  // refused, and the view's mask literal is rejected as input.
   let validApiKey: string | undefined;
-  if (apiKey === undefined) {
-    if (context.existing === undefined) {
-      problems.push('client: missing required key "apiKey"');
-    } else {
-      validApiKey = context.existing.apiKey;
-    }
-  } else if (typeof apiKey !== "string" || apiKey.length === 0) {
-    problems.push("client: apiKey must be a non-empty string");
-  } else if (apiKey === CONFIGURED_MASK) {
-    problems.push(
-      `client: apiKey must not be the literal ${quoted(CONFIGURED_MASK)} mask — send the real credential, or omit the field to keep the stored one`,
-    );
+  const apiKey = resolveApiKey(given.apiKey, { entry: "client", existing: context.existing?.apiKey });
+  if ("problem" in apiKey) {
+    problems.push(apiKey.problem);
   } else {
-    validApiKey = apiKey;
+    validApiKey = apiKey.value;
   }
 
   const clientModels = input.models;

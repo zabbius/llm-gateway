@@ -7,9 +7,12 @@
  * `models[].routes[].upstream` → `upstreams[].id` — are validated like any
  * other config error, strategy/weight consistency is enforced, and the
  * per-entry `limits` block accepts only known keys and positive integers
- * (a present block carries at least one). The pre-existing blocks (`server`,
- * `auth`, `upstreams`) are covered through the loader in `load.test.ts` and
- * the example sync in `example.test.ts`.
+ * (a present block carries at least one). The file grammar's "no value"
+ * rule — absent, `null` and `""` are the only unset forms for `apiKey` /
+ * `tlsFingerprint` / `proxy`, whitespace-only is a problem — is covered at
+ * the validator level here. The pre-existing blocks (`server`, `auth`,
+ * `upstreams`) are otherwise covered through the loader in `load.test.ts`
+ * and the example sync in `example.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -283,13 +286,15 @@ describe("validateGatewayConfig — clients/models blocks", () => {
     expect(duplicateRoute.problems).toEqual(['models[0]: duplicate route "openai/gpt-4o" in the routes array']);
   });
 
-  test("a problem line names the rule but never echoes a client apiKey", () => {
-    const validated = validateGatewayConfig(config({ clients: [client({ apiKey: "" })] }));
-    expect(validated.ok).toBe(false);
-    if (validated.ok) return;
-    expect(validated.problems).toEqual(['clients[0]: apiKey must be a non-empty string']);
-    const raw = JSON.stringify(validated.problems);
-    expect(raw).not.toContain(CLIENT_SECRET);
+  test("a problem line names the rule but never echoes a client apiKey — \"\" and whitespace-only alike", () => {
+    for (const apiKey of ["", "   ", " \n\t "]) {
+      const validated = validateGatewayConfig(config({ clients: [client({ apiKey })] }));
+      expect(validated.ok).toBe(false);
+      if (validated.ok) return;
+      expect(validated.problems).toEqual(["clients[0]: apiKey must be a non-empty string"]);
+      const raw = JSON.stringify(validated.problems);
+      expect(raw).not.toContain(CLIENT_SECRET);
+    }
   });
 
   test("a client models array entry must be a non-empty string; duplicates within one client are rejected", () => {
@@ -426,5 +431,70 @@ describe("validateGatewayConfig — the model limits block", () => {
       });
       expect(Object.hasOwn(plain.config.models?.[0] ?? {}, "limits")).toBe(false);
     }
+  });
+});
+
+describe("validateGatewayConfig — the file grammar's \"no value\" rule", () => {
+  // Absent, `null` and `""` are the only ways to say "no value" for the
+  // optional pin/proxy; whitespace-only is a problem. apiKey has no "no
+  // value" form at all: "" and whitespace-only both fail as non-empty-required.
+
+  test("absent, null and \"\" pin/proxy values are valid and leave the entry without the key", () => {
+    for (const overrides of [{}, { tlsFingerprint: null, proxy: null }, { tlsFingerprint: "", proxy: "" }]) {
+      const validated = validateGatewayConfig({
+        ...config(),
+        upstreams: [{ ...upstream(), ...overrides }, upstream("ollama")],
+      });
+      expect(validated.ok).toBe(true);
+      if (!validated.ok) return;
+      const entry = validated.config.upstreams[0];
+      expect(Object.hasOwn(entry ?? {}, "tlsFingerprint")).toBe(false);
+      expect(Object.hasOwn(entry ?? {}, "proxy")).toBe(false);
+    }
+  });
+
+  test("a whitespace-only upstream apiKey is rejected as non-empty-required, exactly like \"\"", () => {
+    for (const apiKey of ["", "   ", " \n\t "]) {
+      const validated = validateGatewayConfig({
+        ...config(),
+        upstreams: [{ ...upstream(), apiKey }, upstream("ollama")],
+      });
+      expect(validated.ok).toBe(false);
+      if (!validated.ok) {
+        expect(validated.problems).toEqual(["upstreams[0]: apiKey must be a non-empty string"]);
+      }
+    }
+  });
+
+  test("a whitespace-only tlsFingerprint / proxy is a problem naming the key and rule, never the value", () => {
+    const validated = validateGatewayConfig({
+      ...config(),
+      upstreams: [{ ...upstream(), tlsFingerprint: " \n\t ", proxy: "   " }, upstream("ollama")],
+    });
+    expect(validated.ok).toBe(false);
+    if (validated.ok) return;
+    expect(validated.problems).toEqual([
+      'upstreams[0]: tlsFingerprint must not be whitespace-only — omit the key, use null or "" for no value',
+      'upstreams[0]: proxy must not be whitespace-only — omit the key, use null or "" for no value',
+    ]);
+  });
+
+  test("whitespace inside a non-empty pin/proxy is still stripped — only the all-whitespace value is a problem", () => {
+    const pin = Buffer.alloc(32, 7).toString("base64");
+    const validated = validateGatewayConfig({
+      ...config(),
+      upstreams: [
+        {
+          ...upstream(),
+          tlsFingerprint: `  ${pin.slice(0, 20)}\n${pin.slice(20)}  `,
+          proxy: "  http://proxy.example:8080\n ",
+        },
+        upstream("ollama"),
+      ],
+    });
+    expect(validated.ok).toBe(true);
+    if (!validated.ok) return;
+    expect(validated.config.upstreams[0]?.tlsFingerprint).toBe(pin);
+    expect(validated.config.upstreams[0]?.proxy).toBe("http://proxy.example:8080");
   });
 });

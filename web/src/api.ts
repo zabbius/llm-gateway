@@ -91,23 +91,33 @@ export interface UpstreamWriteResponse {
 }
 
 /**
- * The create/update request body — the config entry's grammar. Create
- * requires `apiKey`; update with an absent `apiKey` keeps the stored
- * credential (D7). `tlsFingerprint` absent keeps the stored pin; explicit
- * null — or an empty / whitespace-only value, the grammar's own "no pin" —
- * clears it. `proxy` (ADR-017) follows the same rule: absent keeps the
- * stored proxy on update (and means a direct connection on create), explicit
- * null clears it; a value is an `http://` or `socks5://` URL with an explicit
- * port and no userinfo. A JSON `null` on any other key is the key not set —
- * it reads exactly as if omitted (a `null` `apiKey` keeps the stored
- * credential on update; a `null` required key is reported missing).
+ * The create/update request body — the config entry's grammar, one write
+ * policy for its three credential-class keys. An absent key keeps the
+ * stored value on update (`apiKey` is required on create, D7). The two
+ * optional keys — `tlsFingerprint` and `proxy` (ADR-017) — take `null` or
+ * `""` as the same clear signal (no pin / a direct connection); a `proxy`
+ * value is an `http://` or `socks5://` URL with an explicit port and no
+ * userinfo. `apiKey` is the exception: a required credential can never be
+ * cleared, so its only wire forms are a real value or an absent field — an
+ * explicit `null` or `""` on update is refused (`cannot be cleared`), hence
+ * no `| null` here. Over all three keys a whitespace-only value is the
+ * `400` whitespace-only problem and the `[Configured]` mask is rejected
+ * (D7), so the SPA trims before it decides and omits an empty field rather
+ * than sending what was typed. A JSON `null` on any other key is the key
+ * not set — it reads exactly as if omitted (a `null` required key is
+ * reported missing).
  */
 export interface UpstreamWriteRequest {
   readonly type: string;
   readonly id: string;
   readonly baseUrl: string;
-  readonly apiKey?: string | null;
+  /** The credential — a real value, or absent to keep the stored one on
+   * update; never `null` or `""` (a required key cannot be cleared). */
+  readonly apiKey?: string;
+  /** Absent keeps the stored pin (none on create); `null` or `""` clears it. */
   readonly tlsFingerprint?: string | null;
+  /** Absent keeps the stored proxy (a direct connection on create); `null`
+   * or `""` clears it to a direct connection (ADR-017). */
   readonly proxy?: string | null;
 }
 
@@ -219,13 +229,20 @@ export interface ClientList {
 
 /**
  * The create/update request body — `apiKey` required on create, absent on
- * update keeps the stored credential (D7); the name itself is immutable. A
- * JSON `null` is the key not set — a `null` `apiKey` keeps the stored
- * credential like an omitted one, a `null` required key is reported missing.
+ * update keeps the stored credential (D7); the name itself is immutable.
+ * A required credential can never be cleared, so `apiKey` has exactly two
+ * wire forms — a real value or an absent field: an explicit `null` or `""`
+ * on update is refused (`cannot be cleared`), a whitespace-only value is the
+ * `400` whitespace-only problem, and the `[Configured]` mask is rejected
+ * (D7) — hence no `| null` here, and the SPA omits an empty (trimmed) field
+ * rather than sending what was typed. A JSON `null` on any other key is the
+ * key not set; a `null` required key is reported missing.
  */
 export interface ClientWriteRequest {
   readonly name: string;
-  readonly apiKey?: string | null;
+  /** The credential — a real value, or absent to keep the stored one on
+   * update; never `null` or `""` (a required key cannot be cleared). */
+  readonly apiKey?: string;
   readonly models: readonly string[];
 }
 
