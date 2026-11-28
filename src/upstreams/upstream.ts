@@ -128,6 +128,20 @@ export interface Upstream {
 
   /** Pure pass-through of one OpenAI-protocol request (incl. SSE streams). */
   forward(request: ProxyRequest): Promise<Response>;
+
+  /**
+   * Release what the instance owns that outlives a request — the loopback
+   * listener of a `socks5://` outbound proxy's bridge (ADR-017). Optional:
+   * an upstream without such resources leaves it out. Idempotent and never
+   * throws. The registry calls it when a runtime CRUD write replaces or
+   * removes the instance (ADR-014) and, in config order, on every instance
+   * at shutdown (`UpstreamRegistry.dispose()`, driven by the entry point's
+   * `stop()` before the listener closes) — a `socks5://` upstream's bridge
+   * listener ends with the gateway, taking its in-flight proxied streams
+   * with it; the replacement of a runtime swap already receives new
+   * requests.
+   */
+  dispose?(): void;
 }
 
 /**

@@ -24,6 +24,15 @@
  *      `Response` the unpinned fetch path returns — relay semantics,
  *      SSE streaming included, are unchanged.
  *
+ * With a configured outbound proxy (ADR-017) step 1 changes only where the
+ * TCP connection comes from: `openConnectTunnel` (`proxy.ts`) opens a
+ * `CONNECT host:port` tunnel through the http proxy and hands back the
+ * socket, and the TLS handshake — hence the pin check — runs over that
+ * tunnel, end to end between the gateway and the origin (the proxy pumps
+ * bytes; it never sees plaintext). A refused or failed CONNECT surfaces as
+ * the proxy failure it is (`UpstreamProxyError` / a plain error), never as
+ * a pin decision.
+ *
  * Every pinned request verifies its own connection: a certificate renewed
  * with the same key pair keeps matching the pin, a key change fails closed
  * on the next request. Nothing is cached between requests.
@@ -37,6 +46,7 @@ import http from "node:http";
 import { isIP } from "node:net";
 import { Readable } from "node:stream";
 import tls from "node:tls";
+import { openConnectTunnel, PROXY_DIAL_TIMEOUT_MS } from "./proxy.ts";
 
 /**
  * A TLS verification failure on the pinned path: a pin decision (mismatch,
@@ -189,6 +199,19 @@ export async function probePinnedLeaf(
   return leaf;
 }
 
+/** Options of one pinned upstream request beyond the request itself. */
+export interface PinnedRequestOptions {
+  /**
+   * The http: proxy URL the upstream is reached through (ADR-017): the TCP
+   * connection comes from a `CONNECT host:port` tunnel through that proxy
+   * (`openConnectTunnel`) instead of a direct `tls.connect`; the TLS
+   * handshake and the pin check run over the tunnel. Absent → a direct
+   * connection. A `socks5://` proxy is not accepted here — its bridge's
+   * loopback `http://` URL is what the caller passes instead.
+   */
+  readonly proxy?: string;
+}
+
 /**
  * One upstream request over a pinned connection (ADR-004): the TLS socket is
  * opened here and accepted only when the served certificate's SPKI pin
@@ -197,9 +220,14 @@ export async function probePinnedLeaf(
  * carries the HTTP request; the response is surfaced as a standard
  * `Response` (streaming body, SSE included).
  *
+ * The TLS handshake budget (`handshakeTimeoutMs`) covers the handshake; when
+ * `options.proxy` is set, the CONNECT exchange before it runs under its own
+ * `PROXY_DIAL_TIMEOUT_MS` budget.
+ *
  * Timeouts, aborts, and network failures surface as plain errors
  * (unreachable/timeout semantics); only pin decisions throw
- * `UpstreamTlsPinError`.
+ * `UpstreamTlsPinError`; a proxy that refused or failed the CONNECT throws
+ * `UpstreamProxyError` (or a plain error when it is merely unreachable).
  */
 export async function pinnedUpstreamRequest(
   url: string,
@@ -211,6 +239,7 @@ export async function pinnedUpstreamRequest(
   },
   expectedPin: string,
   handshakeTimeoutMs: number,
+  options: PinnedRequestOptions = {},
 ): Promise<Response> {
   if (init.signal.aborted) {
     throw new Error("the upstream request was aborted before it started");
@@ -229,7 +258,13 @@ export async function pinnedUpstreamRequest(
   // SNI carries hostnames, never IP literals (node:tls rejects an IP servername)
   const servername = isIP(host) === 0 ? host : undefined;
 
-  const socket = await openPinnedSocket({ host, port, servername }, expectedPin, handshakeTimeoutMs, init.signal);
+  const socket = await openPinnedSocket(
+    { host, port, servername },
+    expectedPin,
+    handshakeTimeoutMs,
+    init.signal,
+    options.proxy,
+  );
 
   return await new Promise<Response>((resolve, reject) => {
     const request = http.request(
@@ -318,18 +353,39 @@ export async function pinnedUpstreamRequest(
 /**
  * Open the pinned upstream TLS connection and enforce the pin on it — the
  * connection is refused unless the served certificate's pin matches, before
- * any request data flows over it. Plain errors for timeouts, aborts, and
- * network failures (unreachable semantics); `UpstreamTlsPinError` only for
- * pin decisions.
+ * any request data flows over it. Without a proxy the TLS socket connects
+ * directly; with one (`proxy`, ADR-017) the TCP socket comes from a CONNECT
+ * tunnel through the proxy and the TLS handshake runs over it — the pin
+ * check is the same either way, and still happens before any request byte.
+ * Plain errors for timeouts, aborts, and network failures (unreachable
+ * semantics) and for a proxy that is unreachable or timed out;
+ * `UpstreamProxyError` for a refused CONNECT; `UpstreamTlsPinError` only
+ * for pin decisions.
  */
-function openPinnedSocket(
+async function openPinnedSocket(
   endpoint: { host: string; port: number; servername?: string },
   expectedPin: string,
   timeoutMs: number,
   signal: AbortSignal,
+  proxy?: string,
 ): Promise<tls.TLSSocket> {
+  let socket: tls.TLSSocket;
+  if (proxy === undefined) {
+    socket = tls.connect({ ...endpoint, rejectUnauthorized: false });
+  } else {
+    // the CONNECT authority — an IPv6 literal needs its brackets back
+    const authority = endpoint.host.includes(":")
+      ? `[${endpoint.host}]:${endpoint.port}`
+      : `${endpoint.host}:${endpoint.port}`;
+    const tunnel = await openConnectTunnel(authority, proxy, PROXY_DIAL_TIMEOUT_MS, signal);
+    if (signal.aborted) {
+      tunnel.destroy();
+      throw new Error("the upstream request was aborted");
+    }
+    socket = tls.connect({ socket: tunnel, servername: endpoint.servername, rejectUnauthorized: false });
+  }
+
   return new Promise((resolve, reject) => {
-    const socket = tls.connect({ ...endpoint, rejectUnauthorized: false });
     const timer = setTimeout(() => {
       fail(new Error("the upstream handshake timed out"));
     }, timeoutMs);

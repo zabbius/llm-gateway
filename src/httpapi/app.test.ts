@@ -1096,7 +1096,7 @@ describe("docs namespace: GET /docs and GET /docs/openapi.json", () => {
     };
     expect(document.openapi).toMatch(/^3\./);
     expect(document.info.title).toBe("llm-gateway");
-    // The artifact describes the full interface — all twenty-three operations,
+    // The artifact describes the full interface — all twenty-two operations,
     // independent of this deployment's auth block: a static document is
     // deployment-independent, and the auth actions' own descriptions state
     // the auth.enabled condition.

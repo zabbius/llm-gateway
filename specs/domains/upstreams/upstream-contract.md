@@ -2,12 +2,12 @@
 
 ## Role
 
-Defines the interface every provider upstream implements and the `connect → serve` lifecycle the gateway drives it through.
+Defines the interface every provider upstream implements and the `connect → serve → dispose` lifecycle the gateway drives it through.
 
 ## Key Files
 
 - `src/upstreams/upstream.ts` — the `Upstream` interface and its request/response types, plus `UpstreamStatus` (the retained startup-probe outcome)
-- `src/upstreams/registry.ts` — drives the lifecycle: constructs upstreams (factory dispatch on `type` through the entry-point-injected factory map), calls `connect()` at startup, and retains each probe outcome (`status()` — the retained-outcome snapshot the management upstream list `GET /api/upstreams` serves)
+- `src/upstreams/registry.ts` — drives the lifecycle: constructs upstreams (factory dispatch on `type` through the entry-point-injected factory map), calls `connect()` at startup, retains each probe outcome (`status()` — the frozen snapshot the metadata seed and the route inventory consume at startup; no HTTP read serves it — ADR-014 D3), disposes the retired instance of a runtime `replace`/`remove`, and calls `dispose()` on every instance in config order at shutdown
 
 ## Behavior
 
@@ -45,6 +45,14 @@ interface Upstream {
       Never writes the startup snapshot; rejects with a log-safe reason when
       the probe fails. Implementations that cannot re-probe leave it out. */
   discover?(): Promise<readonly ModelEntry[]>;
+
+  /** Optional release of what the instance owns beyond a request — the
+      loopback listener of a socks5:// outbound proxy's bridge (ADR-017).
+      Idempotent, never throws. The registry calls it when a runtime
+      replace/remove retires the instance (ADR-014) and at shutdown, on
+      every instance in config order (UpstreamRegistry.dispose(), driven
+      by the entry point's stop() before the listener closes). */
+  dispose?(): void;
 }
 
 interface ProxyRequest {
@@ -58,8 +66,9 @@ interface ProxyRequest {
 }
 
 /** The retained startup-probe outcome for one upstream — what the registry's
-    status() hands back and the management upstream list `GET /api/upstreams`
-    serves (gateway-management.md).
+    status() hands back at startup: the probe warning line, the metadata
+    seed and the route inventory consume it; no HTTP read serves it (the
+    management list is the redacted view only, ADR-014 D3).
     Config identity plus the probe fact only: never credential or config
     material. reason (a log-safe failure fact) exists only on "failed".
     models is the frozen model catalog the upstream retained from its own
@@ -74,7 +83,7 @@ interface UpstreamStatus {
 }
 ```
 
-### Lifecycle: connect → serve
+### Lifecycle: connect → serve → dispose
 
 ```
    UpstreamRegistry.create()
@@ -102,9 +111,19 @@ interface UpstreamStatus {
 ║   stateless request handling;         ║
 ║   no per-request upstream state       ║
 ╚═══════════════════════════════════════╝
+           │  stop() (SIGINT/SIGTERM, a test, embedding)
+           ▼
+╔═══════════════════════════════════════╗
+║ dispose  — once, at teardown          ║
+║   optional: releases what the         ║
+║   instance owns beyond a request      ║
+║   (a socks5:// proxy's bridge         ║
+║   listener, ADR-017); idempotent,     ║
+║   never throws                        ║
+╚═══════════════════════════════════════╝
 ```
 
-`connect()` runs once per process and is the phase boundary between configuration and traffic: no request reaches an upstream that has not completed `connect()`. A failed probe does not change this — the registry retains the outcome (`probe: "ok"` or `probe: "failed"` with the log-safe `reason`, surfaced by the management upstream list `GET /api/upstreams`, [gateway-management.md](../../contracts/gateway-management.md)) and the upstream serves requests as usual (every upstream call re-attempts the provider). On success, an upstream that retains its probe result keeps the fetched model catalog as a frozen snapshot (`status()`), which the registry folds into the retained outcome once, at assembly: the snapshot seeds the alias-metadata store at startup and on the management create/update probes ([ADR-014](../../decisions/014-runtime-management-crud.md)), and the upstream-held snapshot is never refreshed at serve time (`listModels()` always re-fetches — the ADR-011 listing stores into the metadata store on its `discover=1` variant, never into the upstream, [ADR-016](../../decisions/016-discover-folded-into-live-listing.md)). A failed probe retains no catalog. Disconnection/shutdown is outside the MVP scope — process exit tears connections down.
+`connect()` runs once per process and is the phase boundary between configuration and traffic: no request reaches an upstream that has not completed `connect()`. A failed probe does not change this — the registry retains the outcome (`probe: "ok"` or `probe: "failed"` with the log-safe `reason`, consumed at startup by the metadata seed and the route inventory — no HTTP read serves it, [gateway-management.md](../../contracts/gateway-management.md) D3) and the upstream serves requests as usual (every upstream call re-attempts the provider). On success, an upstream that retains its probe result keeps the fetched model catalog as a frozen snapshot (`status()`), which the registry folds into the retained outcome once, at assembly: the snapshot seeds the alias-metadata store at startup and on the management create/update probes ([ADR-014](../../decisions/014-runtime-management-crud.md)), and the upstream-held snapshot is never refreshed at serve time (`listModels()` always re-fetches — the ADR-011 listing stores into the metadata store on its `discover=1` variant, never into the upstream, [ADR-016](../../decisions/016-discover-folded-into-live-listing.md)). A failed probe retains no catalog. Shutdown is a lifecycle phase, not an afterthought: the entry point's `stop()` — SIGINT/SIGTERM, a test, or an embedding host — calls `UpstreamRegistry.dispose()` before it stops the listener, so every instance's optional `dispose()` runs in config order and an owned resource such as a `socks5://` proxy's bridge listener (ADR-017) never outlives the gateway; the registry also disposes the instance a runtime `replace`/`remove` retires (ADR-014). `dispose()` is idempotent and never throws. The consequence for a SOCKS-proxied upstream is deliberate: replacing or removing it ends its in-flight proxied streams — the replacement is already registered and receives the new requests.
 
 `discover()` is the optional serve-phase re-probe: an upstream that implements it re-runs the same legs its startup probe ran and resolves with a freshly fetched model snapshot. No management mount consults it — the discovery facility it once served was replaced (at [ADR-014](../../decisions/014-runtime-management-crud.md)) by the interface's mandatory `listModels()`, which the management mounts run directly ([ADR-016](../../decisions/016-discover-folded-into-live-listing.md) folded that run into the ADR-011 listing's `discover=1` variant) — so the method stays optional interface surface with no current caller. It never writes the startup snapshot — `status()` and the registry's folded-in catalog stay exactly what `connect()` retained — and it rejects with a log-safe reason when the probe fails (the caller decides how to surface that). For the openai-compatible upstream, `connect()` and `discover()` share one fetch+merge helper (see [openai-compatible.md](./openai-compatible.md)).
 
@@ -114,8 +133,8 @@ interface UpstreamStatus {
 - `discover()` rejects with a log-safe reason when its probe legs fail (openai-compatible: when the standard leg fails — the LM Studio native leg never fails a probe); it never writes the startup snapshot, and its outcome is the caller's to surface.
 - `forward()` distinguishes two failure classes:
   - the provider answered — the upstream status and body are relayed unchanged (`4xx`/`5xx` pass-through);
-  - the provider is unreachable, the connection refused, or it timed out — the upstream synthesizes `504` with the OpenAI error envelope (`type: "api_error"`, `code: "upstream_timeout"`); a non-JSON upstream error body synthesizes `502` (`type: "api_error"`, `code: "upstream_error"`). It never fabricates a success response.
-- `listModels()` failure at serve time degrades: the failing upstream contributes no entries to `GET /llm/v1/models`, the rest of the list still returns with status `200`, and the failure is logged as a warning naming the upstream id.
+  - the provider is unreachable, the connection refused, or it timed out — the upstream synthesizes `504` with the OpenAI error envelope (`type: "api_error"`, `code: "upstream_timeout"`); a non-JSON upstream error body synthesizes `502` (`type: "api_error"`, `code: "upstream_error"`); the upstream's configured outbound proxy refusing or failing the connection synthesizes `502` (`code: "upstream_proxy_error"`, [ADR-017](../../decisions/017-per-upstream-outbound-proxy.md)) — an unreachable `http://` proxy or a dead target behind a live tunnel stays `504`, while a `socks5://` proxy the bridge could not dial is the marked `502` and stays in this `upstream_proxy_error` class. It never fabricates a success response.
+- `listModels()` has one serve-time caller — the ADR-011 operator listing `GET /api/upstreams/:id/models`: a failure answers the `502` `api_error` / `upstream_error` envelope naming the upstream id with a log-safe reason (a warning line; on the `discover=1` variant the previous metadata slice keeps serving). The client-facing `GET /llm/v1/models` is the alias catalog and never calls `listModels()`, so it has no degradation path ([ADR-009](../../decisions/009-alias-table-routing.md)).
 
 ## Invariants
 
@@ -125,6 +144,7 @@ interface UpstreamStatus {
 - `listModels()` exposes only models of its own upstream, with provider-native unprefixed ids.
 - `discover()` (when implemented) resolves with freshly fetched entries and never writes the startup snapshot; its rejections carry a log-safe reason.
 - The registry retains every startup-probe outcome in config order (`status()` → `UpstreamStatus`: `id`, `type`, `probe`, `reason?`, plus `models` — the upstream's frozen startup catalog — when the probe succeeded and the upstream retained its probe result) and never changes it after startup; every retained outcome and catalog is frozen at assembly, and the retained data carries no credential or config material.
+- `dispose()` is optional, idempotent, and never throws; the registry calls it on every instance in config order at shutdown and on the instance a runtime `replace`/`remove` retires — an owned resource such as a `socks5://` proxy's bridge listener never outlives its instance or the gateway (replacing or removing a SOCKS-proxied upstream ends its in-flight proxied streams; the replacement already receives new requests).
 - A failed upstream call never resolves to a `2xx` response.
 
 ## Related Specs

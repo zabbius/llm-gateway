@@ -24,7 +24,7 @@ Positive:
 Negative:
 
 - One more dependency on the critical path: Hono major upgrades must be tracked and evaluated.
-- Some Bun-native server options are reached through Hono's Bun integration rather than directly — both layers must be understood when tuning the server.
+- Static file serving (the SPA and the docs shell) goes through Hono's Bun integration (`serveStatic`); the listener options themselves (`hostname`, `port`, `tls`) are handed to `Bun.serve` directly by the entry point — tuning the server means understanding that seam.
 - The framework layer invites logic creep into handlers/middleware; the edge-only rule above is the guard, enforced in review.
 
 ## Alternatives Considered

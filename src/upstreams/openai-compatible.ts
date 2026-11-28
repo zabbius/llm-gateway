@@ -16,11 +16,24 @@
  * a synthesized `502 upstream_error`; an unreachable upstream or a timeout
  * becomes a synthesized `504 upstream_timeout`; a TLS verification failure
  * on a pinned upstream becomes a synthesized `502 upstream_tls_error`
- * (ADR-004). One attempt per client request — no retries in the MVP.
+ * (ADR-004); a configured outbound proxy that refused or failed the
+ * connection becomes a synthesized `502 upstream_proxy_error` (ADR-017).
+ * One attempt per client request — no retries in the MVP.
+ *
+ * Outbound proxy (`config.proxy`, ADR-017): every outbound call — forwards,
+ * both probe legs, listings, pinned or not — goes through the configured
+ * `http://` or `socks5://` proxy. The transport resolves lazily on the
+ * first call (`resolveProxyTransport`: an `http://` value is handed to
+ * fetch as-is, a `socks5://` value starts its loopback HTTP→SOCKS5 bridge
+ * then); the unpinned path is `fetch(url, { proxy })`, the pinned path
+ * opens its TLS socket through a CONNECT tunnel (`tls-pinning.ts`);
+ * `dispose()` stops a started bridge.
  */
 import type pino from "pino";
 import type { Upstream, UpstreamConfig, ModelEntry, ProxyRequest, UpstreamStatus } from "./upstream.ts";
 import type { ErrorEnvelope } from "../types.ts";
+import { PROXY_DIAL_FAILED_HEADER, PROXY_DIAL_FAILED_MARKER } from "./socks-bridge.ts";
+import { parseProxyUrl, resolveProxyTransport, UpstreamProxyError, type ProxyTransport } from "./proxy.ts";
 import { isTlsFailure, pinnedUpstreamRequest } from "./tls-pinning.ts";
 
 /** The `listModels()` probe inside `connect()` (startup; non-fatal on expiry). */
@@ -46,7 +59,9 @@ export interface OpenAICompatibleTimeouts {
 
 /**
  * Request init for one upstream fetch (`upstreamFetch`'s contract): the
- * pinned path may add TLS options, nothing else is transformed.
+ * pinned path may add TLS options, nothing else is transformed. A
+ * configured proxy adds Bun's `proxy` field (`fetch(url, { ...init, proxy })`)
+ * — never a header, never a URL rewrite.
  */
 interface UpstreamRequestInit {
   method: string;
@@ -80,6 +95,15 @@ export class OpenAICompatibleUpstream implements Upstream {
   private readonly apiKey: string;
   /** Non-empty config pin (ADR-004); undefined — and never enforced — when absent/empty. */
   private readonly tlsFingerprint: string | undefined;
+  /** The configured outbound proxy URL (ADR-017); undefined → direct connections. */
+  private readonly proxyUrl: string | undefined;
+  /**
+   * The resolved proxy transport — lazily, on the first outbound call: an
+   * `http://` value resolves to itself, a `socks5://` value starts its
+   * loopback bridge then (nothing listens before the first request).
+   * `dispose()` stops a started bridge; the next call would re-resolve.
+   */
+  private transport: ProxyTransport | undefined;
   private readonly logger: pino.Logger;
   private readonly timeouts: Required<OpenAICompatibleTimeouts>;
   /** The frozen startup snapshot `connect()` retained; undefined before it ran or when the probe failed. */
@@ -94,6 +118,7 @@ export class OpenAICompatibleUpstream implements Upstream {
       config.tlsFingerprint !== undefined && config.tlsFingerprint.length > 0
         ? config.tlsFingerprint
         : undefined;
+    this.proxyUrl = config.proxy;
     this.logger = logger;
     this.timeouts = {
       connectProbeMs: timeouts.connectProbeMs ?? CONNECT_PROBE_TIMEOUT_MS,
@@ -141,6 +166,19 @@ export class OpenAICompatibleUpstream implements Upstream {
    */
   status(): UpstreamStatus | undefined {
     return this.snapshot;
+  }
+
+  /**
+   * Release what the instance owns that outlives a request: the loopback
+   * listener of a `socks5://` proxy's bridge (nothing to release for a
+   * direct or `http://` connection). The registry calls it when a runtime
+   * CRUD write replaces or removes the instance (ADR-014); a request that
+   * still arrives afterwards re-resolves the transport lazily.
+   */
+  dispose(): void {
+    const transport = this.transport;
+    this.transport = undefined;
+    if (transport?.kind === "socks5") transport.bridge.stop();
   }
 
   /**
@@ -195,6 +233,11 @@ export class OpenAICompatibleUpstream implements Upstream {
     } catch (error) {
       clearTimeout(forwardTimer);
       if (forwardTimedOut) return this.unreachableResponse(error, true);
+      // a proxy failure is its own fact (ADR-017): the upstream was never
+      // reached because the configured proxy refused or failed the
+      // connection — neither a timeout nor a relayable upstream body, and
+      // never the upstream's verdict.
+      if (isProxyFailure(error)) return this.proxyFailureResponse(error);
       // a TLS verification failure on a PINNED upstream is its own fact —
       // it is not a timeout and not a relayable upstream body (ADR-004).
       // Without a pin the pre-existing mapping stays: any TLS failure is
@@ -206,6 +249,16 @@ export class OpenAICompatibleUpstream implements Upstream {
     const contentType = upstream.headers.get("content-type") ?? "";
     const isEventStream = contentType.includes("text/event-stream");
     const relayedHeaders = relayedResponseHeaders(upstream.headers);
+
+    // a socks5 bridge answers a failed SOCKS dial with a marked 502 — a
+    // proxy failure fetch can only see as a response, since the proxy
+    // exchange itself succeeded (only the absolute-URI path can carry it)
+    const dialFailure = proxyDialFailure(upstream);
+    if (dialFailure !== undefined) {
+      clearTimeout(forwardTimer);
+      void upstream.body?.cancel();
+      return this.proxyFailureResponse(dialFailure);
+    }
 
     if (upstream.status >= 400 && !isJsonContentType(contentType)) {
       clearTimeout(forwardTimer);
@@ -300,12 +353,16 @@ export class OpenAICompatibleUpstream implements Upstream {
       });
     } catch (error) {
       clearTimeout(timer);
-      throw new Error(`upstream "${this.id}" is unreachable: ${timedOut ? "timeout" : describe(error)}`);
+      throw new Error(`upstream "${this.id}" is unreachable: ${timedOut ? "timeout" : describeFailure(error)}`);
     }
 
     if (!upstream.ok) {
       clearTimeout(timer);
       void upstream.body?.cancel();
+      const dialFailure = proxyDialFailure(upstream);
+      if (dialFailure !== undefined) {
+        throw new Error(`upstream "${this.id}" is unreachable: ${describeFailure(dialFailure)}`);
+      }
       throw new Error(`model list request failed with HTTP ${upstream.status}`);
     }
 
@@ -370,12 +427,16 @@ export class OpenAICompatibleUpstream implements Upstream {
       });
     } catch (error) {
       clearTimeout(timer);
-      throw new Error(`native model list request failed: ${timedOut ? "timeout" : describe(error)}`);
+      throw new Error(`native model list request failed: ${timedOut ? "timeout" : describeFailure(error)}`);
     }
 
     if (!upstream.ok) {
       clearTimeout(timer);
       void upstream.body?.cancel();
+      const dialFailure = proxyDialFailure(upstream);
+      if (dialFailure !== undefined) {
+        throw new Error(`native model list request failed: ${describeFailure(dialFailure)}`);
+      }
       throw new Error(`native model list request failed with HTTP ${upstream.status}`);
     }
 
@@ -412,20 +473,78 @@ export class OpenAICompatibleUpstream implements Upstream {
   }
 
   /**
-   * The upstream's only upstream fetch. Without a pin it is plain `fetch`;
-   * with a pin (ADR-004) the request runs over a connection the pinning
-   * module verifies itself (`pinnedUpstreamRequest`): fetch's TLS layer
-   * cannot express pin-only semantics, so the socket is opened there, its
-   * certificate's SPKI pin is checked before any byte — hence any
+   * The upstream's only upstream fetch. Without a pin it is plain `fetch`
+   * — through the configured proxy when there is one (`fetch(url, { proxy })`,
+   * ADR-017); with a pin (ADR-004) the request runs over a connection the
+   * pinning module verifies itself (`pinnedUpstreamRequest`): fetch's TLS
+   * layer cannot express pin-only semantics, so the socket is opened there,
+   * its certificate's SPKI pin is checked before any byte — hence any
    * credential — is written, and the verified socket carries the request.
+   * With a proxy that socket comes from a CONNECT tunnel through it.
+   *
+   * A configured proxy is resolved here, lazily, on the first call: an
+   * `http://` value is used as-is, a `socks5://` value starts its loopback
+   * bridge (`resolveProxyTransport`). A proxy URL that fails its defensive
+   * re-parse rejects with `UpstreamProxyError` — the caller maps it.
    */
   private upstreamFetch(url: string, init: UpstreamRequestInit): Promise<Response> {
+    let proxy: string | undefined;
+    try {
+      proxy = this.proxyFetchUrl();
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const pin = this.tlsFingerprint;
     // a pin on a plain-http baseUrl stays valid config but is inert (ADR-004)
     if (pin === undefined || !url.startsWith("https:")) {
-      return fetch(url, init);
+      return fetch(url, proxy === undefined ? init : { ...init, proxy });
     }
-    return pinnedUpstreamRequest(url, init, pin, this.timeouts.pinProbeMs);
+    return pinnedUpstreamRequest(url, init, pin, this.timeouts.pinProbeMs, proxy === undefined ? {} : { proxy });
+  }
+
+  /**
+   * What `fetch({ proxy })` (and the pinned path's CONNECT) must be handed
+   * for the configured proxy — the `fetchUrl` of the transport resolved on
+   * first use: the proxy URL itself for `http://`, the loopback bridge's URL
+   * for `socks5://`. Undefined without a configured proxy.
+   */
+  private proxyFetchUrl(): string | undefined {
+    if (this.proxyUrl === undefined) return undefined;
+    this.transport ??= resolveProxyTransport(this.proxyUrl, { logger: this.logger });
+    return this.transport.fetchUrl;
+  }
+
+  /**
+   * Proxy failure — the configured proxy refused the CONNECT, could not dial
+   * through SOCKS, or is unusable → synthesized `502 upstream_proxy_error`.
+   * The message states the fact for the client and names neither
+   * credentials nor the target's bytes; the log line carries the proxy's
+   * scheme/host:port (a proxy URL may not carry credentials — the config
+   * grammar forbids them — so none can reach the log either).
+   */
+  private proxyFailureResponse(error: unknown): Response {
+    const reason = describe(error);
+    const proxy = this.proxyLogFields();
+    this.logger.error(
+      { code: "upstream_proxy_error", reason, ...(proxy === undefined ? {} : { proxy }) },
+      "upstream proxy failed — synthesizing 502",
+    );
+    return synthesizedError(
+      502,
+      "upstream_proxy_error",
+      `upstream "${this.id}" is unreachable through its configured proxy`,
+    );
+  }
+
+  /** The proxy's scheme/host:port for log lines; undefined without a (parseable) proxy. */
+  private proxyLogFields(): { scheme: string; host: string; port: number } | undefined {
+    if (this.proxyUrl === undefined) return undefined;
+    try {
+      const parsed = parseProxyUrl(this.proxyUrl);
+      return { scheme: parsed.protocol.slice(0, -1), host: parsed.host, port: parsed.port };
+    } catch {
+      return undefined;
+    }
   }
 
   /** Upstream TLS verification failed → synthesized `502 upstream_tls_error`. */
@@ -541,11 +660,12 @@ function isJsonContentType(contentType: string): boolean {
  * specs/contracts/client-gateway.md; type "api_error" per
  * specs/contracts/gateway-upstream.md error propagation table;
  * "upstream_tls_error" per ADR-004 for a pinned upstream whose TLS
- * verification failed).
+ * verification failed; "upstream_proxy_error" per ADR-017 for a configured
+ * outbound proxy that refused or failed the connection).
  */
 function synthesizedError(
   status: 502 | 504,
-  code: "upstream_error" | "upstream_timeout" | "upstream_tls_error",
+  code: "upstream_error" | "upstream_timeout" | "upstream_tls_error" | "upstream_proxy_error",
   message: string,
 ): Response {
   const body = JSON.stringify({ error: { message, type: "api_error", code } } satisfies ErrorEnvelope);
@@ -622,4 +742,40 @@ function toModelEntry(value: unknown): ModelEntry {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * True when an upstream failure is the configured proxy's (ADR-017): this
+ * module's own `UpstreamProxyError` (a refused CONNECT, an unusable proxy
+ * URL), the codes Bun's fetch raises when a proxy refuses a tunnel or
+ * speaks a protocol it cannot carry, and Bun's message form of the
+ * refusal. An unreachable proxy, a timeout, and an abort stay plain
+ * failures — the upstream is "unreachable", 504 upstream_timeout.
+ */
+function isProxyFailure(error: unknown): boolean {
+  if (error instanceof UpstreamProxyError) return true;
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === "ERR_PROXY_TUNNEL" || code === "UnsupportedProxyProtocol") return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /proxy refused to open a tunnel/i.test(message);
+}
+
+/**
+ * The socks5 bridge's marker on a non-2xx answer: a SOCKS dial that failed
+ * behind an otherwise successful proxy exchange — a proxy failure the fetch
+ * path can only see as a response (`PROXY_DIAL_FAILED_HEADER`). Undefined
+ * for every other response.
+ */
+function proxyDialFailure(upstream: Response): UpstreamProxyError | undefined {
+  if (upstream.ok || upstream.headers.get(PROXY_DIAL_FAILED_HEADER) !== PROXY_DIAL_FAILED_MARKER) return undefined;
+  return new UpstreamProxyError(`the SOCKS proxy could not dial the upstream (HTTP ${upstream.status})`);
+}
+
+/**
+ * A failure reason that names the proxy when the proxy is what failed — so
+ * the probe's `reason` (and the registry's warning) stays honest about
+ * where the request stopped.
+ */
+function describeFailure(error: unknown): string {
+  return isProxyFailure(error) ? `proxy failure: ${describe(error)}` : describe(error);
 }

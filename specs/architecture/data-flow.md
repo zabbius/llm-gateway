@@ -14,13 +14,18 @@ process start (bun src/index.ts)
      |
      v
 [2] validate config:
-      upstream entries (id, type, baseUrl, apiKey, optional tlsFingerprint pin),
+      upstream entries (id, type, baseUrl, apiKey, optional tlsFingerprint pin,
+      optional proxy — an http:/socks5: URL with an explicit port, never
+      credentials — ADR-017),
       server.listen host:port, server.tls (enabled + cert/key paths
       when enabled), log level
      |            invalid -> error to stderr, exit non-zero
      v
 [3] construct one upstream per entry
-      openai-compatible: baseUrl (with /v1) + apiKey, pure pass-through
+      openai-compatible: baseUrl (with /v1) + apiKey, pure pass-through;
+      the optional pin and proxy are only read here — nothing is dialed,
+      and a socks5:// proxy's loopback bridge starts with the entry's
+      first outbound call (in practice the [5] probe, ADR-017)
      |
      v
 [4] register upstreams in the registry (upstream id -> instance)  src/upstreams/registry.ts
@@ -68,11 +73,36 @@ ready -- a client can chat with an LLM through the gateway
 
 Notes:
 
-- After construction every upstream runs a one-shot startup probe (`connect()` → `listModels()`, 10-second budget): the outcome is logged (a failure logs a warning naming the upstream id), and startup continues — the gateway comes up even with unreachable upstreams; their unavailability surfaces per request. The probe outcome is retained by the registry and is what `GET /api/status` later reports ([gateway-management.md](../contracts/gateway-management.md)).
-- The route inventory ([5b], [routing.md](../domains/routing.md)) runs after every probe finished, purely in memory: each configured route's model is compared against its upstream's retained catalog — a verified-missing model warns once per route, a route without a comparable catalog stays silent, and the counts land on an info line. Findings never abort startup; `GET /api/status` recomputes the same three-state verdicts per request from the frozen config and retained statuses.
+- After construction every upstream runs a one-shot startup probe (`connect()` → `listModels()`, 10-second budget, through the entry's configured `proxy` when there is one — ADR-017): the outcome is logged (a failure logs a warning naming the upstream id), and startup continues — the gateway comes up even with unreachable upstreams; their unavailability surfaces per request. The probe outcome is retained by the registry (`status()`) as a startup fact — the metadata seed and the route inventory consume it, and it is logged; no HTTP surface carries it (`GET /api/status` is the fixed `{ status, authenticated }` pair, [gateway-management.md](../contracts/gateway-management.md)).
+- The route inventory ([5b], [routing.md](../domains/routing.md)) runs after every probe finished, purely in memory: each configured route's model is compared against its upstream's retained catalog — a verified-missing model warns once per route, a route without a comparable catalog stays silent, and the counts land on an info line. Findings never abort startup and stay log-only: the verdicts are computed once here, logged on the info line, and carried by no HTTP surface.
 - The listener starts only after every probe finished (ok or logged).
 - The entry point constructs the runtime configuration store ([ADR-014](../decisions/014-runtime-management-crud.md)) over the normalized config and the path it was loaded from, and hands it to the app: the store's presence mounts the management CRUD blocks and generalizes the client Bearer gate (seeded from the store's current clients — an empty registry answers `401` fail-closed until the CRUD creates the first client). The metadata store's construction and seeding ("discovery at start") ride the same wiring.
 - When TLS is enabled ([ADR-006](../decisions/006-tls-listener-server-block.md)), both PEM files are read right before the bind — after validation and app wiring, before any port is bound: a missing or unreadable file is a fatal startup error, so a TLS-enabled gateway never falls back to plain HTTP.
+
+## Shutdown Flow
+
+```
+SIGINT / SIGTERM  (production), or GatewayHandles.stop()  (a test, an embedding host)
+     |
+     v
+[1] registry.dispose()  — every upstream's optional dispose(),   src/upstreams/registry.ts
+    |                     in config order; upstreams without the
+    |                     hook are untouched. A socks5:// upstream's
+    |                     loopback bridge listener closes here
+    |                     (ADR-017): its in-flight proxied streams
+    |                     end with the gateway.
+     |
+     v
+[2] server.stop(true) — the listener closes and in-flight       src/index.ts
+    |                     connections abort
+     v
+exit
+```
+
+Notes:
+
+- Dispose runs before the listener stops: an owned resource never outlives the gateway, and a `socks5://` proxy's bridge listener is gone by the time the listener closes. The same release happens on a runtime `replace`/`remove` ([ADR-014](../decisions/014-runtime-management-crud.md)): replacing or removing a SOCKS-proxied upstream ends its in-flight proxied streams — the replacement is already registered and receives the new requests.
+- `dispose()` is idempotent and never throws, so a repeated stop (the `finally` of a test, a second signal) stays harmless.
 
 ## Request Lifecycle: Chat Completion
 
@@ -126,12 +156,13 @@ client
 [4] PROXY     the dispatch builds the upstream request:
    |            baseUrl + path; body.model := the route's
    |            provider-native model (the only body transformation),
-   |            method and body relayed as received,
+   |            method relayed, body relayed semantically as received
+   |            (re-serialized after the one model rewrite),
    |            client Authorization dropped at the edge (never forwarded),
    |            hop-by-hop headers never forwarded,
    |            upstream attaches its own provider credentials;
    |            one upstream per attempt (specs/domains/load-balancing.md):
-   |            a pre-first-byte failure (synthesized 502/504/502-TLS,
+   |            a pre-first-byte failure (synthesized 502/504/502-TLS/502-proxy,
    |            relayed 5xx or 429) marks the route and advances to the
    |            next eligible route; failover exhausted within the
    |            request relays the last upstream failure unchanged;
@@ -140,7 +171,17 @@ client
    |            its own TLS socket and verifies the pin inline before any byte
    |            is written — fail-closed SPKI pin check, leaf-anchored chain,
    |            per-connection pin veto; nothing is cached between requests,
-   |            and a TLS failure maps to 502 upstream_tls_error
+   |            and a TLS failure maps to 502 upstream_tls_error;
+   |            with a configured proxy (ADR-017) every call rides it: the
+   |            unpinned path is fetch(url, { proxy }) — an http:// proxy
+   |            as-is, a socks5:// proxy through the entry's loopback
+   |            HTTP->SOCKS5 bridge; the pinned path's socket comes from a
+   |            CONNECT tunnel through the proxy — the pin check is unchanged
+   |            and still precedes every request byte; a proxy that refuses
+   |            or fails the connection maps to 502 upstream_proxy_error,
+   |            an unreachable or timed-out http:// proxy stays 504
+   |            upstream_timeout (a socks5:// proxy the bridge could not
+   |            dial is the marked 502 — a proxy failure)
    v
 [5] the upstream's provider processes the request
    |
@@ -208,8 +249,11 @@ client
    v
 [5] HOT-APPLY the running graph, per collection (no restart):
    |          upstreams -> construct + probe within the 10 s budget (a failed
-   |                      probe is data in the answer, not a cancellation, D8)
-   |                      -> registry swap -> metadata slice seed/clear
+   |                      probe is data in the answer, not a cancellation, D8;
+   |                      the probe rides the new entry's configured proxy)
+   |                      -> registry swap (the retired instance's dispose()
+   |                      runs — its socks5 bridge, if any, stops with it)
+   |                      -> metadata slice seed/clear
    |          models    -> fresh routing-table build, atomically swapped into
    |                      the stable table object; route health and session
    |                      affinity start from the neutral state (D9)
@@ -220,12 +264,12 @@ client
    (referenced deletes answer 409 resource_in_use at step [2] before anything moves)
 ```
 
-The ADR-011 listing carries the on-demand discovery in its `discover=1` query parameter ([ADR-016](../domains/../decisions/016-discover-folded-into-live-listing.md) — the folded former discover mount): same gate, same probe budget, one `listModels()` — a success swaps the metadata slice wholesale before the answer, a failure or expired budget leaves it serving (retain-last-good) and surfaces as the listing's `502` envelope.
+The ADR-011 listing carries the on-demand discovery in its `discover=1` query parameter ([ADR-016](../decisions/016-discover-folded-into-live-listing.md) — the folded former discover mount): same gate, same probe budget, one `listModels()` — a success swaps the metadata slice wholesale before the answer, a failure or expired budget leaves it serving (retain-last-good) and surfaces as the listing's `502` envelope.
 
 ## Errors Along the Flow
 
-- Upstream failure: the upstream never raises — it relays the upstream status and body, or synthesizes a 502 upstream_error / 504 upstream_timeout envelope (gateway-upstream.md); a TLS verification failure on a pinned upstream (`tlsFingerprint` set) synthesizes a 502 upstream_tls_error (ADR-004); the app's error middleware maps only unexpected gateway-side exceptions to a 502 upstream_error envelope, and logs at warning or error.
-- Pre-first-byte failures (synthesized 502/504/502-TLS, relayed 5xx or 429) additionally count against the route's health and trigger failover to the entry's next eligible route (specs/domains/load-balancing.md); a client-caused 4xx relays unchanged and touches no health state.
+- Upstream failure: the upstream never raises — it relays the upstream status and body, or synthesizes a 502 upstream_error / 504 upstream_timeout envelope (gateway-upstream.md); a TLS verification failure on a pinned upstream (`tlsFingerprint` set) synthesizes a 502 upstream_tls_error (ADR-004); a configured outbound proxy that refuses or fails the connection synthesizes a 502 upstream_proxy_error (ADR-017) — while an unreachable or timed-out `http://` proxy, or a dead target behind a live tunnel, stay 504 upstream_timeout — a `socks5://` proxy the bridge could not dial is the marked 502, hence 502 upstream_proxy_error; the app's error middleware maps only unexpected gateway-side exceptions to a 502 upstream_error envelope, and logs at warning or error.
+- Pre-first-byte failures (synthesized 502/504/502-TLS/502-proxy, relayed 5xx or 429) additionally count against the route's health and trigger failover to the entry's next eligible route (specs/domains/load-balancing.md); a client-caused 4xx relays unchanged and touches no health state.
 - An alias whose every route is currently open (cooldown, or its half-open probe in flight) answers a 503 upstream_unavailable envelope without any upstream contact (load-balancing.md); failover exhausted within one request relays the last upstream failure response byte-for-byte.
 - Routing failures (an unknown alias, an alias the authenticated client is not allowed to address) never reach an upstream — they are answered at stage [3] (404 model_not_found and 403 respectively, ADR-009).
 - Chat requests resolve through the alias table, so one provider being down never blocks requests targeting other providers; with balancing, its routes' own failures fail over inside the entry.
@@ -234,13 +278,15 @@ The ADR-011 listing carries the on-demand discovery in its `discover=1` query pa
 ## Invariants
 
 - Startup order is fixed: config → upstreams → registry → app → listen; the listener never accepts traffic before the registry is populated.
+- Shutdown order is fixed too: `registry.dispose()` — every upstream's optional `dispose()`, in config order — runs before `server.stop(true)` closes the listener; a runtime `replace`/`remove` disposes the instance it retires ([ADR-014](../decisions/014-runtime-management-crud.md)), ending a SOCKS-proxied upstream's in-flight proxied streams while the replacement already receives new requests.
 - Every proxied chat request resolves its upstream through the alias table; no path leads from an HTTP handler to an upstream without an alias resolution ([ADR-009](../decisions/009-alias-table-routing.md)).
-- The alias is resolved once per request by the routing table (exact lookup, balance-selected route); rewriting `body.model` to the selected route's model is the router's single body transformation — upstreams relay payload bytes untouched.
+- The alias is resolved once per request by the routing table (exact lookup, balance-selected route); rewriting `body.model` to the selected route's model is the router's single body transformation — the dispatch re-serializes the parsed JSON after it (byte layout normalized, [gateway-upstream.md](../contracts/gateway-upstream.md)) — and upstreams relay the bytes they receive untouched.
 - A chat-completion attempt touches exactly one upstream; a pre-first-byte failure advances the request to the entry's next eligible route ([load-balancing.md](../domains/load-balancing.md)), and once a response streams the answer is final — no failover past the first byte.
 - Streaming responses are forwarded incrementally; the gateway never buffers a full SSE stream before answering the client.
 - The auth stage precedes routing and upstream invocation; when auth is enabled it gates `/api/*` with the session check ([ADR-007](../decisions/007-management-cookie-auth.md)), when auth is off it stays a no-op placeholder — no code path skips it.
 - Request handling is logged to stderr — the request-handled summary at debug, failures at warning or error; nothing below the configured level is emitted.
 - A management mutation touches the config file before it touches memory: validate → persist (sibling temp file + atomic rename) → apply → hot-apply ([ADR-014](../decisions/014-runtime-management-crud.md) D1; invariant 15 of [security-model.md](./security-model.md)) — a failed validation or write leaves both disk and memory untouched, and `config.json` stays the single source of truth a restart reconstructs everything from.
+- Every outbound call of an upstream — forwards, both probe legs, listings, pinned or not — rides that entry's configured `proxy` when there is one, and nothing else chooses the egress path (no process-wide switch, no environment variable); the proxy URL never carries credentials, and the pin decision precedes every request byte through the tunnel ([ADR-017](../decisions/017-per-upstream-outbound-proxy.md); [security-model.md](./security-model.md) invariants 16–18).
 
 ## Anti-Patterns
 
@@ -251,3 +297,5 @@ The ADR-011 listing carries the on-demand discovery in its `discover=1` query pa
 - Answering 200 with an error payload after an upstream failure — failures surface as HTTP status codes at the app boundary.
 - Retrying a request after its response started streaming — a servable response is final; failover is a pre-first-byte concern only ([load-balancing.md](../domains/load-balancing.md)).
 - Constructing upstreams per request from config — upstreams are constructed at startup, and the runtime CRUD's probe-and-swap is the one exception ([ADR-014](../decisions/014-runtime-management-crud.md)): a management mutation constructs exactly one fresh instance per mutation, never per request.
+- Routing egress through a process-wide switch (`HTTP_PROXY`, a `server.proxy` block) instead of the entry's `proxy` — egress is a property of the connection, not the process; one gateway fronts providers that need different paths, and Bun's `fetch` does not honor the environment variable anyway ([ADR-017](../decisions/017-per-upstream-outbound-proxy.md)).
+- Treating a proxy refusal as an upstream answer — relaying the proxy's `502`/`407` body as if the provider had replied hides where the request stopped; a proxy failure is `502 upstream_proxy_error`, an unreachable `http://` proxy is `504 upstream_timeout` ([ADR-017](../decisions/017-per-upstream-outbound-proxy.md)).

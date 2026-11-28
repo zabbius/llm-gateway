@@ -53,6 +53,8 @@ function silentLogger(): pino.Logger {
 
 const UPSTREAM_KEY_OPENAI = "sk-upstream-synthetic-openai";
 const UPSTREAM_KEY_OLLAMA = "sk-upstream-synthetic-ollama";
+/** A syntactically valid synthetic SPKI pin (base64 of 32 bytes) — never a real key. */
+const SYNTHETIC_PIN = "ChVe2KjfNPYd8xw7nslGJTBuGOiOq2cQ0CpI1Fh2WhM=";
 /** The fixture client's key: the runtime store wires the management CRUD, so
  * the client gate mounts (ADR-014 D2) and /llm/v1 needs this Bearer value. */
 const CLIENT_KEY_CRUD = "sk-client-synthetic-crud";
@@ -295,6 +297,76 @@ describe("POST /api/upstreams", () => {
     expect(body.probe.ok).toBe(false);
   });
 
+  test("a create with an empty tlsFingerprint lands as no pin: the answer reads null and the file carries no key", async () => {
+    const { app, configPath } = await gateway();
+
+    const response = await app.request("/api/upstreams", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "openai-compatible",
+        id: "blank-pin",
+        baseUrl: "https://blank.example.com/v1",
+        apiKey: "sk-upstream-synthetic-blank",
+        tlsFingerprint: "",
+      }),
+    });
+    expect(response.status).toBe(200);
+    const body = JSON.parse(await bodyText(response)) as { upstream: { tlsFingerprint: string | null } };
+    expect(body.upstream.tlsFingerprint).toBeNull(); // absent — never the mask, never ""
+
+    const onDisk = JSON.parse(readFileSync(configPath, "utf8")) as { upstreams: Record<string, unknown>[] };
+    expect(Object.hasOwn(onDisk.upstreams.find((entry) => entry.id === "blank-pin") ?? {}, "tlsFingerprint")).toBe(false);
+  });
+
+  test("a null body value is the key not set over HTTP: null pin/proxy land without keys, a null apiKey keeps on update and is reported missing on create", async () => {
+    const { app, configPath } = await gateway();
+
+    // create — null optional keys leave the entry without them
+    const created = await app.request("/api/upstreams", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "openai-compatible",
+        id: "nulls",
+        baseUrl: "https://nulls.example.com/v1",
+        apiKey: "sk-upstream-synthetic-nulls",
+        tlsFingerprint: null,
+        proxy: null,
+      }),
+    });
+    expect(created.status).toBe(200);
+    const createdBody = JSON.parse(await bodyText(created)) as {
+      upstream: { tlsFingerprint: string | null; proxy: string | null };
+    };
+    expect(createdBody.upstream.tlsFingerprint).toBeNull();
+    expect(createdBody.upstream.proxy).toBeNull();
+
+    // update — a null apiKey (and a null id) read exactly like omitted ones: the
+    // stored credential is kept, the id inherited (D7)
+    const update = await app.request("/api/upstreams/nulls", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "openai-compatible", baseUrl: "https://nulls.example.com/v1", id: null, apiKey: null }),
+    });
+    expect(update.status).toBe(200);
+
+    const onDisk = JSON.parse(readFileSync(configPath, "utf8")) as { upstreams: Record<string, unknown>[] };
+    const entry = onDisk.upstreams.find((candidate) => candidate.id === "nulls") ?? {};
+    expect(entry.apiKey).toBe("sk-upstream-synthetic-nulls");
+    expect(Object.hasOwn(entry, "tlsFingerprint")).toBe(false);
+    expect(Object.hasOwn(entry, "proxy")).toBe(false);
+
+    // create — a null required key is the 400 envelope, reported missing like an absent one
+    const refused = await app.request("/api/upstreams", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "openai-compatible", id: "nokey", baseUrl: "https://x.example.com/v1", apiKey: null }),
+    });
+    expect(refused.status).toBe(400);
+    expect((JSON.parse(await bodyText(refused)) as Envelope).error.message).toContain('missing required key "apiKey"');
+  });
+
   test("validation refusals are the 400 envelope and mutate nothing (duplicate id, grammar, mask literal)", async () => {
     const { app, configPath } = await gateway();
     const before = readFileSync(configPath, "utf8");
@@ -395,6 +467,35 @@ describe("PUT /api/upstreams/:id", () => {
       body: JSON.stringify({ type: "openai-compatible", id: "ghost", baseUrl: "https://x.example.com/v1" }),
     });
     expect(unknown.status).toBe(404);
+  });
+
+  test("an empty tlsFingerprint is no pin: the answer and the file carry no key — never the mask, never \"\"", async () => {
+    const { app, configPath } = await gateway();
+    const storedPin = (): unknown =>
+      (JSON.parse(readFileSync(configPath, "utf8")) as { upstreams: Record<string, unknown>[] }).upstreams.find((entry) => entry.id === "openai")?.tlsFingerprint;
+    const put = (tlsFingerprint: string) =>
+      app.request("/api/upstreams/openai", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "openai-compatible", id: "openai", baseUrl: "https://openai.example.com/v1", tlsFingerprint }),
+      });
+    const answerPin = async (response: Response): Promise<string | null> =>
+      (JSON.parse(await bodyText(response)) as { upstream: { tlsFingerprint: string | null } }).upstream.tlsFingerprint;
+
+    // a set pin answers with the mask (D7: the view never carries the value)
+    expect(await answerPin(await put(SYNTHETIC_PIN))).toBe("[Configured]");
+    expect(storedPin()).toBe(SYNTHETIC_PIN);
+
+    // the grammar's empty value is "no pin" — it clears the stored pin like an explicit null
+    for (const empty of ["", "   "]) {
+      expect(await answerPin(await put(SYNTHETIC_PIN))).toBe("[Configured]");
+      expect(await answerPin(await put(empty))).toBeNull(); // absent, never the mask
+      expect(storedPin()).toBeUndefined(); // the file carries no key at all — never ""
+      const list = await app.request("/api/upstreams");
+      expect(
+        ((await list.json()) as { upstreams: { id: string; tlsFingerprint: string | null }[] }).upstreams.find((entry) => entry.id === "openai")?.tlsFingerprint,
+      ).toBeNull();
+    }
   });
 
   test("validation refusals are the 400 envelope and leave disk untouched", async () => {

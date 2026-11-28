@@ -21,6 +21,7 @@
  *   413  invalid_request_error  code "request_too_large" (body size cap)
  *   502  api_error              code "upstream_error"
  *   502  api_error              code "upstream_tls_error" (ADR-004)
+ *   502  api_error              code "upstream_proxy_error" (ADR-017)
  *   503  api_error              code "upstream_unavailable" (no healthy route, load-balancing.md)
  *   504  api_error              code "upstream_timeout"
  *
@@ -230,5 +231,19 @@ export function serviceUnavailableResponse(model: string): Response {
 export function upstreamTlsErrorResponse(message: string): Response {
   return envelopeResponse(502, {
     error: { message, type: "api_error", code: "upstream_tls_error" },
+  });
+}
+
+/**
+ * The configured outbound proxy refused or failed the connection (ADR-017):
+ * a refused CONNECT, a SOCKS dial that could not reach the upstream, or an
+ * unusable proxy URL. The upstream synthesizes this itself on the proxied
+ * paths; the constructor keeps the full contract table representable in one
+ * module. The message names the fact only — never proxy credentials (the
+ * config grammar forbids them in a proxy URL) and never the target's bytes.
+ */
+export function upstreamProxyErrorResponse(message: string): Response {
+  return envelopeResponse(502, {
+    error: { message, type: "api_error", code: "upstream_proxy_error" },
   });
 }

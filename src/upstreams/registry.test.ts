@@ -85,6 +85,15 @@ function factoriesFor(
   };
 }
 
+/** FakeUpstream that owns a resource only dispose() releases (the openai-compatible proxy bridge). */
+class DisposableUpstream extends FakeUpstream {
+  disposeCalls = 0;
+
+  dispose(): void {
+    this.disposeCalls += 1;
+  }
+}
+
 /** FakeUpstream that also retains a frozen startup snapshot (the openai-compatible behavior). */
 class SnapshotUpstream extends FakeUpstream {
   readonly snapshot: UpstreamStatus;
@@ -278,5 +287,77 @@ describe("UpstreamRegistry", () => {
     await expect(
       UpstreamRegistry.create([entry("dupe"), entry("dupe")], factoriesFor(made), logger),
     ).rejects.toThrow("duplicate upstream id");
+  });
+
+  test("replace() and remove() dispose the instance they retire — its proxy bridge ends with it (ADR-017)", async () => {
+    const made: DisposableUpstream[] = [];
+    const factories: UpstreamFactories = {
+      "openai-compatible": (config, childLogger) => {
+        const upstream = new DisposableUpstream(config, childLogger);
+        made.push(upstream);
+        return upstream;
+      },
+    };
+    const { logger } = fakeLogger();
+    const registry = await UpstreamRegistry.create([entry("a")], factories, logger);
+    const original = made[0]!;
+    expect(original.disposeCalls).toBe(0);
+
+    await registry.replace("a", { ...entry("a"), baseUrl: "https://renewed.example/v1" });
+    const replacement = made[1]!;
+    expect(registry.find("a")).toBe(replacement);
+    expect(original.disposeCalls).toBe(1); // the retired instance released its resources
+    expect(replacement.disposeCalls).toBe(0); // the live one keeps them
+
+    expect(registry.remove("a")).toBe(true);
+    expect(replacement.disposeCalls).toBe(1);
+    expect(registry.find("a")).toBeUndefined();
+  });
+
+  test("dispose() disposes every instance in config order — an upstream without the hook is untouched", async () => {
+    const order: string[] = [];
+    const made: FakeUpstream[] = [];
+    const factories: UpstreamFactories = {
+      "openai-compatible": (config, childLogger) => {
+        const upstream =
+          config.id === "plain"
+            ? new FakeUpstream(config, childLogger)
+            : new DisposableUpstream(config, childLogger);
+        if (upstream instanceof DisposableUpstream) {
+          const dispose = upstream.dispose.bind(upstream);
+          upstream.dispose = () => {
+            order.push(config.id);
+            dispose();
+          };
+        }
+        made.push(upstream);
+        return upstream;
+      },
+    };
+    const { logger } = fakeLogger();
+    const registry = await UpstreamRegistry.create(
+      [entry("first"), entry("plain"), entry("last")],
+      factories,
+      logger,
+    );
+
+    expect(() => registry.dispose()).not.toThrow();
+    // config order, and the instance without dispose() is skipped
+    expect(order).toEqual(["first", "last"]);
+    expect(
+      made.map((upstream) => (upstream instanceof DisposableUpstream ? upstream.disposeCalls : 0)),
+    ).toEqual([1, 0, 1]);
+    // teardown releases resources, it does not unregister — the maps stay readable
+    expect(registry.all().map((upstream) => upstream.id)).toEqual(["first", "plain", "last"]);
+    expect(registry.find("first")).toBe(made[0]);
+  });
+
+  test("dispose() is safe on a registry without disposable upstreams", async () => {
+    const made: FakeUpstream[] = [];
+    const { logger } = fakeLogger();
+    const registry = await UpstreamRegistry.create([entry("a"), entry("b")], factoriesFor(made), logger);
+
+    expect(() => registry.dispose()).not.toThrow();
+    expect(registry.all()).toHaveLength(2);
   });
 });

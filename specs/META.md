@@ -29,7 +29,7 @@ specs/
 ├── domains/                        by business domain (NOT file structure)
 │   ├── upstreams/
 │   │   ├── README.md               upstream domain overview
-│   │   ├── upstream-contract.md    the Upstream interface, connect -> serve lifecycle
+│   │   ├── upstream-contract.md    the Upstream interface, connect -> serve -> dispose lifecycle
 │   │   └── openai-compatible.md    MVP upstream: pure proxy to an OpenAI-compatible provider API
 │   ├── routing.md                  alias routing, client-scoped model catalog, dispatch, startup route inventory
 │   ├── load-balancing.md           route selection strategies, in-memory route health, session affinity, failover
@@ -59,9 +59,10 @@ specs/
     ├── 011-management-live-model-listing.md operator-triggered live model listing on the management surface
     ├── 012-alias-model-metadata.md         alias model metadata: c0wrk detector port, discovery, advisory-only
     ├── 013-openapi-docs-surface.md         the /docs surface: build-time OpenAPI artifact + Swagger UI shell
-    ├── 014-runtime-management-crud.md      runtime management CRUD on /api: write-back, hot apply, discover
+    ├── 014-runtime-management-crud.md      runtime management CRUD on /api: write-back, hot apply, the status-probe shrink
     ├── 015-adopt-react-bootstrap.md         react-bootstrap as the SPA component layer, the shared ConfirmModal
-    └── 016-discover-folded-into-live-listing.md discover folded into the live listing (discover=1)
+    ├── 016-discover-folded-into-live-listing.md discover folded into the live listing (discover=1)
+    └── 017-per-upstream-outbound-proxy.md   per-upstream outbound proxy: the optional `proxy` field (http:/socks5: URL, explicit port, no userinfo)
 ```
 
 This tree is the canonical layout of the spec system: every spec file under `specs/` lands at the path shown here.

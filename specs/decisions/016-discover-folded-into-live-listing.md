@@ -16,7 +16,7 @@ The discover mount folds into the live listing as a query parameter:
 - Without the parameter the listing stays a pure read ([ADR-011](./011-management-live-model-listing.md) exactly).
 - The `POST /api/upstreams/:id/discover` mount is removed; its always-200 `{ upstream, ok, reason? }` report and the UI's separate Discover button (and inline verdict) go with it. The SPA's Load models button is the one affordance, calling the listing with `discover=1`.
 
-The listing's response shape is unchanged: `{ upstream, models, fetchedAt }`. This supersedes the discover-mount decision ([ADR-014](./014-runtime-management-crud.md) D4) and amends the [ADR-011](./011-management-live-model-listing.md) listing's "nothing here mutates gateway state" property: the `discover=1` variant's sanctioned metadata-store swap is the listing's one mutation.
+The listing's response shape is unchanged: `{ upstream, models, fetchedAt }`. This replaces the discover-mount decision ([ADR-014](./014-runtime-management-crud.md) D4, restated in place) and amends the [ADR-011](./011-management-live-model-listing.md) listing's "nothing here mutates gateway state" property: the `discover=1` variant's sanctioned metadata-store swap is the listing's one mutation.
 
 ## Consequences
 

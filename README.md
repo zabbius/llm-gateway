@@ -15,7 +15,7 @@ MVP scope implemented:
   `models` table to a balance-selected route; SSE streaming passes through chunk-by-chunk, no buffering
 - One upstream type: `openai-compatible` (OpenAI-compatible REST API, Bearer auth,
   header whitelist, fixed timeouts, optional `tlsFingerprint` TLS SPKI pinning,
-  upstream 4xx/5xx relayed as-is)
+  optional per-upstream outbound `proxy` — `http://` or `socks5://`, ADR-017 — upstream 4xx/5xx relayed as-is)
 - JSON config with total validation; pino logging to stderr with credential redaction
 - Management auth (stage 1): a config-backed cookie session gates `/api/*` — the SPA shows a
   login card ([ADR-007](specs/decisions/007-management-cookie-auth.md))
@@ -58,7 +58,7 @@ transformation beyond the model-id rewrite.
 2. Create `config.json` (or point the `LLM_GATEWAY_CONFIG` env var at any JSON file).
    [`config.example.json`](config.example.json) is a ready-to-copy starting point that
    covers every supported option (the optional `tlsFingerprint` appears as a placeholder
-   pin):
+   pin, the optional `proxy` as `null` — a direct connection):
 
    ```sh
    cp config.example.json config.json   # then edit the apiKey values
@@ -84,8 +84,9 @@ transformation beyond the model-id rewrite.
 
 [`config.example.json`](config.example.json) contains every supported option (the optional
 `tlsFingerprint` shown as a placeholder pin — replace it with the output of
-`tools/tls-fingerprint.ts` for a pinned upstream) and is kept in sync with the schema by
-`src/config/example.test.ts` (field descriptions and rules: `specs/domains/configuration.md`).
+`tools/tls-fingerprint.ts` for a pinned upstream; the optional `proxy` as `null`) and is kept
+in sync with the schema by `src/config/example.test.ts` (field descriptions and rules:
+`specs/domains/configuration.md`).
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -106,7 +107,8 @@ cut, no alias).
 Each upstream entry: `type` (registered: `openai-compatible`), `id`, `baseUrl` (absolute
 http(s) URL including the API root, e.g. `https://api.openai.com/v1`; one trailing slash
 is stripped), `apiKey` (non-empty; sent to the provider API as the Bearer credential only),
-optional `tlsFingerprint` (TLS SPKI pin — see "TLS pinning" below).
+optional `tlsFingerprint` (TLS SPKI pin — see "TLS pinning" below), optional `proxy`
+(outbound proxy — see "Outbound proxy" below).
 
 ### TLS pinning (self-signed / internal upstreams)
 
@@ -132,6 +134,48 @@ bun tools/tls-fingerprint.ts --expect 'K4vmDE8v8SKXajayPc4yMc49GIvJEHyUF8mRo7bu/
 ```
 
 Details: `specs/decisions/004-per-upstream-tls-pinning.md` (ADR-004),
+`specs/domains/upstreams/openai-compatible.md`.
+
+### Outbound proxy (per-upstream egress)
+
+An upstream entry accepts an optional `proxy` — the egress path for **every** outbound call
+of that entry (forwards, the startup probe, listings, pinned or not). Two schemes:
+
+- `http://host:port` — carried by Bun's native `fetch` proxy support.
+- `socks5://host:port` — carried by a per-upstream in-process HTTP→SOCKS5 bridge that
+  listens on `127.0.0.1` only (an ephemeral port), started with the entry's first call and
+  stopped with the upstream (a runtime replace/remove, or shutdown).
+
+`null` or absent means a direct connection. One gateway can mix both: a corporate proxy for
+a cloud provider, a direct connection for a local Ollama.
+
+```json
+{
+  "upstreams": [
+    { "type": "openai-compatible", "id": "openai", "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "sk-…", "proxy": "http://proxy.corp.lan:3128" },
+    { "type": "openai-compatible", "id": "relay", "baseUrl": "https://relay.example/v1",
+      "apiKey": "sk-…", "proxy": "socks5://127.0.0.1:1080" }
+  ]
+}
+```
+
+Rules the config grammar enforces at startup and again on every runtime mutation:
+
+- Scheme `http:` or `socks5:` only, a non-empty host, and an **explicit** port in 1–65535
+  (`:80` must be written — a missing port is a typo, not a default); no path, query or
+  fragment. A malformed value fails startup with a value-free problem line.
+- **No credentials in the URL** — `http://user:pass@host:port` is rejected, and the gateway
+  never sends a `Proxy-Authorization` header. An authenticated proxy cannot be expressed yet.
+- Keep the `baseUrl` on `https` for any entry routed through a proxy. The proxy sees the
+  target `host:port`; with a plain-http `baseUrl` it would also see the plaintext request
+  including the Bearer key, whereas with `https` it sees ciphertext only. A `tlsFingerprint`
+  pin is enforced exactly as on a direct connection: the TLS handshake and the pin check run
+  over the tunnel before any request byte is written.
+
+A proxy that refuses or fails the connection surfaces as `502 upstream_proxy_error`; a proxy
+that is merely unreachable or times out is `504 upstream_timeout`, like any unreachable
+upstream. Details: `specs/decisions/017-per-upstream-outbound-proxy.md` (ADR-017),
 `specs/domains/upstreams/openai-compatible.md`.
 
 ### TLS listener (HTTPS)
@@ -293,10 +337,10 @@ in the order you choose. The machine-readable mirror of the whole surface lives 
 | `GET` | `/api/status` | The mount probe `{ status: "ok", authenticated }` — session-gated when `auth.enabled` (see "Management auth") |
 | `GET` | `/api/upstreams`, `/api/models`, `/api/clients` | The CRUD collection reads: every configured entry in config order, credentials masked as `[Configured]`; `/api/models` entries carry the `meta` aggregate ([ADR-012](specs/decisions/012-alias-model-metadata.md)) |
 | `POST` | `/api/upstreams`, `/api/models`, `/api/clients` | Create: validated with the startup grammar, persisted to `config.json` (temp file + atomic rename), hot-applied without a restart ([ADR-014](specs/decisions/014-runtime-management-crud.md)); an upstream create/update probes the provider synchronously within the startup budget — a failed probe is reported as data, the mutation still lands |
-| `PUT` | `/api/upstreams/:id`, `/api/models/:alias`, `/api/clients/:name` | Update: the same validate → persist → apply pass; an absent `apiKey` keeps the stored credential, the mask literal `[Configured]` is rejected as a value |
+| `PUT` | `/api/upstreams/:id`, `/api/models/:alias`, `/api/clients/:name` | Update: the same validate → persist → apply pass; an absent `apiKey` keeps the stored credential, the mask literal `[Configured]` is rejected as a value; an absent `tlsFingerprint` / `proxy` keeps the stored one, an explicit `null` clears it (direct connection for `proxy`) |
 | `DELETE` | `/api/upstreams/:id`, `/api/models/:alias`, `/api/clients/:name` | Delete: a target referenced by live configuration answers `409 resource_in_use` and nothing is removed with it — no cascades |
 | `GET` | `/api/upstreams/:id/models` | The operator-triggered live listing ([ADR-011](specs/decisions/011-management-live-model-listing.md)): one `listModels()` within the probe budget, `{ upstream, models, fetchedAt }`; unknown id `404`, failed listing `502` |
-| `POST` | `/api/upstreams/:id/discover` | The per-upstream discover mount ([ADR-014](specs/decisions/014-runtime-management-crud.md)): re-reads the provider catalog into the alias-metadata slice, retain-last-good on failure; always `200` with `{ upstream, ok, reason? }` |
+| `GET` | `/api/upstreams/:id/models?discover=1` | The live listing's discovery variant ([ADR-016](specs/decisions/016-discover-folded-into-live-listing.md)): the fetched catalog swaps the alias-metadata slice wholesale, retain-last-good on failure; `200` with `{ upstream, models, fetchedAt }`, a failure is the `502` envelope |
 | `POST` | `/api/login`, `/api/logout` | The auth actions: mint / revoke the session cookie |
 | `GET` | `/docs/openapi.json`, `/docs` | The build-time OpenAPI document and the Swagger UI shell ([ADR-013](specs/decisions/013-openapi-docs-surface.md)); static protocol metadata, no gate |
 | `GET` | `/ui/*`, `/` | The static SPA mount (root `302` → `/ui`); unmatched paths get the error envelope |
@@ -309,7 +353,8 @@ Gateway-generated failures use the OpenAI error envelope — `400 invalid_reques
 client's ACL, `404` with `code: "model_not_found"` for an unknown alias, `404` for an
 unmatched route, `409 resource_in_use` for a delete of a referenced resource, `502
 upstream_error`, `502 upstream_tls_error` (TLS verification failed on a pinned upstream),
-`503 upstream_unavailable` (no healthy route for the alias), `504 upstream_timeout`
+`502 upstream_proxy_error` (the upstream's configured outbound proxy refused or failed the
+connection), `503 upstream_unavailable` (no healthy route for the alias), `504 upstream_timeout`
 (`src/httpapi/errors.ts` is the single mapper). Upstream 4xx/5xx responses are relayed
 as-is.
 
@@ -342,7 +387,8 @@ src/
                   the runtime store (CRUD write-back + hot apply)
   logging/      — pino-to-stderr logger with credential redaction
   upstreams/    — Upstream contract, registry, the openai-compatible implementation,
-                  TLS SPKI pinning
+                  TLS SPKI pinning, the outbound-proxy transport (proxy.ts) and the
+                  per-upstream loopback HTTP→SOCKS5 bridge (socks-bridge.ts, ADR-017)
   gateway/      — alias-table routing (ADR-009): alias → balance-selected route → upstream;
                   balancer (health, failover, session affinity), metadata store, detector port
   httpapi/      — Hono app, routes, the OpenAI error envelope, handlers (completions,

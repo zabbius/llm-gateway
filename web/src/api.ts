@@ -46,6 +46,8 @@ export interface GatewayStatus {
  * One configured upstream as every management read serves it — the config
  * store's redacted view: credentials and the TLS pin are the fixed mask
  * literal (or JSON null when the pin is absent), never the values. The
+ * `proxy` is served verbatim (null = a direct connection) — it is not key
+ * material, the grammar forbids userinfo in a proxy URL (ADR-017). The
  * probe fields ride the rows on the boundary's inventory read (ADR-014 D3's
  * re-homed probe outcome); the SPA renders them when present.
  */
@@ -59,6 +61,10 @@ export interface ManagedUpstream {
   readonly apiKey: string;
   /** The fixed mask when configured, null when absent. */
   readonly tlsFingerprint: string | null;
+  /** The outbound proxy URL verbatim — `http://host:port` or
+   * `socks5://host:port`; null when the upstream connects directly
+   * (ADR-017). Not masked: the grammar admits no credentials in it. */
+  readonly proxy: string | null;
   /** The upstream's probe outcome ("ok" | "failed") when the row carries it. */
   readonly probe?: "ok" | "failed";
   /** Why the probe failed; present only when `probe` is "failed". */
@@ -87,15 +93,22 @@ export interface UpstreamWriteResponse {
 /**
  * The create/update request body — the config entry's grammar. Create
  * requires `apiKey`; update with an absent `apiKey` keeps the stored
- * credential (D7). `tlsFingerprint` absent keeps the stored pin, explicit
- * null clears it.
+ * credential (D7). `tlsFingerprint` absent keeps the stored pin; explicit
+ * null — or an empty / whitespace-only value, the grammar's own "no pin" —
+ * clears it. `proxy` (ADR-017) follows the same rule: absent keeps the
+ * stored proxy on update (and means a direct connection on create), explicit
+ * null clears it; a value is an `http://` or `socks5://` URL with an explicit
+ * port and no userinfo. A JSON `null` on any other key is the key not set —
+ * it reads exactly as if omitted (a `null` `apiKey` keeps the stored
+ * credential on update; a `null` required key is reported missing).
  */
 export interface UpstreamWriteRequest {
   readonly type: string;
   readonly id: string;
   readonly baseUrl: string;
-  readonly apiKey?: string;
+  readonly apiKey?: string | null;
   readonly tlsFingerprint?: string | null;
+  readonly proxy?: string | null;
 }
 
 /** The `DELETE /api/upstreams/:id` answer. */
@@ -158,24 +171,26 @@ export interface ModelAliasList {
   readonly models: readonly ManagedModelAlias[];
 }
 
-/** One route of a write request — weight only with the weighted strategy. */
+/** One route of a write request — weight only with the weighted strategy; `null` is an unweighted route. */
 export interface ModelRouteInput {
   readonly upstream: string;
   readonly model: string;
-  readonly weight?: number;
+  readonly weight?: number | null;
 }
 
 /**
  * The create/update request body — the config entry's grammar: at least one
  * route, every `upstream` naming a configured upstream id, strategy/weight
  * consistency, limits positive integers (at least one of context/output).
- * `alias` is required on create; on update the path parameter owns it.
+ * `alias` is required on create; on update the path parameter owns it. A JSON
+ * `null` is the key not set: a `null` `alias` is inherited like an omitted
+ * one, and a `null` limit or `limits` block leaves the entry without it.
  */
 export interface ModelAliasWriteRequest {
-  readonly alias?: string;
+  readonly alias?: string | null;
   readonly routes: readonly ModelRouteInput[];
   readonly balance: { readonly strategy: "round-robin" | "weighted-round-robin" };
-  readonly limits?: { readonly context?: number; readonly output?: number };
+  readonly limits?: { readonly context?: number | null; readonly output?: number | null } | null;
 }
 
 /** The `DELETE /api/models/:alias` answer. */
@@ -204,11 +219,13 @@ export interface ClientList {
 
 /**
  * The create/update request body — `apiKey` required on create, absent on
- * update keeps the stored credential (D7); the name itself is immutable.
+ * update keeps the stored credential (D7); the name itself is immutable. A
+ * JSON `null` is the key not set — a `null` `apiKey` keeps the stored
+ * credential like an omitted one, a `null` required key is reported missing.
  */
 export interface ClientWriteRequest {
   readonly name: string;
-  readonly apiKey?: string;
+  readonly apiKey?: string | null;
   readonly models: readonly string[];
 }
 

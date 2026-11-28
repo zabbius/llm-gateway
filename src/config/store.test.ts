@@ -298,6 +298,233 @@ describe("ConfigStore — upstream writes", () => {
     expectFileValidates(f.path);
   });
 
+  test("a null body value is the key not set: inherited keys read as omitted, pin/proxy keep their explicit clear", () => {
+    const f = makeStore({
+      upstreams: [
+        rawUpstream("openai", { tlsFingerprint: VALID_PIN, proxy: "http://proxy.example:8080" }),
+        rawUpstream("ollama"),
+      ],
+    });
+
+    // update — `null` on the inherited keys behaves exactly like an omitted one,
+    // while the pin's explicit `null` still clears it and an absent proxy is kept
+    ok(
+      f.store.updateUpstream("openai", {
+        type: "openai-compatible",
+        baseUrl: "https://openai.example.com/v1",
+        id: null,
+        apiKey: null,
+        tlsFingerprint: null,
+      }),
+    );
+    const stored = f.store.findUpstream("openai");
+    expect(stored?.id).toBe("openai");
+    expect(stored?.apiKey).toBe(`${UPSTREAM_KEY}-openai`);
+    expect(stored?.tlsFingerprint).toBeUndefined();
+    expect(stored?.proxy).toBe("http://proxy.example:8080");
+    expectFileValidates(f.path);
+
+    // create — `null` on a required key is reported missing, exactly like an absent one
+    expect(problems(f.store.addUpstream(rawUpstream("new", { type: null }))).join("\n")).toContain('missing required key "type"');
+    expect(problems(f.store.addUpstream(rawUpstream("new", { apiKey: null }))).join("\n")).toContain('missing required key "apiKey"');
+
+    // create — `null` pin and proxy leave the entry without the keys
+    ok(f.store.addUpstream(rawUpstream("new", { tlsFingerprint: null, proxy: null })));
+    const created = f.store.findUpstream("new");
+    expect(Object.hasOwn(created ?? {}, "tlsFingerprint")).toBe(false);
+    expect(Object.hasOwn(created ?? {}, "proxy")).toBe(false);
+    expectFileValidates(f.path);
+  });
+
+  test("an empty or whitespace-only tlsFingerprint is no pin: create stores no key, update clears like null, the view reads null", () => {
+    const f = makeStore({ upstreams: [rawUpstream("openai", { tlsFingerprint: VALID_PIN }), rawUpstream("ollama")] });
+    const onDisk = (id: string): Record<string, unknown> | undefined =>
+      (fileJson(f.path).upstreams as Record<string, unknown>[]).find((entry) => entry.id === id);
+
+    // create: "" and "  " are the grammar's own "no pin" — no key on the store, on disk, or in the view
+    for (const [id, value] of [
+      ["blank", ""],
+      ["spaces", " \n\t "],
+    ] as const) {
+      ok(
+        f.store.addUpstream({
+          type: "openai-compatible",
+          id,
+          baseUrl: `https://${id}.example.com/v1`,
+          apiKey: `sk-${id}-synthetic`,
+          tlsFingerprint: value,
+        }),
+      );
+      const stored = f.store.findUpstream(id);
+      expect(stored?.tlsFingerprint).toBeUndefined();
+      expect(Object.hasOwn(stored ?? {}, "tlsFingerprint")).toBe(false); // never `""` on the entry
+      expect(Object.hasOwn(onDisk(id) ?? {}, "tlsFingerprint")).toBe(false);
+      expect(f.store.view.upstreams.find((upstream) => upstream.id === id)?.tlsFingerprint).toBeNull(); // absent, never the mask
+    }
+
+    // update: an empty value clears a stored pin exactly like an explicit null —
+    // the same end state the startup loader produces for that value
+    ok(f.store.updateUpstream("openai", { type: "openai-compatible", baseUrl: "https://openai.example.com/v1", tlsFingerprint: "" }));
+    expect(f.store.findUpstream("openai")?.tlsFingerprint).toBeUndefined();
+    expect(Object.hasOwn(onDisk("openai") ?? {}, "tlsFingerprint")).toBe(false);
+
+    ok(f.store.updateUpstream("openai", { type: "openai-compatible", baseUrl: "https://openai.example.com/v1", tlsFingerprint: VALID_PIN }));
+    expect(f.store.findUpstream("openai")?.tlsFingerprint).toBe(VALID_PIN);
+
+    ok(f.store.updateUpstream("openai", { type: "openai-compatible", baseUrl: "https://openai.example.com/v1", tlsFingerprint: "   " }));
+    expect(f.store.findUpstream("openai")?.tlsFingerprint).toBeUndefined();
+    expect(f.store.view.upstreams.find((upstream) => upstream.id === "openai")?.tlsFingerprint).toBeNull();
+    expectFileValidates(f.path);
+  });
+
+  test("add stores a configured proxy trimmed (memory, masked view and file); an entry without one carries no proxy key", () => {
+    const f = makeStore();
+    const PROXY = "http://forward-proxy.internal:3128";
+
+    ok(
+      f.store.addUpstream({
+        type: "openai-compatible",
+        id: "proxied",
+        baseUrl: "https://proxied.example.com/v1",
+        apiKey: "sk-proxied-synthetic",
+        proxy: `  ${PROXY}  `,
+      }),
+    );
+    ok(
+      f.store.addUpstream({
+        type: "openai-compatible",
+        id: "direct",
+        baseUrl: "https://direct.example.com/v1",
+        apiKey: "sk-direct-synthetic",
+        proxy: null,
+      }),
+    );
+
+    expect(f.store.findUpstream("proxied")?.proxy).toBe(PROXY);
+    expect(f.store.view.upstreams.find((upstream) => upstream.id === "proxied")?.proxy).toBe(PROXY); // verbatim in the masked view
+    expect(f.store.findUpstream("direct")?.proxy).toBeUndefined();
+    expect(f.store.view.upstreams.find((upstream) => upstream.id === "direct")?.proxy).toBeNull();
+
+    const written = fileJson(f.path).upstreams as Record<string, unknown>[];
+    expect(written.find((entry) => entry.id === "proxied")?.proxy).toBe(PROXY);
+    expect("proxy" in (written.find((entry) => entry.id === "direct") ?? {})).toBe(false); // persisted only when set
+    expect("proxy" in (written[0] ?? {})).toBe(false); // pre-existing entries untouched
+    expectFileValidates(f.path);
+  });
+
+  test("update keeps the stored proxy when proxy is absent; explicit null and an empty string clear it (memory and file)", () => {
+    const PROXY = "socks5://10.0.0.7:1080";
+    const f = makeStore({ upstreams: [rawUpstream("openai", { proxy: PROXY }), rawUpstream("ollama")] });
+
+    // absent → keep (never a silent topology change)
+    ok(f.store.updateUpstream("openai", { type: "openai-compatible", baseUrl: "https://openai.example.com/v1" }));
+    expect(f.store.findUpstream("openai")?.proxy).toBe(PROXY);
+    expect((fileJson(f.path).upstreams as Record<string, unknown>[])[0]?.proxy).toBe(PROXY);
+
+    // an empty/whitespace value is the grammar's "direct connection" → clear
+    ok(
+      f.store.updateUpstream("openai", {
+        type: "openai-compatible",
+        baseUrl: "https://openai.example.com/v1",
+        proxy: "   ",
+      }),
+    );
+    expect(f.store.findUpstream("openai")?.proxy).toBeUndefined();
+    expect("proxy" in ((fileJson(f.path).upstreams as Record<string, unknown>[])[0] ?? {})).toBe(false);
+
+    // re-set, then explicit null → clear
+    ok(
+      f.store.updateUpstream("openai", {
+        type: "openai-compatible",
+        baseUrl: "https://openai.example.com/v1",
+        proxy: PROXY,
+      }),
+    );
+    expect(f.store.findUpstream("openai")?.proxy).toBe(PROXY);
+    ok(
+      f.store.updateUpstream("openai", {
+        type: "openai-compatible",
+        baseUrl: "https://openai.example.com/v1",
+        proxy: null,
+      }),
+    );
+    expect(f.store.findUpstream("openai")?.proxy).toBeUndefined();
+    expect(f.store.view.upstreams.find((upstream) => upstream.id === "openai")?.proxy).toBeNull();
+    expect("proxy" in ((fileJson(f.path).upstreams as Record<string, unknown>[])[0] ?? {})).toBe(false);
+    expectFileValidates(f.path);
+    expect(tempFiles(f.dir)).toEqual([]);
+  });
+
+  test("an invalid proxy yields a value-free problem and writes nothing — a pasted user:pass@ URL never reaches the problem lines", () => {
+    const f = makeStore();
+    const LEAKY = "http://operator:s3cret-pw@proxy.example.com:3128";
+
+    const leaked = problems(
+      f.store.addUpstream({
+        type: "openai-compatible",
+        id: "leaky",
+        baseUrl: "https://leaky.example.com/v1",
+        apiKey: "sk-leaky-synthetic",
+        proxy: LEAKY,
+      }),
+    );
+    expect(leaked.join("\n")).toContain("proxy must be an http: or socks5: URL with a non-empty host, an explicit port in 1-65535, no username/password");
+    for (const line of leaked) {
+      expect(line.includes("s3cret-pw")).toBe(false);
+      expect(line.includes("operator")).toBe(false);
+      expect(line.includes(LEAKY)).toBe(false);
+    }
+
+    const wrongScheme = problems(
+      f.store.addUpstream({
+        type: "openai-compatible",
+        id: "ftp",
+        baseUrl: "https://ftp.example.com/v1",
+        apiKey: "sk-ftp-synthetic",
+        proxy: "ftp://proxy.example.com:21",
+      }),
+    );
+    expect(wrongScheme.join("\n")).toContain("proxy must be an http: or socks5: URL");
+
+    const noPort = problems(
+      f.store.addUpstream({
+        type: "openai-compatible",
+        id: "noport",
+        baseUrl: "https://noport.example.com/v1",
+        apiKey: "sk-noport-synthetic",
+        proxy: "http://proxy.example.com",
+      }),
+    );
+    expect(noPort.join("\n")).toContain("explicit port in 1-65535");
+
+    const notAString = problems(
+      f.store.addUpstream({
+        type: "openai-compatible",
+        id: "numeric",
+        baseUrl: "https://numeric.example.com/v1",
+        apiKey: "sk-numeric-synthetic",
+        proxy: 3128,
+      }),
+    );
+    expect(notAString.join("\n")).toContain("proxy must be a string — an http: or socks5: URL with an explicit port, or null for a direct connection");
+
+    // the same grammar applies on update, and a rejected write leaves both disk and memory untouched
+    const onUpdate = problems(
+      f.store.updateUpstream("openai", {
+        type: "openai-compatible",
+        baseUrl: "https://openai.example.com/v1",
+        proxy: LEAKY,
+      }),
+    );
+    expect(onUpdate.join("\n")).toContain("proxy must be an http: or socks5: URL");
+    expect(onUpdate.join("\n").includes("s3cret-pw")).toBe(false);
+    expect(f.store.upstreams.length).toBe(2);
+    expect(f.store.findUpstream("openai")?.proxy).toBeUndefined();
+    expect(fileJson(f.path).upstreams).toHaveLength(2);
+    expectFileValidates(f.path);
+    expect(tempFiles(f.dir)).toEqual([]);
+  });
+
   test("update refuses unknown ids and identity changes; the id is immutable", () => {
     const f = makeStore();
 
@@ -463,6 +690,54 @@ describe("ConfigStore — model writes", () => {
     expect(problems(f.store.updateModel("ghost", rawModel())).join("\n")).toContain('no model with alias "ghost"');
   });
 
+  test("a null body value is the key not set on model writes: weights, single limits and the limits block fall away", () => {
+    const f = makeStore({ models: [rawModel({ limits: { context: 8192, output: 4096 } })] });
+
+    // update — a null alias is inherited, a null weight is an unweighted route,
+    // a null limits block leaves the entry without limits (replaced wholesale)
+    ok(
+      f.store.updateModel("smart", {
+        alias: null,
+        routes: [{ upstream: "openai", model: "gpt-4o", weight: null }],
+        balance: { strategy: "round-robin" },
+        limits: null,
+      }),
+    );
+    const updated = f.store.findModel("smart");
+    expect(updated?.alias).toBe("smart");
+    expect(updated?.routes).toEqual([{ upstream: "openai", model: "gpt-4o" }]);
+    expect(updated?.limits).toBeUndefined();
+    expect(Object.hasOwn(updated ?? {}, "limits")).toBe(false);
+    expectFileValidates(f.path);
+
+    // a null single limit falls away, its sibling stays
+    ok(
+      f.store.updateModel("smart", {
+        routes: [{ upstream: "openai", model: "gpt-4o", weight: 2 }],
+        balance: { strategy: "weighted-round-robin" },
+        limits: { context: null, output: 4096 },
+      }),
+    );
+    expect(f.store.findModel("smart")?.limits).toEqual({ output: 4096 });
+    expectFileValidates(f.path);
+
+    // required keys — null reads as missing, exactly like absent
+    const hollow = problems(f.store.updateModel("smart", { routes: null, balance: null })).join("\n");
+    expect(hollow).toContain("model: routes must be an array with at least one route entry");
+    expect(hollow).toContain('model: missing required key "balance"');
+    expect(
+      problems(
+        f.store.updateModel("smart", {
+          routes: [{ upstream: "openai", model: "gpt-4o", weight: null }],
+          balance: { strategy: "weighted-round-robin" },
+        }),
+      ).join("\n"),
+    ).toContain('weight is required when the balance strategy is "weighted-round-robin"');
+    expect(problems(f.store.addModel(rawModel({ alias: "hollow", limits: { context: null } }))).join("\n")).toContain(
+      'model: limits must carry at least one of "context", "output"',
+    );
+  });
+
   test("remove refuses the last entry of a present block and entries referenced by a client ACL", () => {
     const f = makeStore();
     expect(problems(f.store.removeModel("smart")).join("\n")).toContain('is still referenced by client "local-dev"');
@@ -538,6 +813,23 @@ describe("ConfigStore — client writes", () => {
     expect(problems(f.store.updateClient("ghost", rawClient())).join("\n")).toContain('no client with name "ghost"');
     expect(problems(f.store.updateClient("local-dev", rawClient({ name: "renamed" }))).join("\n")).toContain(
       "a client name is immutable",
+    );
+  });
+
+  test("a null body value is the key not set on client writes: null name/apiKey read as omitted, null models as missing", () => {
+    const f = makeStore();
+
+    ok(f.store.updateClient("local-dev", { name: null, apiKey: null, models: ["smart"] }));
+    const updated = f.store.findClient("local-dev");
+    expect(updated?.name).toBe("local-dev");
+    expect(updated?.apiKey).toBe(CLIENT_KEY);
+    expectFileValidates(f.path);
+
+    expect(problems(f.store.addClient(rawClient({ name: "second", apiKey: null }))).join("\n")).toContain(
+      'client: missing required key "apiKey"',
+    );
+    expect(problems(f.store.updateClient("local-dev", { models: null })).join("\n")).toContain(
+      "client: models must be an array with at least one model alias",
     );
   });
 

@@ -137,7 +137,7 @@ A present block must be an object carrying at least one of the two keys, both po
 
 - [routing.md](./routing.md) "Alias metadata" — the routing-domain view: the store/builder types in context of dispatch and the endpoint map
 - [ADR-012](../decisions/012-alias-model-metadata.md) — this domain's decision record (detector port, discovery model, min-rule, capability-AND, informativeness)
-- [ADR-014](../decisions/014-runtime-management-crud.md) — the runtime CRUD that reshaped the refresh paths: the CRUD probes' seed/clear (D8); its discover mount (D4) is superseded by [ADR-016](../decisions/016-discover-folded-into-live-listing.md)
+- [ADR-014](../decisions/014-runtime-management-crud.md) — the runtime CRUD that reshaped the refresh paths: the CRUD probes' seed/clear (D8); its D4 refresh is the listing's `discover=1` swap per [ADR-016](../decisions/016-discover-folded-into-live-listing.md)
 - [ADR-011](../decisions/011-management-live-model-listing.md) — the boundary posture of an operator-triggered live upstream call (the listing)
 - [ADR-016](../decisions/016-discover-folded-into-live-listing.md) — the discovery folded into the listing's `discover=1` query parameter
 - [gateway-management.md](../contracts/gateway-management.md) — the managed entries' `meta` key and the listing's `discover=1` swap on the management boundary

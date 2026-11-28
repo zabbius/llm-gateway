@@ -446,6 +446,28 @@ describe("PUT /api/clients/:name", () => {
     const oldStillWorks = await app.request("/llm/v1/models", { headers: { authorization: `Bearer ${CLIENT_KEY}` } });
     expect(oldStillWorks.status).toBe(200);
 
+    // A null apiKey (and a null name) read exactly like omitted ones — the
+    // stored credential is kept, the name inherited (the null rule).
+    const nullKept = await app.request("/api/clients/ci", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: null, apiKey: null, models: ["smart"] }),
+    });
+    expect(nullKept.status).toBe(200);
+    const nullKeptBody = JSON.parse(await bodyText(nullKept)) as { client: { name: string; apiKey: string } };
+    expect(nullKeptBody.client.name).toBe("ci");
+    expect(nullKeptBody.client.apiKey).toBe("[Configured]");
+    expect((await app.request("/llm/v1/models", { headers: { authorization: `Bearer ${CLIENT_KEY}` } })).status).toBe(200);
+
+    // A null required list is reported missing like an absent one.
+    const nullModels = await app.request("/api/clients/ci", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ models: null }),
+    });
+    expect(nullModels.status).toBe(400);
+    expect(((await nullModels.json()) as Envelope).error.message).toContain("models must be an array");
+
     // Replaced apiKey: the NEW key admits…
     const rotated = await app.request("/api/clients/ci", {
       method: "PUT",

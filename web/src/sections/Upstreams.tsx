@@ -19,11 +19,17 @@
  * disables the immutable id and leaves the key fields empty — an empty
  * `apiKey` is omitted from the request body, which the boundary reads as
  * "keep the stored credential" (ADR-014 D7; sending the `[Configured]`
- * mask back is refused, so the field is never pre-filled). The blocking
+ * mask back is refused, so the field is never pre-filled). The outbound
+ * `proxy` (ADR-017) is served verbatim — it is not secret, the grammar
+ * admits no userinfo — so the edit form pre-fills it; an empty field is
+ * omitted the same way (keep the stored proxy on edit, a direct connection
+ * on create), and a filled one is grammar-checked client-side like the pin.
+ * The blocking
  * probe's outcome arrives as data in the create/update answer (D8) and is
  * rendered next to the save confirmation. Client-side checks mirror the
  * store's create grammar (the id pattern, the absolute http(s) baseUrl, the
- * non-empty create apiKey) and surface their refusals as the in-modal
+ * non-empty create apiKey, the http:/socks5: proxy URL with its explicit
+ * port) and surface their refusals as the in-modal
  * alert — a refused create is operator-readable, never a silent no-op.
  * Every failure — including a `409`
  * `resource_in_use` delete — surfaces as an alert carrying the OpenAI
@@ -62,9 +68,17 @@ interface FormState {
   baseUrl: string;
   apiKey: string;
   tlsFingerprint: string;
+  proxy: string;
 }
 
-const EMPTY_FORM: FormState = { type: UPSTREAM_TYPES[0], id: "", baseUrl: "", apiKey: "", tlsFingerprint: "" };
+const EMPTY_FORM: FormState = {
+  type: UPSTREAM_TYPES[0],
+  id: "",
+  baseUrl: "",
+  apiKey: "",
+  tlsFingerprint: "",
+  proxy: "",
+};
 
 function formFor(upstream: ManagedUpstream): FormState {
   return {
@@ -75,6 +89,10 @@ function formFor(upstream: ManagedUpstream): FormState {
     // credential (D7) — empty means "keep what is stored".
     apiKey: "",
     tlsFingerprint: "",
+    // The proxy is served verbatim (not secret — the grammar admits no
+    // userinfo, ADR-017), so the current value is shown and editable;
+    // empty still means "keep what is stored" on submit.
+    proxy: upstream.proxy ?? "",
   };
 }
 
@@ -94,6 +112,47 @@ function isHttpUrl(value: string): boolean {
     return false;
   }
   return url.protocol === "http:" || url.protocol === "https:";
+}
+
+/** The proxy schemes the config grammar admits (ADR-017) — `https:` is not
+ * among them; mirrors `PROXY_SCHEMES` in src/config/schema.ts. */
+const PROXY_SCHEMES = ["http:", "socks5:"] as const;
+
+/**
+ * The port written in a proxy URL's authority, or `undefined` when none was
+ * — read from the string rather than `URL.port`, which drops a port equal to
+ * the scheme's default (`http://proxy:80` → `port === ""`); the grammar
+ * requires the port to be stated explicitly. Mirrors the schema's helper.
+ */
+function explicitPort(value: string): string | undefined {
+  const schemeEnd = value.indexOf("://");
+  if (schemeEnd === -1) return undefined;
+  const authority = value.slice(schemeEnd + 3).split(/[/?#]/, 1)[0] ?? "";
+  const hostPort = authority.slice(authority.lastIndexOf("@") + 1);
+  return /^(.*):([0-9]+)$/.exec(hostPort)?.[2];
+}
+
+/**
+ * The outbound proxy grammar — mirrors `isValidProxyUrl` in
+ * src/config/schema.ts, where the store re-validates authoritatively: an
+ * absolute `http:` or `socks5:` URL with a non-empty host, an explicit port
+ * in 1–65535, and no username/password, path (beyond `/`), query or
+ * fragment (ADR-017).
+ */
+function isValidProxyUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (!(PROXY_SCHEMES as readonly string[]).includes(url.protocol)) return false;
+  if (url.hostname === "") return false;
+  if (url.username !== "" || url.password !== "") return false;
+  if (url.pathname !== "" && url.pathname !== "/") return false;
+  if (url.search !== "" || url.hash !== "") return false;
+  const port = Number(explicitPort(value));
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
 /**
@@ -123,6 +182,15 @@ function validateForm(form: FormState, editing: boolean): string | null {
   // stored credential" (D7) and needs no check.
   if (!editing && form.apiKey.trim() === "") {
     return 'apiKey is required on create — even a keyless local server needs a non-empty value; any placeholder (e.g. "sk-local") works.';
+  }
+  // An empty proxy field is valid — on create it means a direct connection,
+  // on edit it keeps the stored proxy (the field is omitted from the body)
+  // — so only a filled field is checked. The refusal names the rule and
+  // never the typed value, like the store's own proxy problem line
+  // (ADR-017: a pasted `user:pass@` URL must not reach an error line).
+  const proxy = form.proxy.trim();
+  if (proxy !== "" && !isValidProxyUrl(proxy)) {
+    return "proxy must be an http:// or socks5:// URL with a non-empty host, an explicit port in 1–65535, and no username/password, path, query or fragment (e.g. http://proxy.internal:8080 or socks5://127.0.0.1:1080).";
   }
   return null;
 }
@@ -369,7 +437,14 @@ export function UpstreamsSection(): ReactNode {
       // an absent apiKey keeps the stored credential, an absent pin keeps
       // the stored one; the mask literal is never submitted.
       ...(form.apiKey !== "" ? { apiKey: form.apiKey } : {}),
-      ...(form.tlsFingerprint !== "" ? { tlsFingerprint: form.tlsFingerprint } : {}),
+      // Empty after trimming = unchanged: the pin follows the proxy rule —
+      // a whitespace-only field is omitted rather than sent (the store would
+      // read it as the grammar's "no pin" and clear a stored one on edit).
+      ...(form.tlsFingerprint.trim() !== "" ? { tlsFingerprint: form.tlsFingerprint.trim() } : {}),
+      // The proxy follows the same rule (ADR-017): filled → submitted
+      // (trimmed, the store's own normalization); empty → omitted, so
+      // create means a direct connection and edit keeps the stored proxy.
+      ...(form.proxy.trim() !== "" ? { proxy: form.proxy.trim() } : {}),
     };
     // The client-side grammar pass — a refusal lands as the in-modal alert,
     // never a silent no-op; the store stays authoritative on the body.
@@ -529,6 +604,7 @@ export function UpstreamsSection(): ReactNode {
                 <th scope="col">baseUrl</th>
                 <th scope="col">apiKey</th>
                 <th scope="col">tls pin</th>
+                <th scope="col">proxy</th>
                 <th scope="col">actions</th>
               </tr>
             </thead>
@@ -555,6 +631,9 @@ export function UpstreamsSection(): ReactNode {
                   {/* The mask renders exactly as the read returned it. */}
                   <td>{upstream.apiKey}</td>
                   <td>{upstream.tlsFingerprint ?? "—"}</td>
+                  {/* Verbatim, not masked: the proxy carries no credentials
+                      (ADR-017); null is a direct connection. */}
+                  <td>{upstream.proxy === null ? "—" : <code>{upstream.proxy}</code>}</td>
                   <td>
                     <span className="d-inline-flex gap-1">
                       <Button
@@ -673,6 +752,24 @@ export function UpstreamsSection(): ReactNode {
               />
               <div className="form-text">
                 Optional TLS certificate pin. Leave empty to keep the stored pin.
+              </div>
+            </Form.Group>
+            <Form.Group as="div" className="col-md-12" controlId="upstream-proxy">
+              <Form.Label>
+                proxy {editing && <span className="text-body-secondary">(пусто = не менять)</span>}
+              </Form.Label>
+              <Form.Control
+                className="font-monospace"
+                value={form.proxy}
+                onChange={(event) => setForm({ ...form, proxy: event.target.value })}
+                placeholder="http://proxy.internal:8080 or socks5://127.0.0.1:1080"
+              />
+              <div className="form-text">
+                Optional outbound proxy (ADR-017): an <code>http://</code> or <code>socks5://</code> URL
+                with an explicit port, no username/password.{" "}
+                {editing
+                  ? "Shown as stored — it is not secret. Leave empty to keep the stored proxy."
+                  : "Leave empty to connect directly."}
               </div>
             </Form.Group>
           </div>

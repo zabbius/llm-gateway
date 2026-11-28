@@ -39,6 +39,7 @@ interface RouteSelection {
 declare function createRoutingTable(
   models: readonly ModelConfig[],
   registry: UpstreamRegistry,
+  options?: RouteBalancerOptions,   // the balancer's knobs (logger, clock, thresholds, affinity bound) — tests inject them; production takes the defaults
 ): RoutingTable;   // .aliases(): config order; .routes(alias); .select(alias, tried?, affinityKey?); .report(selection, ok, affinityKey?)
 
 /** The rebuildable holder the HTTP layer captures (ADR-014): one stable
@@ -51,20 +52,23 @@ declare function createRoutingTable(
 declare function createRebuildableRoutingTable(
   models: readonly ModelConfig[],
   registry: UpstreamRegistry,
-  options?: { logger?: Logger },
+  options?: RouteBalancerOptions,   // forwarded to every build — the same knobs createRoutingTable takes
 ): RebuildableRoutingTable;   // .table: RoutingTable; .models: current block; .rebuild(models)
 
 /** The per-client ACL: an authenticated client may address only the aliases
-    in its clients[].models; no authenticated client (no clients block) means
-    no ACL — every configured alias is addressable. */
+    in its clients[].models; no client on the request context (no gate
+    mounted — a store-less embedding with no clients block) means no ACL —
+    every configured alias is addressable. */
 declare function clientMayUse(client: GatewayClient | undefined, alias: string): boolean;
 
 /** The three-state health verdict of one configured route against its
     upstream's retained startup catalog. */
 type RouteHealth = "matched" | "missing" | "unknown";
 
-/** One configured route's verdict, in config order — what `GET /api/status`
-    reports as routes[] and what the startup pipeline warns from. */
+/** One configured route's verdict, in config order — what the startup
+    pipeline warns from and counts on its info line; the verdicts are
+    log-only (the status probe answers the fixed `{ status, authenticated }`
+    pair and carries no inventory). */
 interface RouteHealthEntry {
   alias: string;   // the owning models[].alias
   upstream: string; // models[].routes[].upstream
@@ -85,14 +89,17 @@ declare function crossCheckRoutes(
 ): readonly RouteHealthEntry[];
 
 /** Envelope for gateway-generated errors — OpenAI-native; constructed in
-    `src/httpapi/errors.ts` (see also the Error Propagation table in
+    `src/httpapi/errors.ts`, the single mapper for `/llm/*` and `/api/*`
+    alike (the full status/type/code table is the Error Propagation table in
     contracts/client-gateway.md). */
 interface GatewayError {
   error: {
     message: string;
-    type: "invalid_request_error" | "api_error";
+    type: "invalid_request_error" | "authentication_error" | "api_error";
     param?: string;   // "model" on model_not_found and on the 403 denial
-    code?: "model_not_found" | "upstream_error" | "upstream_timeout" | "upstream_tls_error" | "upstream_unavailable";  // absent on 400 and 403
+    code?: "model_not_found" | "request_too_large" | "resource_in_use"           // invalid_request_error
+          | "authentication_required" | "invalid_api_key" | "invalid_credentials" // authentication_error — the two gates
+          | "upstream_error" | "upstream_timeout" | "upstream_tls_error" | "upstream_proxy_error" | "upstream_unavailable";  // api_error; absent on the 400 and 403 answers and the no-code 404
   };
 }
 ```
@@ -125,6 +132,10 @@ declare class MetadataStore {
   set(upstreamId: string, entries: readonly ModelEntry[] | undefined): boolean;
   /** The current frozen slice for the builder ([] when nothing is known). */
   entries(upstreamId: string): readonly ModelEntry[];
+  /** The runtime CRUD's counterpart to seed(): drop one upstream's slice
+      entirely — a deleted upstream, or an updated one whose fresh probe
+      retained no catalog, stops serving alias metadata. */
+  clear(upstreamId: string): void;
 }
 
 /** detectModelMetadata(entry): the first-wins detector chain over one raw
@@ -137,10 +148,10 @@ Resolution rules:
 
 - alias is not configured → `404` `model_not_found`;
 - alias is configured but not in the authenticated client's `clients[].models` → `403` (`invalid_request_error`, `param: "model"`, no code) — existence and permission are different answers ([ADR-009](../decisions/009-alias-table-routing.md));
-- no `clients` block → no ACL: every configured alias is addressable unauthenticated (no client gate is mounted, [ADR-008](../decisions/008-client-bearer-auth.md));
+- no `clients` block → no ACL: `clientMayUse(undefined, alias)` is true for every configured alias. Whether a request reaches that check unauthenticated is the gate's question, not the ACL's: with the runtime configuration store wired (every production start) the client gate mounts even over an empty registry and answers `401` fail-closed until the CRUD creates the first client ([ADR-014](../decisions/014-runtime-management-crud.md)); only a store-less embedding with no `clients` block serves the surface ungated ([ADR-008](../decisions/008-client-bearer-auth.md));
 - route selection follows the entry's `balance.strategy` restricted to healthy routes ([load-balancing.md](./load-balancing.md)): `round-robin` rotates the routes in config order; `weighted-round-robin` rotates a weight-expanded schedule (each route appears `weight` times — proportional over every full cycle, deterministic within it); a route opened by consecutive pre-first-byte failures is skipped for its cooldown, then retried once as a half-open probe; a request carrying a session-affinity key (`X-Session-Id` header, else `user` — [ADR-010](../decisions/010-session-affinity.md)) is served by its bound route first, falling back to the strategy when that route is ineligible;
-- a pre-first-byte upstream failure (synthesized 502/504/502-TLS, relayed 5xx, relayed 429) marks the route and the dispatch advances to the entry's next eligible route; failover exhausted within the request relays the last upstream failure unchanged, and an alias whose every route is open answers `503` `upstream_unavailable` without any upstream contact ([load-balancing.md](./load-balancing.md));
-- upstream unreachable / timed out → `504` `upstream_timeout`; a non-JSON upstream error body → `502` `upstream_error`; a TLS verification failure on a pinned upstream → `502` `upstream_tls_error` ([ADR-004](../decisions/004-per-upstream-tls-pinning.md)) — all three synthesized by the upstream as a `Response` (`forward()` never rejects; specs/contracts/gateway-upstream.md). An unexpected rejection maps through the app's error middleware to a `502` `api_error` envelope;
+- a pre-first-byte upstream failure (synthesized 502/504/502-TLS/502-proxy, relayed 5xx, relayed 429) marks the route and the dispatch advances to the entry's next eligible route; failover exhausted within the request relays the last upstream failure unchanged, and an alias whose every route is open answers `503` `upstream_unavailable` without any upstream contact ([load-balancing.md](./load-balancing.md));
+- upstream unreachable / timed out → `504` `upstream_timeout`; a non-JSON upstream error body → `502` `upstream_error`; a TLS verification failure on a pinned upstream → `502` `upstream_tls_error` ([ADR-004](../decisions/004-per-upstream-tls-pinning.md)); the upstream's configured proxy refusing or failing the connection → `502` `upstream_proxy_error` ([ADR-017](../decisions/017-per-upstream-outbound-proxy.md)) — all four synthesized by the upstream as a `Response` (`forward()` never rejects; specs/contracts/gateway-upstream.md). An unexpected rejection maps through the app's error middleware to a `502` `api_error` envelope;
 - whether the upstream knows the selected route's model name is the upstream's verdict — the route's model text is forwarded verbatim and the upstream answer relayed unchanged.
 
 Endpoint map:

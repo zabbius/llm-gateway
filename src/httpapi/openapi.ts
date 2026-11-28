@@ -1,7 +1,7 @@
 /**
  * The wire-contract description module — the OpenAPI document's single
  * source: zod schemas for every gateway-served JSON shape, the
- * `describeRoute` operation configs for all twenty-three routes, and the
+ * `describeRoute` operation configs for all twenty-two routes, and the
  * document options (title, servers, the two security schemes).
  * Descriptive only: nothing here validates a request or a response
  * (no `validator()` middleware — request handling stays exactly as it
@@ -228,13 +228,19 @@ export const UpstreamModelListSchema = z.object({
  * the `409 resource_in_use` envelope (D6).
  * ------------------------------------------------------------------ */
 
-/** The masked upstream entry as every management read serves it (D7). */
+/**
+ * The masked upstream entry as every management read serves it (D7): the
+ * credential and the TLS pin are the fixed mask literal, `proxy` is served
+ * verbatim (`null` when the upstream connects directly) — it is not key
+ * material, the grammar forbids userinfo in a proxy URL (ADR-017).
+ */
 export const ManagedUpstreamSchema = z.object({
   type: z.enum(["openai-compatible"]),
   id: z.string(),
   baseUrl: z.string(),
   apiKey: z.literal(CONFIGURED_MASK),
   tlsFingerprint: z.union([z.literal(CONFIGURED_MASK), z.null()]),
+  proxy: z.string().nullable(),
 });
 
 /** The `GET /api/upstreams` answer — config order, entries masked. */
@@ -247,15 +253,23 @@ export const UpstreamListSchema = z.object({
  * (src/config/schema.ts owns validation): `type`, `id`, `baseUrl`,
  * `apiKey` required (create requires a key; update with an absent
  * `apiKey` keeps the stored credential — D7), `tlsFingerprint` optional
- * (absent keeps the stored pin, explicit `null` clears it). Unknown keys
- * are rejected by the store.
+ * (absent keeps the stored pin; explicit `null` — or the grammar's empty /
+ * whitespace-only value, which normalizes to "no pin" — clears it), and `proxy`
+ * optional (ADR-017 — an `http:` or `socks5:` URL with an explicit port
+ * and no userinfo; absent keeps the stored proxy on update and means a
+ * direct connection on create, explicit `null` clears it). A JSON `null`
+ * on any other key is the key not set — it reads exactly as if omitted (a
+ * required key is reported missing, an inherited one is inherited); the
+ * contract admits it for `apiKey`, the inherited key an update may carry.
+ * Unknown keys are rejected by the store.
  */
 export const UpstreamWriteRequestSchema = z.object({
   type: z.enum(["openai-compatible"]),
   id: z.string(),
   baseUrl: z.string(),
-  apiKey: z.string().optional(),
+  apiKey: z.string().nullable().optional(),
   tlsFingerprint: z.union([z.string(), z.null()]).optional(),
+  proxy: z.string().nullable().optional(),
 });
 
 /** The create/update answer — the current masked entry plus the probe outcome. */
@@ -319,23 +333,28 @@ export const ModelAliasListSchema = z.object({
  * (positive integers, at least one of context/output). `alias` is
  * required on create; on update the path parameter owns the alias — the
  * alias is immutable, and a differing body alias is refused by the store.
+ * A JSON `null` is the key not set: a `null` `alias` is inherited like an
+ * omitted one, a `null` weight is an unweighted route, and a `null` limit
+ * or `limits` block leaves the entry without it (the update replaces
+ * those wholesale, so absent is cleared).
  */
 export const ModelAliasWriteRequestSchema = z.object({
-  alias: z.string().optional(),
+  alias: z.string().nullable().optional(),
   routes: z.array(
     z.object({
       upstream: z.string(),
       model: z.string(),
-      weight: z.number().optional(),
+      weight: z.number().nullable().optional(),
     }),
   ),
   balance: z.object({ strategy: z.enum(["round-robin", "weighted-round-robin"]) }),
   limits: z
     .object({
-      context: z.number(),
-      output: z.number(),
+      context: z.number().nullable(),
+      output: z.number().nullable(),
     })
     .partial()
+    .nullable()
     .optional(),
 });
 
@@ -370,14 +389,17 @@ export const ClientListSchema = z.object({
 
 /**
  * The create/update request body — the config entry's grammar
- * (src/config/schema.ts owns validation): `name`, `models` (a non-empty
+ * (src/config/store.ts owns validation): `name`, `models` (a non-empty
  * array of existing aliases) required; `apiKey` required on create, absent
- * on update keeps the stored credential (D7). Unknown keys are rejected by
- * the store; the name itself is immutable.
+ * on update keeps the stored credential (D7). A JSON `null` is the key not
+ * set — it reads exactly as if omitted, so a `null` `apiKey` on update keeps
+ * the stored credential (the contract admits it there) and a `null`
+ * required key is reported missing. Unknown keys are rejected by the store;
+ * the name itself is immutable.
  */
 export const ClientWriteRequestSchema = z.object({
   name: z.string(),
-  apiKey: z.string().optional(),
+  apiKey: z.string().nullable().optional(),
   models: z.array(z.string()),
 });
 
@@ -515,7 +537,7 @@ export const ROUTE_DESCRIPTIONS = {
       "404": errorEnvelope("`model` is not a configured alias — `param: \"model\"`, code `model_not_found` (ADR-009)."),
       "413": errorEnvelope("The body exceeds `server.maxRequestBodyBytes` — code `request_too_large`."),
       "502": errorEnvelope(
-        "Upstream answered a non-relayable error body, the app's error mapper fired, or a pinned upstream's TLS pin mismatched — codes `upstream_error` / `upstream_tls_error` (ADR-004).",
+        "Upstream answered a non-relayable error body, the app's error mapper fired, a pinned upstream's TLS pin mismatched, or the upstream's configured outbound proxy refused or failed the connection — codes `upstream_error` / `upstream_tls_error` (ADR-004) / `upstream_proxy_error` (ADR-017).",
       ),
       "503": errorEnvelope(
         "Every route of the alias is currently unhealthy — code `upstream_unavailable` (specs/domains/load-balancing.md).",
@@ -552,7 +574,7 @@ export const ROUTE_DESCRIPTIONS = {
       "404": errorEnvelope("`model` is not a configured alias — `param: \"model\"`, code `model_not_found` (ADR-009)."),
       "413": errorEnvelope("The body exceeds `server.maxRequestBodyBytes` — code `request_too_large`."),
       "502": errorEnvelope(
-        "Upstream answered a non-relayable error body, the app's error mapper fired, or a pinned upstream's TLS pin mismatched — codes `upstream_error` / `upstream_tls_error` (ADR-004).",
+        "Upstream answered a non-relayable error body, the app's error mapper fired, a pinned upstream's TLS pin mismatched, or the upstream's configured outbound proxy refused or failed the connection — codes `upstream_error` / `upstream_tls_error` (ADR-004) / `upstream_proxy_error` (ADR-017).",
       ),
       "503": errorEnvelope(
         "Every route of the alias is currently unhealthy — code `upstream_unavailable` (specs/domains/load-balancing.md).",
@@ -636,7 +658,7 @@ export const ROUTE_DESCRIPTIONS = {
     operationId: "createUpstream",
     summary: "Create an upstream",
     description:
-      "Creates an upstream entry (ADR-014): the runtime store validates against the config grammar (strict keys, duplicate id refused, the mask literal \"[Configured]\" rejected as a key — D7), persists via sibling-temp-file + atomic rename onto the config file (the single source of truth, D1), then hot-applies without a restart (D2): a fresh upstream instance is constructed through the startup factory map, probed within the startup probe budget — the probe is blocking and its outcome is data in the answer, never a cancellation (D8) — and registered; the alias-metadata slice follows. The new upstream serves `/llm/v1` on the next request.",
+      "Creates an upstream entry (ADR-014): the runtime store validates against the config grammar (strict keys, duplicate id refused, the mask literal \"[Configured]\" rejected as a key — D7), persists via sibling-temp-file + atomic rename onto the config file (the single source of truth, D1), then hot-applies without a restart (D2): a fresh upstream instance is constructed through the startup factory map, probed within the startup probe budget — the probe is blocking and its outcome is data in the answer, never a cancellation (D8) — and registered; the alias-metadata slice follows. The new upstream serves `/llm/v1` on the next request. A JSON `null` on any key is the key not set — an optional key is absent from the entry, a required one is reported missing exactly like an absent one.",
     security: [{ cookieAuth: [] }],
     requestBody: {
       required: true,
@@ -680,7 +702,7 @@ export const ROUTE_DESCRIPTIONS = {
     operationId: "updateUpstream",
     summary: "Update an upstream",
     description:
-      "Replaces an upstream entry (ADR-014): same validate → persist → hot-apply sequence as create. Every field is required except `apiKey` (absent keeps the stored credential — the masked view never echoes it back, D7) and `tlsFingerprint` (absent keeps the pin, explicit `null` clears it — never a silent trust-widening); the id is immutable. A fresh instance replaces the old one under the same id and is probed within the startup probe budget (D8 — the outcome rides the answer as data); the next `/llm/v1` selection resolves the replacement — no restart.",
+      "Replaces an upstream entry (ADR-014): same validate → persist → hot-apply sequence as create. Every field is required except `apiKey` (absent keeps the stored credential — the masked view never echoes it back, D7), `tlsFingerprint` (absent keeps the pin; explicit `null` — or the grammar's empty / whitespace-only value, which normalizes to no pin and never lands as an empty string — clears it, never a silent trust-widening) and `proxy` (ADR-017 — absent keeps the stored outbound proxy, explicit `null` clears it to a direct connection, never a silent egress-topology change; the value is an `http:` or `socks5:` URL with an explicit port and no userinfo, rejected value-free otherwise); the id is immutable. A fresh instance replaces the old one under the same id and is probed within the startup probe budget (D8 — the outcome rides the answer as data); the next `/llm/v1` selection resolves the replacement — no restart. Beyond those two keys a JSON `null` is the key not set — it reads exactly as if omitted, so a `null` `apiKey` keeps the stored credential and a `null` `id` is inherited.",
     security: [{ cookieAuth: [] }],
     parameters: [UPSTREAM_ID_PARAMETER],
     requestBody: {
@@ -747,7 +769,7 @@ export const ROUTE_DESCRIPTIONS = {
     operationId: "createModelAlias",
     summary: "Create a model alias",
     description:
-      "Creates a `models[]` entry (ADR-014 over ADR-009): the runtime store validates against the config grammar — every route's `upstream` must name a configured upstream id, the alias grammar and uniqueness, at least one route, no duplicate upstream/model pair, strategy/weight consistency, limits rules — and persists via atomic replace onto the config file (the single source of truth, D1), then the alias routing table is rebuilt over the freshly persisted block: the new alias is addressable on `/llm/v1` on the very next request, no restart.",
+      "Creates a `models[]` entry (ADR-014 over ADR-009): the runtime store validates against the config grammar — every route's `upstream` must name a configured upstream id, the alias grammar and uniqueness, at least one route, no duplicate upstream/model pair, strategy/weight consistency, limits rules — and persists via atomic replace onto the config file (the single source of truth, D1), then the alias routing table is rebuilt over the freshly persisted block: the new alias is addressable on `/llm/v1` on the very next request, no restart. A JSON `null` is the key not set — a `null` weight is an unweighted route, a `null` limit or `limits` block is absent, a `null` required key is reported missing.",
     security: [{ cookieAuth: [] }],
     requestBody: {
       required: true,
@@ -791,7 +813,7 @@ export const ROUTE_DESCRIPTIONS = {
     operationId: "updateModelAlias",
     summary: "Update a model alias",
     description:
-      "Replaces a `models[]` entry (ADR-014): same validate → persist → rebuild sequence as create. `routes`, `balance` and `limits` are replaced wholesale; the alias itself is immutable — the path parameter owns it, and a differing body `alias` is a 400 (delete and re-create to rename). The rebuilt table serves the changed entry on the very next `/llm/v1` request — catalog and dispatch alike, no restart.",
+      "Replaces a `models[]` entry (ADR-014): same validate → persist → rebuild sequence as create. `routes`, `balance` and `limits` are replaced wholesale; the alias itself is immutable — the path parameter owns it, and a differing body `alias` is a 400 (delete and re-create to rename). The rebuilt table serves the changed entry on the very next `/llm/v1` request — catalog and dispatch alike, no restart. A JSON `null` is the key not set: a `null` `alias` is inherited like an omitted one, a `null` weight is an unweighted route, and a `null` limit or `limits` block leaves the entry without it.",
     security: [{ cookieAuth: [] }],
     parameters: [MODEL_ALIAS_PARAMETER],
     requestBody: {
@@ -860,7 +882,7 @@ export const ROUTE_DESCRIPTIONS = {
     operationId: "createClient",
     summary: "Create a client",
     description:
-      "Creates a client entry (ADR-014): the runtime store validates against the config grammar (strict keys, duplicate name refused, `models` a non-empty array of existing aliases, the mask literal \"[Configured]\" rejected as a key — D7), persists via sibling-temp-file + atomic rename onto the config file (the single source of truth, D1 — the block is created when absent), then hot-applies without a restart (D2): the LLM gate's digest registry is rebuilt from the store's current entries and the new key admits `/llm/v1` on the very next request. Until the first client exists the mounted gate answers every `/llm/v1` request 401 — fail-closed, the surface never opens.",
+      "Creates a client entry (ADR-014): the runtime store validates against the config grammar (strict keys, duplicate name refused, `models` a non-empty array of existing aliases, the mask literal \"[Configured]\" rejected as a key — D7), persists via sibling-temp-file + atomic rename onto the config file (the single source of truth, D1 — the block is created when absent), then hot-applies without a restart (D2): the LLM gate's digest registry is rebuilt from the store's current entries and the new key admits `/llm/v1` on the very next request. Until the first client exists the mounted gate answers every `/llm/v1` request 401 — fail-closed, the surface never opens. A JSON `null` is the key not set — a required key reads as missing, exactly like an absent one.",
     security: [{ cookieAuth: [] }],
     requestBody: {
       required: true,
@@ -904,7 +926,7 @@ export const ROUTE_DESCRIPTIONS = {
     operationId: "updateClient",
     summary: "Update a client",
     description:
-      "Replaces a client entry (ADR-014): same validate → persist → hot-apply sequence as create. `models` is replaced wholesale (every listed alias must exist); `apiKey` absent keeps the stored credential — the masked view never echoes it back, D7; the name is immutable. The LLM gate's digest registry is rebuilt from the store's current entries (D2), so an ACL change cuts on the very next request and a replaced key invalidates the old one — no restart.",
+      "Replaces a client entry (ADR-014): same validate → persist → hot-apply sequence as create. `models` is replaced wholesale (every listed alias must exist); `apiKey` absent keeps the stored credential — the masked view never echoes it back, D7; the name is immutable. The LLM gate's digest registry is rebuilt from the store's current entries (D2), so an ACL change cuts on the very next request and a replaced key invalidates the old one — no restart. A JSON `null` is the key not set — a `null` `apiKey` keeps the stored credential like an omitted one, a `null` required key is reported missing.",
     security: [{ cookieAuth: [] }],
     parameters: [CLIENT_NAME_PARAMETER],
     requestBody: {

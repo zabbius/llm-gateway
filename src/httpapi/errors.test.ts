@@ -13,6 +13,7 @@ import {
   payloadTooLargeResponse,
   serviceUnavailableResponse,
   upstreamErrorResponse,
+  upstreamProxyErrorResponse,
   upstreamTimeoutResponse,
   upstreamTlsErrorResponse,
 } from "./errors.ts";
@@ -146,6 +147,21 @@ describe("error envelope constructors", () => {
         message: 'upstream "lan" TLS certificate pin mismatch',
         type: "api_error",
         code: "upstream_tls_error",
+      },
+    });
+  });
+
+  test("upstreamProxyErrorResponse — 502, api_error, code 'upstream_proxy_error' (ADR-017)", async () => {
+    const { status, contentType, body } = await envelopeOf(
+      upstreamProxyErrorResponse('upstream "openai" is unreachable through its configured proxy'),
+    );
+    expect(status).toBe(502);
+    expect(contentType).toContain("application/json");
+    expect(body).toEqual({
+      error: {
+        message: 'upstream "openai" is unreachable through its configured proxy',
+        type: "api_error",
+        code: "upstream_proxy_error",
       },
     });
   });

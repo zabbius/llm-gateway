@@ -3,8 +3,9 @@
  * specs/architecture/security-model.md): the view carries the fixed mask in
  * place of every credential — never the configured values — for entries with
  * and without a `tlsFingerprint`, passes `server` (the `tls` block becoming
- * `null` when absent) / `logLevel` / `baseUrl` through verbatim, and neither
- * mutates nor shares objects with the config.
+ * `null` when absent) / `logLevel` / `baseUrl` / `proxy` through verbatim
+ * (an absent `proxy` becoming `null`), and neither mutates nor shares objects
+ * with the config.
  */
 import { describe, expect, test } from "bun:test";
 import { CONFIGURED_MASK, redactedConfigView } from "./redact.ts";
@@ -48,6 +49,28 @@ describe("redactedConfigView", () => {
 
     expect(view.upstreams[0]?.apiKey).toBe(CONFIGURED_MASK);
     expect(view.upstreams[0]?.tlsFingerprint).toBeNull();
+  });
+
+  test("a configured proxy is verbatim in the view; an absent one is null — the apiKey/tlsFingerprint masks are unchanged", () => {
+    const PROXY_URL = "http://forward-proxy.internal:3128";
+    const withProxy = redactedConfigView(normalized(entry({ proxy: PROXY_URL, tlsFingerprint: SECRET_PIN })));
+    expect(withProxy.upstreams[0]?.proxy).toBe(PROXY_URL); // verbatim, never the mask
+    expect(withProxy.upstreams[0]?.apiKey).toBe(CONFIGURED_MASK);
+    expect(withProxy.upstreams[0]?.tlsFingerprint).toBe(CONFIGURED_MASK);
+
+    const withoutProxy = redactedConfigView(normalized(entry()));
+    expect(withoutProxy.upstreams[0]?.proxy).toBeNull();
+    expect(withoutProxy.upstreams[0]?.apiKey).toBe(CONFIGURED_MASK);
+    expect(withoutProxy.upstreams[0]?.tlsFingerprint).toBeNull();
+  });
+
+  test("the proxy URL is not secret material: it survives serialization verbatim while the key and pin do not", () => {
+    const PROXY_URL = "socks5://10.0.0.7:1080";
+    const raw = JSON.stringify(redactedConfigView(normalized(entry({ proxy: PROXY_URL, tlsFingerprint: SECRET_PIN }))));
+
+    expect(raw).toContain(PROXY_URL);
+    expect(raw).not.toContain(SECRET_KEY);
+    expect(raw).not.toContain(SECRET_PIN);
   });
 
   test("a tls block is mirrored field by field: enabled and the PEM paths", () => {

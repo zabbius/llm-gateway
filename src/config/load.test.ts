@@ -26,8 +26,10 @@ import {
   DEFAULT_MAX_REQUEST_BODY_BYTES,
   MAX_REQUEST_BODY_BYTES_LIMIT,
   LOG_LEVELS,
+  isValidProxyUrl,
   isValidTlsFingerprint,
   normalizeBaseUrl,
+  normalizeProxy,
   normalizeTlsFingerprint,
 } from "./schema.ts";
 import {
@@ -37,6 +39,7 @@ import {
   loadConfig,
   resolveConfigPath,
 } from "./load.ts";
+import { redactedConfigView } from "./redact.ts";
 
 const LOAD_PATH = join(import.meta.dir, "load.ts");
 
@@ -281,7 +284,7 @@ test("an unknown per-upstream key is rejected and valid keys are named", () => {
   expect(result.ok).toBe(false);
   if (result.ok) return;
   expect(result.problems).toEqual([
-    'upstreams[0]: unknown key "retry" (valid keys: type, id, baseUrl, apiKey, tlsFingerprint)',
+    'upstreams[0]: unknown key "retry" (valid keys: type, id, baseUrl, apiKey, tlsFingerprint, proxy)',
   ]);
 });
 
@@ -349,7 +352,8 @@ test("a valid custom server.maxRequestBodyBytes is accepted and mirrored", () =>
 });
 
 test("invalid server.maxRequestBodyBytes values are rejected with the integer-bound rule", () => {
-  for (const given of [0, -1, 1.5, "4194304", true, null, MAX_REQUEST_BODY_BYTES_LIMIT + 1]) {
+  // `null` is not in the list: a null key is not set — the default applies
+  for (const given of [0, -1, 1.5, "4194304", true, MAX_REQUEST_BODY_BYTES_LIMIT + 1]) {
     const result = loadConfig({
       path: configFixture(
         validConfig([VALID_UPSTREAM], { server: { listen: "127.0.0.1:8080", maxRequestBodyBytes: given } }),
@@ -436,10 +440,10 @@ test("server.tls without enabled is rejected — TLS is on or off, never inferre
 });
 
 test("a non-boolean server.tls.enabled is rejected", () => {
+  // `null` is not in the list: a null key is not set — see the null-rule tests
   for (const [enabled, rendered] of [
     ["true", '"true"'],
     [1, "1"],
-    [null, "null"],
   ] as const) {
     const result = loadConfig({
       path: configFixture(validConfig([VALID_UPSTREAM], { server: { tls: { enabled } } })),
@@ -478,7 +482,8 @@ test("tls enabled without cert or key names the missing key", () => {
 });
 
 test("tls enabled with an empty or non-string cert/key path is rejected without echoing the value", () => {
-  for (const given of ["", 42, null]) {
+  // `null` is not in the list: a null key is not set — see the null-rule tests
+  for (const given of ["", 42]) {
     for (const field of ["cert", "key"] as const) {
       // the sibling path is valid, so the only problem is the malformed one
       const tls = field === "cert"
@@ -575,10 +580,10 @@ test("auth without enabled is rejected — the gate is on or off, never inferred
 });
 
 test("a non-boolean auth.enabled is rejected", () => {
+  // `null` is not in the list: a null key is not set — see the null-rule tests
   for (const [enabled, rendered] of [
     ["true", '"true"'],
     [1, "1"],
-    [null, "null"],
   ] as const) {
     const result = loadConfig({
       path: configFixture(validConfig([VALID_UPSTREAM], { auth: { enabled } })),
@@ -618,7 +623,8 @@ test("auth enabled without user or passwordHash names the missing key", () => {
 });
 
 test("a malformed passwordHash is rejected without echoing the value", () => {
-  for (const passwordHash of ["hunter2", "$bcrypt$abc", "$argon2x$abc", "", "$", 42, null]) {
+  // `null` is not in the list: a null key is not set — see the null-rule tests
+  for (const passwordHash of ["hunter2", "$bcrypt$abc", "$argon2x$abc", "", "$", 42]) {
     const result = loadConfig({
       path: configFixture(validConfig([VALID_UPSTREAM], { auth: { enabled: true, user: "admin", passwordHash } })),
     });
@@ -692,7 +698,8 @@ test("auth disabled stages user/passwordHash without requiring them; absent fiel
 // ---------------------------------------------------------------------------
 
 test("an invalid logLevel is rejected with all six valid values listed", () => {
-  for (const logLevel of ["loud", "warn", "VERBOSE", "", 42, null]) {
+  // `null` is not in the list: a null key is not set — the default applies
+  for (const logLevel of ["loud", "warn", "VERBOSE", "", 42]) {
     const result = loadConfig({
       path: configFixture(validConfig([VALID_UPSTREAM], { logLevel })),
     });
@@ -779,8 +786,9 @@ test("a missing or malformed id is rejected with the grammar", () => {
     if (result.ok) return;
     expect(result.problems).toHaveLength(1);
     expect(result.problems[0]).toContain("upstreams[0]:");
-    // a missing key names the key; a present-but-invalid value names the grammar
-    if (id === undefined) {
+    // a missing key — or a `null` one, which is the key not set — names the
+    // key; a present-but-invalid value names the grammar
+    if (id === undefined || id === null) {
       expect(result.problems[0]).toContain('missing required key "id"');
     } else {
       expect(result.problems[0]).toContain("^[a-z0-9][a-z0-9-]*$");
@@ -863,8 +871,9 @@ test("a missing, empty, or non-string apiKey is rejected without echoing the val
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
+    // a `null` key is the key not set — the same problem line as a missing one
     expect(result.problems).toEqual([
-      apiKey === undefined
+      apiKey === undefined || apiKey === null
         ? 'upstreams[0]: missing required key "apiKey"'
         : "upstreams[0]: apiKey must be a non-empty string",
     ]);
@@ -872,6 +881,175 @@ test("a missing, empty, or non-string apiKey is rejected without echoing the val
     expect(result.problems.join("\n")).not.toContain(VALID_UPSTREAM.apiKey);
     expect(log.lines.join("\n")).not.toContain(VALID_UPSTREAM.apiKey);
   }
+});
+
+// ---------------------------------------------------------------------------
+// the null rule — a key written as JSON `null` is the key not set
+// ---------------------------------------------------------------------------
+
+test("a null optional key is not set — every optional block and scalar takes its default", () => {
+  const result = loadConfig({
+    path: configFixture(
+      JSON.stringify({
+        server: { listen: null, maxRequestBodyBytes: null, tls: null },
+        logLevel: null,
+        auth: null,
+        clients: null,
+        models: null,
+        upstreams: [{ ...VALID_UPSTREAM, tlsFingerprint: null, proxy: null }],
+      }),
+    ),
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) return;
+  expect(result.config.server).toEqual({ listen: DEFAULT_LISTEN, maxRequestBodyBytes: DEFAULT_MAX_REQUEST_BODY_BYTES });
+  expect(result.config.logLevel).toBe(DEFAULT_LOG_LEVEL);
+  expect(result.config.auth).toBeUndefined();
+  expect(result.config.clients).toBeUndefined();
+  expect(result.config.models).toBeUndefined();
+  // neither `null` nor `""` lands on the entry — the JSON round-trip compares the plain shape
+  expect(JSON.parse(JSON.stringify(result.config.upstreams))).toEqual([VALID_UPSTREAM]);
+});
+
+test("a null required key is reported missing exactly like an absent one — at every level", () => {
+  const result = loadConfig({
+    path: configFixture(
+      JSON.stringify({
+        server: { tls: { enabled: null, cert: null, key: null } },
+        auth: { enabled: null, user: null, passwordHash: null },
+        clients: [{ name: null, apiKey: null, models: null }],
+        models: [{ alias: null, routes: null, balance: null, limits: null }],
+        upstreams: [{ type: null, id: null, baseUrl: null, apiKey: null }],
+      }),
+    ),
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.problems).toEqual([
+    'server.tls: missing required key "enabled"',
+    'auth: missing required key "enabled"',
+    'clients[0]: missing required key "name"',
+    'clients[0]: missing required key "apiKey"',
+    "clients[0]: models must be an array with at least one model alias",
+    'models[0]: missing required key "alias"',
+    "models[0]: routes must be an array with at least one route entry",
+    'models[0]: missing required key "balance"',
+    'upstreams[0]: missing required key "type" (registered upstream types: openai-compatible)',
+    'upstreams[0]: missing required key "id"',
+    'upstreams[0]: missing required key "baseUrl"',
+    'upstreams[0]: missing required key "apiKey"',
+  ]);
+});
+
+test("a null nested optional value is not set — route weights, single limits and the limits block", () => {
+  const route = { upstream: "openai", model: "gpt-4o" };
+  const result = loadConfig({
+    path: configFixture(
+      JSON.stringify({
+        models: [
+          { alias: "plain", routes: [{ ...route, weight: null }], balance: { strategy: "round-robin" } },
+          { alias: "capped", routes: [route], balance: { strategy: "round-robin" }, limits: { context: null, output: 8192 } },
+          { alias: "uncapped", routes: [route], balance: { strategy: "round-robin" }, limits: null },
+        ],
+        upstreams: [VALID_UPSTREAM],
+      }),
+    ),
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) return;
+  expect(result.config.models?.map((entry) => ({ routes: entry.routes, limits: entry.limits }))).toEqual([
+    { routes: [route], limits: undefined },
+    { routes: [route], limits: { output: 8192 } },
+    { routes: [route], limits: undefined },
+  ]);
+});
+
+test("a null weight is still missing under the weighted strategy; a limits block of only nulls is empty", () => {
+  const weighted = loadConfig({
+    path: configFixture(
+      JSON.stringify({
+        models: [{ alias: "w", routes: [{ upstream: "openai", model: "gpt-4o", weight: null }], balance: { strategy: "weighted-round-robin" } }],
+        upstreams: [VALID_UPSTREAM],
+      }),
+    ),
+  });
+  expect(weighted.ok).toBe(false);
+  if (!weighted.ok) {
+    expect(weighted.problems).toEqual([
+      'models[0]: routes[0]: weight is required when the balance strategy is "weighted-round-robin"',
+    ]);
+  }
+
+  const hollow = loadConfig({
+    path: configFixture(
+      JSON.stringify({
+        models: [
+          { alias: "h", routes: [{ upstream: "openai", model: "gpt-4o" }], balance: { strategy: "round-robin" }, limits: { context: null } },
+        ],
+        upstreams: [VALID_UPSTREAM],
+      }),
+    ),
+  });
+  expect(hollow.ok).toBe(false);
+  if (!hollow.ok) {
+    expect(hollow.problems).toEqual(['models[0]: limits must carry at least one of "context", "output"']);
+  }
+});
+
+test("a null conditional key is not set: a pin-less cert is required only while TLS is on, a hash only while auth is on", () => {
+  const tlsOn = loadConfig({
+    path: configFixture(JSON.stringify({ server: { tls: { enabled: true, cert: null, key: "./tls/key.pem" } }, upstreams: [VALID_UPSTREAM] })),
+  });
+  expect(tlsOn.ok).toBe(false);
+  if (!tlsOn.ok) expect(tlsOn.problems).toEqual(["server.tls: cert is required when tls is enabled"]);
+
+  const tlsOff = loadConfig({
+    path: configFixture(JSON.stringify({ server: { tls: { enabled: false, cert: null, key: "./tls/key.pem" } }, upstreams: [VALID_UPSTREAM] })),
+  });
+  expect(tlsOff.ok).toBe(true);
+  if (tlsOff.ok) expect(tlsOff.config.server.tls).toEqual({ enabled: false, key: "./tls/key.pem" });
+
+  const authStaged = loadConfig({
+    path: configFixture(JSON.stringify({ auth: { enabled: false, user: "admin", passwordHash: null }, upstreams: [VALID_UPSTREAM] })),
+  });
+  expect(authStaged.ok).toBe(true);
+  if (authStaged.ok) expect(authStaged.config.auth).toEqual({ enabled: false, user: "admin" });
+
+  const authLive = loadConfig({
+    path: configFixture(JSON.stringify({ auth: { enabled: true, user: "admin", passwordHash: null }, upstreams: [VALID_UPSTREAM] })),
+  });
+  expect(authLive.ok).toBe(false);
+  if (!authLive.ok) expect(authLive.problems).toEqual(["auth: passwordHash is required when auth is enabled"]);
+});
+
+test("an unknown key is reported even when its value is null — the strict-key pass reads the raw object", () => {
+  const result = loadConfig({
+    path: configFixture(
+      JSON.stringify({
+        bogus: null,
+        server: { listen: "127.0.0.1:8080", tls: { enabled: false, extra: null } },
+        upstreams: [{ ...VALID_UPSTREAM, typo: null }],
+      }),
+    ),
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.problems).toEqual([
+    'unknown top-level key "bogus" (valid keys: server, logLevel, auth, clients, models, upstreams)',
+    'server.tls: unknown key "extra" (valid keys: enabled, cert, key)',
+    'upstreams[0]: unknown key "typo" (valid keys: type, id, baseUrl, apiKey, tlsFingerprint, proxy)',
+  ]);
+});
+
+test("a null array element is still a type error — the null rule covers keys, not elements", () => {
+  const result = loadConfig({ path: configFixture(JSON.stringify({ upstreams: [null] })) });
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.problems).toEqual(["upstreams[0] must be a JSON object"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -893,15 +1071,19 @@ test("a valid tlsFingerprint pin is accepted and whitespace-stripped in the norm
   expect(result.config.upstreams[0]?.tlsFingerprint).toBe(VALID_PIN);
 });
 
-test("an empty or whitespace-only tlsFingerprint means no pin", () => {
-  for (const tlsFingerprint of ["", "   \n\t "]) {
+test("an absent, null, empty, or whitespace-only tlsFingerprint means no pin — the normalized entry carries no key", () => {
+  for (const tlsFingerprint of [undefined, null, "", "   \n\t "]) {
     const result = loadConfig({
       path: configFixture(validConfig([{ ...VALID_UPSTREAM, tlsFingerprint }])),
     });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.config.upstreams[0]?.tlsFingerprint).toBe("");
+    const entry = result.config.upstreams[0];
+    expect(entry?.tlsFingerprint).toBeUndefined();
+    expect(Object.hasOwn(entry ?? {}, "tlsFingerprint")).toBe(false); // never `null` or `""` on the entry
+    // the view follows: an unset pin reads as absent, never as the mask
+    expect(redactedConfigView(result.config).upstreams[0]?.tlsFingerprint).toBeNull();
   }
 });
 
@@ -937,7 +1119,8 @@ test("a syntactically wrong tlsFingerprint is rejected naming the rule", () => {
 });
 
 test("a non-string tlsFingerprint is rejected", () => {
-  for (const tlsFingerprint of [42, null, true, ["ab"]]) {
+  // `null` is not in the list: a null key is the pin not set (the test above)
+  for (const tlsFingerprint of [42, true, ["ab"]]) {
     const result = loadConfig({
       path: configFixture(validConfig([{ ...VALID_UPSTREAM, tlsFingerprint }])),
     });
@@ -953,12 +1136,123 @@ test("a non-string tlsFingerprint is rejected", () => {
 test("isValidTlsFingerprint and normalizeTlsFingerprint agree with the config-level rules", () => {
   expect(isValidTlsFingerprint(VALID_PIN)).toBe(true);
   expect(isValidTlsFingerprint("")).toBe(true);
+  expect(isValidTlsFingerprint("   ")).toBe(true); // whitespace-only: the grammar's own "no pin"
   expect(isValidTlsFingerprint(` ${VALID_PIN} `)).toBe(true);
   expect(normalizeTlsFingerprint(` ${VALID_PIN} `)).toBe(VALID_PIN);
   expect(isValidTlsFingerprint("nope")).toBe(false);
   expect(isValidTlsFingerprint(VALID_PIN.slice(0, -2))).toBe(false); // 31 bytes decoded
   expect(isValidTlsFingerprint(VALID_PIN.slice(0, -1))).toBe(true); // unpadded 43-char form, same 32 bytes
   expect(normalizeTlsFingerprint("k3/J9+vQ1 Z\nab==")).toBe("k3/J9+vQ1Zab==");
+  // empty / whitespace-only / non-string → undefined: never `""` on a normalized entry
+  expect(normalizeTlsFingerprint("")).toBeUndefined();
+  expect(normalizeTlsFingerprint(" \n\t ")).toBeUndefined();
+  expect(normalizeTlsFingerprint(null)).toBeUndefined();
+  expect(normalizeTlsFingerprint(42)).toBeUndefined();
+});
+
+// ---------------------------------------------------------------------------
+// proxy — optional per-upstream outbound proxy (ADR-017)
+// ---------------------------------------------------------------------------
+
+/** An upstream entry carrying the given `proxy` — absent when `undefined`. */
+function upstreamWithProxy(proxy: unknown): Record<string, unknown> {
+  return proxy === undefined ? { ...VALID_UPSTREAM } : { ...VALID_UPSTREAM, proxy };
+}
+
+test("valid http and socks5 proxy values are accepted and stored trimmed", () => {
+  for (const proxy of [
+    "http://proxy.example:8080",
+    "socks5://proxy.example:1080",
+    "http://127.0.0.1:3128/",
+    "http://[::1]:8080",
+    "http://proxy.example:80", // the scheme's default port, explicitly written — not elided
+  ]) {
+    const result = loadConfig({
+      path: configFixture(validConfig([{ ...VALID_UPSTREAM, proxy: `  ${proxy}\n` }])),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.config.upstreams[0]?.proxy).toBe(proxy);
+  }
+});
+
+test("an absent, null, empty, or whitespace-only proxy means a direct connection", () => {
+  for (const proxy of [undefined, null, "", "   \n\t "]) {
+    const result = loadConfig({ path: configFixture(validConfig([upstreamWithProxy(proxy)])) });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.config.upstreams[0]?.proxy).toBeUndefined();
+    expect("proxy" in result.config.upstreams[0]!).toBe(false);
+  }
+});
+
+test("a malformed proxy is rejected naming the rule, never the value", () => {
+  for (const proxy of [
+    "http://user:pass@proxy.example:8080", // userinfo — proxy credentials never enter the config
+    "http://proxy.example", // no port
+    "http://proxy.example:0", // port 0
+    "http://proxy.example:99999", // port above 65535
+    "https://proxy.example:8443", // not an accepted scheme
+    "ftp://proxy.example:21",
+    "socks4://proxy.example:1080",
+    "http://proxy.example:8080/path", // a path
+    "http://proxy.example:8080?x=1", // a query
+    "http://proxy.example:8080#fragment", // a fragment
+    "proxy.example:8080", // no scheme
+    "http://:8080", // empty host
+    "//proxy.example:8080",
+  ]) {
+    const log = capture();
+    const result = loadConfig({ path: configFixture(validConfig([{ ...VALID_UPSTREAM, proxy }])), log });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toHaveLength(1);
+    expect(result.problems[0]).toContain("upstreams[0]: proxy");
+    expect(result.problems[0]).toContain("http: or socks5: URL");
+    // the configured value is never echoed into the problem line
+    expect(result.problems[0]).not.toContain(proxy);
+    expect(log.lines.join("\n")).not.toContain(proxy);
+  }
+
+  // a pasted credential-bearing URL leaks neither the user name nor the password
+  const result = loadConfig({
+    path: configFixture(validConfig([{ ...VALID_UPSTREAM, proxy: "http://operator:s3cret-pw@proxy.example:8080" }])),
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.problems.join("\n")).not.toContain("s3cret-pw");
+  expect(result.problems.join("\n")).not.toContain("operator");
+});
+
+test("a non-string, non-null proxy is rejected naming the key", () => {
+  for (const proxy of [42, true, ["http://proxy.example:8080"], { host: "proxy.example" }]) {
+    const result = loadConfig({ path: configFixture(validConfig([{ ...VALID_UPSTREAM, proxy }])) });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toEqual([
+      "upstreams[0]: proxy must be a string — an http: or socks5: URL with an explicit port, or null for a direct connection",
+    ]);
+  }
+});
+
+test("isValidProxyUrl and normalizeProxy agree with the config-level rules", () => {
+  expect(normalizeProxy(undefined)).toBeUndefined();
+  expect(normalizeProxy(null)).toBeUndefined();
+  expect(normalizeProxy("")).toBeUndefined();
+  expect(normalizeProxy("  \n")).toBeUndefined();
+  expect(normalizeProxy(" http://proxy.example:8080 ")).toBe("http://proxy.example:8080");
+  expect(isValidProxyUrl("http://proxy.example:8080")).toBe(true);
+  expect(isValidProxyUrl("socks5://proxy.example:1080")).toBe(true);
+  expect(isValidProxyUrl("http://proxy.example:80")).toBe(true); // default port, explicitly written
+  expect(isValidProxyUrl("http://proxy.example")).toBe(false); // no port
+  expect(isValidProxyUrl("https://proxy.example:8443")).toBe(false); // wrong scheme
+  expect(isValidProxyUrl("http://user:pass@proxy.example:8080")).toBe(false); // userinfo
+  expect(isValidProxyUrl("http://proxy.example:8080/path")).toBe(false); // a path
+  expect(isValidProxyUrl("http://proxy.example:8080?x=1")).toBe(false); // a query
 });
 
 // ---------------------------------------------------------------------------

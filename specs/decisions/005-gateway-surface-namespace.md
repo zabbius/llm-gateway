@@ -17,7 +17,7 @@ The decision is scoped to the URL namespace only. The model-id scheme (the confi
 One top-level prefix per surface, mounted on the Hono app (`src/httpapi/app.ts`):
 
 - **LLM OpenAI surface: `/llm/v1/*`.** Clients set their baseURL to `<host>/llm/v1`; the endpoints are `GET /llm/v1/models`, `POST /llm/v1/chat/completions`, `POST /llm/v1/completions` ([client-gateway.md](../contracts/client-gateway.md)).
-- **Management API: `/api/*`** at the root prefix — the status probe, the runtime CRUD over upstreams, models, and clients, the live model listing, the discover mount, and the auth actions ([gateway-management.md](../contracts/gateway-management.md)). Plain JSON: consumable by the SPA and equally by alternative non-browser clients.
+- **Management API: `/api/*`** at the root prefix — the status probe, the runtime CRUD over upstreams, models, and clients, the live model listing (with its `discover=1` metadata swap, [ADR-016](./016-discover-folded-into-live-listing.md)), and the auth actions ([gateway-management.md](../contracts/gateway-management.md)). Plain JSON: consumable by the SPA and equally by alternative non-browser clients.
 - **SPA: `/ui/*` only.** Static assets mount under `/ui`; routes beyond `/ui/*` do not exist server-side — they are handled client-side by React. The root `/` serves a `302` redirect to `/ui`.
 
 The cut is clean: no aliases, no compatibility shims, no redirects from the old `/v1/*` paths. Existing contracts are edited in place — pre-release, with owner approval — so no supersede chains are created, and [client-gateway.md](../contracts/client-gateway.md) documents the new paths directly.

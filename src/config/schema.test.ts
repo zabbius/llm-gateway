@@ -346,7 +346,8 @@ describe("validateGatewayConfig — the model limits block", () => {
   });
 
   test("context and output must be positive integers — zero, negative, fractional and non-numbers are rejected", () => {
-    for (const bad of [0, -1, -4096, 4096.5, "4096", null]) {
+    // `null` is not in the list: a null key is the limit not set (the test below)
+    for (const bad of [0, -1, -4096, 4096.5, "4096"]) {
       const byContext = validateGatewayConfig(config({ models: [model({ limits: { context: bad } })] }));
       expect(byContext.ok).toBe(false);
       if (!byContext.ok) {
@@ -366,5 +367,64 @@ describe("validateGatewayConfig — the model limits block", () => {
     expect(validated.ok).toBe(false);
     if (validated.ok) return;
     expect(validated.problems).toEqual(["models[0]: limits must be a JSON object"]);
+  });
+
+  test("a null limit is not set — a block of only nulls is empty, a null sibling leaves the other limit", () => {
+    const partial = validateGatewayConfig(config({ models: [model({ limits: { context: null, output: 8192 } })] }));
+    expect(partial.ok).toBe(true);
+    if (partial.ok) expect(partial.config.models?.[0]?.limits).toEqual({ output: 8192 });
+
+    const hollow = validateGatewayConfig(config({ models: [model({ limits: { context: null, output: null } })] }));
+    expect(hollow.ok).toBe(false);
+    if (!hollow.ok) {
+      expect(hollow.problems).toEqual(['models[0]: limits must carry at least one of "context", "output"']);
+    }
+  });
+
+  test("a null key in a client or model entry is not set — required keys read as missing, optional ones fall away", () => {
+    const hollowClient = validateGatewayConfig(config({ clients: [{ name: null, apiKey: null, models: null }] }));
+    expect(hollowClient.ok).toBe(false);
+    if (!hollowClient.ok) {
+      expect(hollowClient.problems).toEqual([
+        'clients[0]: missing required key "name"',
+        'clients[0]: missing required key "apiKey"',
+        "clients[0]: models must be an array with at least one model alias",
+      ]);
+    }
+
+    // no client block here — its default alias reference would add a cross-ref problem
+    const hollowModel = validateGatewayConfig(
+      config({ clients: undefined, models: [{ alias: null, routes: null, balance: null, limits: null }] }),
+    );
+    expect(hollowModel.ok).toBe(false);
+    if (!hollowModel.ok) {
+      expect(hollowModel.problems).toEqual([
+        'models[0]: missing required key "alias"',
+        "models[0]: routes must be an array with at least one route entry",
+        'models[0]: missing required key "balance"',
+      ]);
+    }
+
+    // the null-stripped entry normalizes exactly like one written without the key
+    const plain = validateGatewayConfig(
+      config({
+        models: [
+          model({
+            balance: { strategy: "round-robin" },
+            limits: null,
+            routes: [{ upstream: "openai", model: "gpt-4o", weight: null }],
+          }),
+        ],
+      }),
+    );
+    expect(plain.ok).toBe(true);
+    if (plain.ok) {
+      expect(plain.config.models?.[0]).toEqual({
+        alias: "smart",
+        routes: [{ upstream: "openai", model: "gpt-4o" }],
+        balance: { strategy: "round-robin" },
+      });
+      expect(Object.hasOwn(plain.config.models?.[0] ?? {}, "limits")).toBe(false);
+    }
   });
 });

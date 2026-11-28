@@ -20,7 +20,7 @@ A key binds to the route that served it: **every success re-binds** key → rout
 
 Bindings live only in memory, in an LRU map bounded at `AFFINITY_MAX_ENTRIES = 10_000` entries across all aliases (module constant in `src/gateway/balancer.ts`) — client-supplied keys cannot grow it without bound — and **die on restart**: affinity is a best-effort optimization, never a guarantee, and the gateway advertises no session semantics beyond sticky-while-possible.
 
-The `X-Session-Id` header is recognized at the gateway edge; it is not in the drop list and still reaches the upstream best-effort like any other client header.
+The `X-Session-Id` header is recognized at the gateway edge; it is not in the drop list and crosses into the upstream layer best-effort like any other client header — the openai-compatible upstream's outbound whitelist relays only `Content-Type`/`Accept` to the provider, so the header never reaches a provider ([gateway-upstream.md](../contracts/gateway-upstream.md)).
 
 ## Consequences
 

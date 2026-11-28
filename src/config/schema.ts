@@ -84,13 +84,25 @@ export interface UpstreamConfig {
   /** non-empty; sent upstream as the Bearer credential only */
   apiKey: string;
   /**
-   * Optional TLS SPKI pin: base64 (standard alphabet) of the SHA-256 digest
-   * of the upstream certificate's SubjectPublicKeyInfo DER — exactly 32 bytes
-   * decoded. Absent or empty → the system CA pool verifies the upstream
-   * certificate; non-empty → ONLY the pinned key is accepted (ADR-004).
-   * Inert on a plain-http baseUrl. Compute with `tools/tls-fingerprint.ts`.
-   */
+ * Optional TLS SPKI pin: base64 (standard alphabet) of the SHA-256 digest
+ * of the upstream certificate's SubjectPublicKeyInfo DER — exactly 32 bytes
+ * decoded. Absent, `null`, empty or whitespace-only → the system CA pool
+ * verifies the upstream certificate (the null rule and the empty-string
+ * normalization leave the entry without the key, never with `null` or
+ * `""`); otherwise → ONLY the pinned key is accepted (ADR-004). Inert on a
+ * plain-http baseUrl. Compute with `tools/tls-fingerprint.ts`.
+ */
   tlsFingerprint?: string;
+  /**
+   * Optional outbound proxy this upstream's requests go through (ADR-017):
+   * an `http:` or `socks5:` URL with a non-empty host, an explicit port in
+   * 1..65535, no username/password (proxy credentials never enter the
+   * config) and no path (beyond `/`), query or fragment. Absent, `null`,
+   * empty or whitespace-only → a direct connection (normalized to
+   * `undefined`); otherwise stored trimmed. The value is never echoed into
+   * a problem line — a pasted `user:pass@host` URL must not reach stderr.
+   */
+  proxy?: string;
 }
 
 /** TLS options of the gateway's own listener (`server.tls` in the config file). */
@@ -260,7 +272,7 @@ export const MODEL_KEYS: readonly string[] = ["alias", "routes", "balance", "lim
 export const MODEL_ROUTE_KEYS: readonly string[] = ["upstream", "model", "weight"];
 export const BALANCE_KEYS: readonly string[] = ["strategy"];
 export const LIMITS_KEYS: readonly string[] = ["context", "output"];
-export const UPSTREAM_KEYS: readonly string[] = ["type", "id", "baseUrl", "apiKey", "tlsFingerprint"];
+export const UPSTREAM_KEYS: readonly string[] = ["type", "id", "baseUrl", "apiKey", "tlsFingerprint", "proxy"];
 
 /**
  * A PHC-format password hash prefix (ADR-007): `$argon2id$…` / `$argon2i$…` /
@@ -289,20 +301,30 @@ export function isValidPasswordHash(value: string): boolean {
  */
 const TLS_FINGERPRINT_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
 
-/** Strip every whitespace character (a pin pasted with line wraps still matches). */
-export function normalizeTlsFingerprint(value: string): string {
-  return value.replace(/\s+/g, "");
+/**
+ * Normalize an upstream `tlsFingerprint` value: absent, `null`, empty or
+ * whitespace-only → `undefined` (no pin — the grammar's own "no pin", never
+ * an empty string on the entry); a string → stripped of every whitespace
+ * character (a pin pasted with line wraps still matches). Exported so
+ * `src/config/store.ts` applies the same normalization to its runtime
+ * writes as the startup loader does.
+ */
+export function normalizeTlsFingerprint(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const pin = value.replace(/\s+/g, "");
+  return pin.length > 0 ? pin : undefined;
 }
 
 /**
- * True when `value` is a usable TLS fingerprint pin: the empty string (no
- * pin), or a base64 (standard alphabet) string decoding to exactly 32 bytes.
- * A syntactically wrong pin fails config validation — typos fail loudly at
- * startup, never at the first request (specs/domains/configuration.md).
+ * True when `value` is an acceptable `tlsFingerprint` input: the empty or
+ * whitespace-only string (no pin), or a base64 (standard alphabet) string
+ * decoding to exactly 32 bytes. A syntactically wrong pin fails config
+ * validation — typos fail loudly at startup, never at the first request
+ * (specs/domains/configuration.md).
  */
 export function isValidTlsFingerprint(value: string): boolean {
   const normalized = normalizeTlsFingerprint(value);
-  if (normalized.length === 0) return true;
+  if (normalized === undefined) return true;
   if (!TLS_FINGERPRINT_PATTERN.test(normalized)) return false;
   return Buffer.from(normalized, "base64").length === 32;
 }
@@ -367,6 +389,78 @@ export function normalizeBaseUrl(url: string): string {
   return url.endsWith("/") ? url.slice(0, -1) : url;
 }
 
+/** The proxy schemes an upstream `proxy` may name (ADR-017). */
+export const PROXY_SCHEMES = ["http:", "socks5:"] as const;
+
+/**
+ * Normalize an upstream `proxy` value: absent, `null`, empty or
+ * whitespace-only → `undefined` (a direct connection); a string → trimmed.
+ * Exported so `src/config/store.ts` can apply the same normalization to its
+ * runtime writes as the startup loader does.
+ */
+export function normalizeProxy(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * The port written in a proxy URL's authority, or `undefined` when none was.
+ * Read from the string rather than `URL.port`: the parser drops a port that
+ * equals the scheme's default (`http://proxy:80` → `port === ""`), and the
+ * grammar requires the port to be stated explicitly.
+ */
+function explicitPort(value: string): string | undefined {
+  const schemeEnd = value.indexOf("://");
+  if (schemeEnd === -1) return undefined;
+  const authority = value.slice(schemeEnd + 3).split(/[/?#]/, 1)[0] ?? "";
+  const hostPort = authority.slice(authority.lastIndexOf("@") + 1);
+  return /^(.*):([0-9]+)$/.exec(hostPort)?.[2];
+}
+
+/**
+ * True when `value` is a usable outbound proxy URL (ADR-017): it parses with
+ * `new URL`, its scheme is `http:` or `socks5:`, its host is non-empty, it
+ * carries an explicit port in 1..65535, and it carries no username/password,
+ * no path (beyond `/`), no query and no fragment. A syntactically wrong
+ * proxy fails config validation — typos fail loudly at startup, never at
+ * the first request.
+ */
+export function isValidProxyUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (!(PROXY_SCHEMES as readonly string[]).includes(url.protocol)) return false;
+  if (url.hostname === "") return false;
+  if (url.username !== "" || url.password !== "") return false;
+  if (url.pathname !== "" && url.pathname !== "/") return false;
+  if (url.search !== "" || url.hash !== "") return false;
+  const port = Number(explicitPort(value));
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+/**
+ * Copy a normalized `proxy` into an upstream entry — only when one is
+ * configured; an absent/null/empty value yields no key at all.
+ */
+function normalizedProxy(value: unknown): { proxy: string } | {} {
+  const trimmed = normalizeProxy(value);
+  return trimmed !== undefined ? { proxy: trimmed } : {};
+}
+
+/**
+ * Copy a normalized `tlsFingerprint` into an upstream entry — only when a
+ * pin is configured; an absent value or an empty / whitespace-only string
+ * (the grammar's own "no pin") yields no key at all.
+ */
+function normalizedTlsFingerprint(value: unknown): { tlsFingerprint: string } | {} {
+  const pin = normalizeTlsFingerprint(value);
+  return pin !== undefined ? { tlsFingerprint: pin } : {};
+}
+
 /**
  * Validate and normalize a parsed config value. Collects every problem —
  * unknown keys, grammar violations, missing keys, duplicate ids/aliases,
@@ -375,9 +469,12 @@ export function normalizeBaseUrl(url: string): string {
  * client entries, model entries (with their nested `routes`, `balance` and
  * `limits` blocks) by index, then upstream entries by index, then the
  * cross-block reference problems); returns the normalized config only when
- * the list stays empty. The returned config is deep-frozen: the validated
- * shape is immutable for the process lifetime — the config is read exactly
- * once per start and never reloaded.
+ * the list stays empty. A key written as JSON `null` is not set at any level
+ * (`withoutNulls`): an optional key takes its default, a required key is
+ * reported missing — while the strict-key pass runs over the raw object, so
+ * an unknown key is reported even when its value is `null`. The returned
+ * config is deep-frozen: the validated shape is immutable for the process
+ * lifetime — the config is read exactly once per start and never reloaded.
  */
 export function validateGatewayConfig(value: unknown): ValidatedConfig {
   const problems: string[] = [];
@@ -392,17 +489,23 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     }
   }
 
-  const server = value.server;
-  if (server !== undefined && !isPlainObject(server)) {
+  // Every field read below works on the null-stripped root — a `null` key
+  // is as if it had never been written (the docstring's rule).
+  const root = withoutNulls(value);
+
+  const rawServer = root.server;
+  if (rawServer !== undefined && !isPlainObject(rawServer)) {
     problems.push("server must be a JSON object");
   }
 
-  if (isPlainObject(server)) {
-    for (const key of Object.keys(server)) {
+  if (isPlainObject(rawServer)) {
+    for (const key of Object.keys(rawServer)) {
       if (!SERVER_KEYS.includes(key)) {
         problems.push(`server: unknown key "${key}" (valid keys: ${SERVER_KEYS.join(", ")})`);
       }
     }
+
+    const server = withoutNulls(rawServer);
 
     const listen = server.listen;
     if (listen !== undefined && (typeof listen !== "string" || !isListen(listen))) {
@@ -416,13 +519,15 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
       );
     }
 
-    const tls = server.tls;
-    if (isPlainObject(tls)) {
-      for (const key of Object.keys(tls)) {
+    const rawTls = server.tls;
+    if (isPlainObject(rawTls)) {
+      for (const key of Object.keys(rawTls)) {
         if (!TLS_KEYS.includes(key)) {
           problems.push(`server.tls: unknown key "${key}" (valid keys: ${TLS_KEYS.join(", ")})`);
         }
       }
+
+      const tls = withoutNulls(rawTls);
 
       const enabled = tls.enabled;
       if (enabled === undefined) {
@@ -443,22 +548,24 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
           problems.push(`server.tls: ${field} must be a non-empty string path`);
         }
       }
-    } else if (tls !== undefined) {
+    } else if (rawTls !== undefined) {
       problems.push("server.tls must be a JSON object");
     }
   }
 
-  const auth = value.auth;
-  if (auth !== undefined && !isPlainObject(auth)) {
+  const rawAuth = root.auth;
+  if (rawAuth !== undefined && !isPlainObject(rawAuth)) {
     problems.push("auth must be a JSON object");
   }
 
-  if (isPlainObject(auth)) {
-    for (const key of Object.keys(auth)) {
+  if (isPlainObject(rawAuth)) {
+    for (const key of Object.keys(rawAuth)) {
       if (!AUTH_KEYS.includes(key)) {
         problems.push(`auth: unknown key "${key}" (valid keys: ${AUTH_KEYS.join(", ")})`);
       }
     }
+
+    const auth = withoutNulls(rawAuth);
 
     const enabled = auth.enabled;
     if (enabled === undefined) {
@@ -492,12 +599,12 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     }
   }
 
-  const logLevel = value.logLevel;
+  const logLevel = root.logLevel;
   if (logLevel !== undefined && !isValidLogLevel(logLevel)) {
     problems.push(`logLevel must be one of: ${LOG_LEVELS.join(", ")} (got ${shown(logLevel)})`);
   }
 
-  const clients = value.clients;
+  const clients = root.clients;
   if (clients !== undefined && !Array.isArray(clients)) {
     problems.push("clients must be an array of client entries");
   }
@@ -509,17 +616,19 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
       problems.push("clients must be an array with at least one client entry");
     }
 
-    clients.forEach((entry, index) => {
-      if (!isPlainObject(entry)) {
+    clients.forEach((rawEntry, index) => {
+      if (!isPlainObject(rawEntry)) {
         problems.push(`clients[${index}] must be a JSON object`);
         return;
       }
 
-      for (const key of Object.keys(entry)) {
+      for (const key of Object.keys(rawEntry)) {
         if (!CLIENT_KEYS.includes(key)) {
           problems.push(`clients[${index}]: unknown key "${key}" (valid keys: ${CLIENT_KEYS.join(", ")})`);
         }
       }
+
+      const entry = withoutNulls(rawEntry);
 
       const name = entry.name;
       if (name === undefined) {
@@ -569,7 +678,7 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     }
   }
 
-  const models = value.models;
+  const models = root.models;
   if (models !== undefined && !Array.isArray(models)) {
     problems.push("models must be an array of model entries");
   }
@@ -581,17 +690,19 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
       problems.push("models must be an array with at least one model entry");
     }
 
-    models.forEach((entry, index) => {
-      if (!isPlainObject(entry)) {
+    models.forEach((rawEntry, index) => {
+      if (!isPlainObject(rawEntry)) {
         problems.push(`models[${index}] must be a JSON object`);
         return;
       }
 
-      for (const key of Object.keys(entry)) {
+      for (const key of Object.keys(rawEntry)) {
         if (!MODEL_KEYS.includes(key)) {
           problems.push(`models[${index}]: unknown key "${key}" (valid keys: ${MODEL_KEYS.join(", ")})`);
         }
       }
+
+      const entry = withoutNulls(rawEntry);
 
       const alias = entry.alias;
       if (alias === undefined) {
@@ -614,19 +725,21 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
         problems.push(`models[${index}]: routes must be an array with at least one route entry`);
       } else {
         const seenPairs = new Set<string>();
-        routes.forEach((route, routeIndex) => {
-          if (!isPlainObject(route)) {
+        routes.forEach((rawRoute, routeIndex) => {
+          if (!isPlainObject(rawRoute)) {
             problems.push(`models[${index}]: routes[${routeIndex}] must be a JSON object`);
             return;
           }
 
-          for (const key of Object.keys(route)) {
+          for (const key of Object.keys(rawRoute)) {
             if (!MODEL_ROUTE_KEYS.includes(key)) {
               problems.push(
                 `models[${index}]: routes[${routeIndex}]: unknown key "${key}" (valid keys: ${MODEL_ROUTE_KEYS.join(", ")})`,
               );
             }
           }
+
+          const route = withoutNulls(rawRoute);
 
           const routeUpstream = route.upstream;
           if (routeUpstream === undefined) {
@@ -667,17 +780,19 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
         });
       }
 
-      const balance = entry.balance;
-      if (balance === undefined) {
+      const rawBalance = entry.balance;
+      if (rawBalance === undefined) {
         problems.push(`models[${index}]: missing required key "balance"`);
-      } else if (!isPlainObject(balance)) {
+      } else if (!isPlainObject(rawBalance)) {
         problems.push(`models[${index}]: balance must be a JSON object`);
       } else {
-        for (const key of Object.keys(balance)) {
+        for (const key of Object.keys(rawBalance)) {
           if (!BALANCE_KEYS.includes(key)) {
             problems.push(`models[${index}]: balance: unknown key "${key}" (valid keys: ${BALANCE_KEYS.join(", ")})`);
           }
         }
+
+        const balance = withoutNulls(rawBalance);
 
         const strategy = balance.strategy;
         if (strategy === undefined) {
@@ -691,7 +806,9 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
           // weight on every route; plain round-robin ignores weights, so a
           // configured weight is a config error, never silently ignored.
           const weighted = strategy === "weighted-round-robin";
-          routes.forEach((route, routeIndex) => {
+          routes.forEach((rawRoute, routeIndex) => {
+            // the null-stripped view: a `null` weight is an unweighted route
+            const route = isPlainObject(rawRoute) ? withoutNulls(rawRoute) : rawRoute;
             if (!isPlainObject(route)) return;
             if (weighted && route.weight === undefined) {
               problems.push(
@@ -706,16 +823,18 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
         }
       }
 
-      const limits = entry.limits;
-      if (limits !== undefined) {
-        if (!isPlainObject(limits)) {
+      const rawLimits = entry.limits;
+      if (rawLimits !== undefined) {
+        if (!isPlainObject(rawLimits)) {
           problems.push(`models[${index}]: limits must be a JSON object`);
         } else {
-          for (const key of Object.keys(limits)) {
+          for (const key of Object.keys(rawLimits)) {
             if (!LIMITS_KEYS.includes(key)) {
               problems.push(`models[${index}]: limits: unknown key "${key}" (valid keys: ${LIMITS_KEYS.join(", ")})`);
             }
           }
+
+          const limits = withoutNulls(rawLimits);
 
           if (Object.keys(limits).length === 0) {
             problems.push(`models[${index}]: limits must carry at least one of "context", "output"`);
@@ -756,7 +875,7 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     });
   }
 
-  const upstreams = value.upstreams;
+  const upstreams = root.upstreams;
   if (!Array.isArray(upstreams) || upstreams.length === 0) {
     problems.push("upstreams must be an array with at least one upstream entry");
     return { ok: false, problems };
@@ -764,17 +883,19 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
 
   const seenIds = new Map<string, number[]>();
 
-  upstreams.forEach((entry, index) => {
-    if (!isPlainObject(entry)) {
+  upstreams.forEach((rawEntry, index) => {
+    if (!isPlainObject(rawEntry)) {
       problems.push(`upstreams[${index}] must be a JSON object`);
       return;
     }
 
-    for (const key of Object.keys(entry)) {
+    for (const key of Object.keys(rawEntry)) {
       if (!UPSTREAM_KEYS.includes(key)) {
         problems.push(`upstreams[${index}]: unknown key "${key}" (valid keys: ${UPSTREAM_KEYS.join(", ")})`);
       }
     }
+
+    const entry = withoutNulls(rawEntry);
 
     const type = entry.type;
     if (type === undefined) {
@@ -823,8 +944,10 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
 
     // The problem line names the key and the rule but never echoes the
     // configured value — validation output stays free of pin material the
-    // same way it stays free of apiKey. A pin on a plain-http baseUrl stays
-    // valid but is inert (ADR-004).
+    // same way it stays free of apiKey. An absent, `null`, empty or
+    // whitespace-only value means no pin (the null rule and the empty-string
+    // normalization below — the entry never carries `""` or `null`); a pin
+    // on a plain-http baseUrl stays valid but is inert (ADR-004).
     const tlsFingerprint = entry.tlsFingerprint;
     if (tlsFingerprint !== undefined) {
       if (typeof tlsFingerprint !== "string") {
@@ -835,6 +958,26 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
         problems.push(
           `upstreams[${index}]: tlsFingerprint must be base64 (standard alphabet) decoding to exactly 32 bytes — compute it with tools/tls-fingerprint.ts`,
         );
+      }
+    }
+
+    // The proxy value is never echoed into a problem line — a pasted
+    // `user:pass@host` URL carries credentials that must not reach stderr or
+    // any log (specs/architecture/security-model.md, ADR-017). Absent, null,
+    // empty or whitespace-only means a direct connection.
+    const proxy = entry.proxy;
+    if (proxy !== undefined) {
+      if (typeof proxy !== "string") {
+        problems.push(
+          `upstreams[${index}]: proxy must be a string — an http: or socks5: URL with an explicit port, or null for a direct connection`,
+        );
+      } else {
+        const trimmed = normalizeProxy(proxy);
+        if (trimmed !== undefined && !isValidProxyUrl(trimmed)) {
+          problems.push(
+            `upstreams[${index}]: proxy must be an http: or socks5: URL with a non-empty host, an explicit port in 1-65535, no username/password, and no path, query or fragment`,
+          );
+        }
       }
     }
   });
@@ -868,14 +1011,17 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     return { ok: false, problems };
   }
 
+  // The null-stripped views of the two optional blocks — their raw forms
+  // served only the strict-key passes above.
+  const server = isPlainObject(rawServer) ? withoutNulls(rawServer) : undefined;
   const serverBlock: NormalizedServerConfig = {
-    listen: isPlainObject(server) && typeof server.listen === "string" ? server.listen : DEFAULT_LISTEN,
+    listen: server !== undefined && typeof server.listen === "string" ? server.listen : DEFAULT_LISTEN,
     maxRequestBodyBytes:
-      isPlainObject(server) && isValidMaxRequestBodyBytes(server.maxRequestBodyBytes)
+      server !== undefined && isValidMaxRequestBodyBytes(server.maxRequestBodyBytes)
         ? server.maxRequestBodyBytes
         : DEFAULT_MAX_REQUEST_BODY_BYTES,
   };
-  if (isPlainObject(server) && isPlainObject(server.tls)) {
+  if (server !== undefined && isPlainObject(server.tls)) {
     serverBlock.tls = {
       enabled: server.tls.enabled as boolean,
       ...(typeof server.tls.cert === "string" ? { cert: server.tls.cert } : {}),
@@ -883,13 +1029,15 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
     };
   }
 
-  const authBlock: AuthConfig | undefined = isPlainObject(auth)
-    ? {
-        enabled: auth.enabled as boolean,
-        ...(typeof auth.user === "string" ? { user: auth.user } : {}),
-        ...(typeof auth.passwordHash === "string" ? { passwordHash: auth.passwordHash } : {}),
-      }
-    : undefined;
+  const auth = isPlainObject(rawAuth) ? withoutNulls(rawAuth) : undefined;
+  const authBlock: AuthConfig | undefined =
+    auth !== undefined
+      ? {
+          enabled: auth.enabled as boolean,
+          ...(typeof auth.user === "string" ? { user: auth.user } : {}),
+          ...(typeof auth.passwordHash === "string" ? { passwordHash: auth.passwordHash } : {}),
+        }
+      : undefined;
 
   const clientsBlock: ClientConfig[] | undefined = Array.isArray(clients)
     ? (clients as Record<string, unknown>[]).map((entry) => ({
@@ -925,9 +1073,8 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
         id: entry.id as string,
         baseUrl: normalizeBaseUrl(entry.baseUrl as string),
         apiKey: entry.apiKey as string,
-        ...(typeof entry.tlsFingerprint === "string"
-          ? { tlsFingerprint: normalizeTlsFingerprint(entry.tlsFingerprint) }
-          : {}),
+        ...normalizedTlsFingerprint(entry.tlsFingerprint),
+        ...normalizedProxy(entry.proxy),
       })),
     }),
   };
@@ -940,6 +1087,28 @@ export function validateGatewayConfig(value: unknown): ValidatedConfig {
  */
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A shallow copy of a plain object without its `null`-valued keys — the
+ * grammar's "null means not set" rule, applied one object at a time: a key
+ * written as JSON `null` reads exactly like an omitted key (an optional field
+ * takes its default or is cleared, a required one is reported missing) at
+ * every level of the config. Keys named in `keep` keep their `null` — the
+ * store's optional fields whose explicit clear must not read as "absent from
+ * the patch" (an absent pin or proxy on update keeps the stored value, D7).
+ * The strict-key pass always runs over the raw object, so an unknown key is
+ * reported even when its value is `null`. Exported for `src/config/store.ts`.
+ */
+export function withoutNulls<T extends Record<string, unknown>>(
+  value: T,
+  keep: readonly string[] = [],
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (item !== null || keep.includes(key)) result[key] = item;
+  }
+  return result;
 }
 
 /**

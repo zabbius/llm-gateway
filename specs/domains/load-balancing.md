@@ -87,9 +87,9 @@ Per-route health state machine (`routeId = alias|upstream|model`):
 
 ## Invariants
 
-- Selection is deterministic per alias: `round-robin` rotates routes in config order; `weighted-round-robin` expands each route `weight` times (default 1), so a full cycle is proportional to the weights and repeats exactly; the rotation pointer advances only on an actual selection and stays untouched when nothing is eligible.
+- Selection is deterministic per alias: `round-robin` rotates routes in config order; `weighted-round-robin` expands each route `weight` times (the schema requires the key; the balancer's fallback of 1 is never reached through a valid config), so a full cycle is proportional to the weights and repeats exactly; the rotation pointer advances only on an actual selection and stays untouched when nothing is eligible.
 - Health is keyed per route (`alias|upstream|model`), lives in memory for the process lifetime, is never persisted, never shared across aliases, and resets on restart. A routing-table rebuild — a runtime models mutation hot-applied without a restart ([ADR-014](../decisions/014-runtime-management-crud.md) D9) — starts every route from the neutral state: the old bookkeeping described routes of a prior configuration, so stale verdicts are never carried across a rebuild. Weighted copies of one route share a single health state.
-- Only pre-first-byte failures count (`status >= 500 || status === 429` — synthesized 502/504/502-TLS envelopes, relayed 5xx, relayed 429); a client-caused 4xx (400/401/404, …) leaves health untouched, is relayed unchanged, and triggers no failover.
+- Only pre-first-byte failures count (`status >= 500 || status === 429` — synthesized 502/504/502-TLS/502-proxy envelopes, relayed 5xx, relayed 429); every other answer is servable and is reported as a success — a client-caused 4xx (400/401/404, …) is relayed unchanged, triggers no failover, and resets the route's consecutive-failure count like any success (the loop's single `report(route, true, …)` call).
 - Once a servable response is handed back (including a `200` SSE stream), the answer is final — no failover after the first streamed byte.
 - An alias whose every route is open answers `503 upstream_unavailable` without any upstream contact; failover exhausted within one request relays the last upstream failure response byte-for-byte — upstream bodies pass through untouched.
 - The thresholds are module constants (`ROUTE_FAILURE_THRESHOLD`, `ROUTE_COOLDOWN_MS`, `AFFINITY_MAX_ENTRIES`); the config grammar carries no health or affinity keys.
@@ -100,7 +100,7 @@ Per-route health state machine (`routeId = alias|upstream|model`):
 
 ## Configuration
 
-Route weights and the strategy come from the `models` block's `balance` strategy (grammar in [Configuration](./configuration.md)): `weight` is required to be a positive integer on every route under `weighted-round-robin` and defaults to 1 when absent. The health thresholds live as constants in `src/gateway/balancer.ts` (`ROUTE_FAILURE_THRESHOLD = 3`, `ROUTE_COOLDOWN_MS = 30_000`) and are deliberately not config keys in the MVP, as is the session-affinity bound (`AFFINITY_MAX_ENTRIES = 10_000`, [ADR-010](../decisions/010-session-affinity.md)).
+Route weights and the strategy come from the `models` block's `balance` strategy (grammar in [Configuration](./configuration.md)): `weight` is required to be a positive integer on every route under `weighted-round-robin` (the schema rejects its absence); the balancer falls back to 1 for an absent weight defensively — a case a valid config never reaches. The health thresholds live as constants in `src/gateway/balancer.ts` (`ROUTE_FAILURE_THRESHOLD = 3`, `ROUTE_COOLDOWN_MS = 30_000`) and are deliberately not config keys in the MVP, as is the session-affinity bound (`AFFINITY_MAX_ENTRIES = 10_000`, [ADR-010](../decisions/010-session-affinity.md)).
 
 ## Extension Points
 

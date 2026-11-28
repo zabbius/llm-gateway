@@ -6,7 +6,8 @@
  * A mutation validates the incoming entry against the current collections
  * with the same grammar helpers the startup validator uses
  * (`src/config/schema.ts` — patterns, `BALANCE_STRATEGIES`, `isHttpUrl`,
- * `isValidTlsFingerprint`, `isValidModelAlias`), then writes the resulting
+ * `isValidTlsFingerprint`, `isValidProxyUrl`, `isValidModelAlias`), then
+ * writes the resulting
  * whole configuration back to the config file before it applies the change
  * in memory: the raw file is read, its three mutable sections are replaced,
  * the result goes to a sibling temp file and an atomic rename moves it onto
@@ -27,9 +28,28 @@
  *   `src/config/redact.ts`) is rejected wherever a credential-shaped value
  *   is expected (`apiKey`, `tlsFingerprint`): the mask is a display fact,
  *   never an acceptable credential.
+ * - A JSON `null` body value is the key not set (`withoutNulls` — the
+ *   startup grammar's rule, point-applied): a required or inherited field
+ *   (`type`, `id`, `baseUrl`, `apiKey`, `name`, `models`, `routes`,
+ *   `balance`) reads exactly as if omitted, and an optional field (a route
+ *   `weight`, a single limit, the `limits` block) is absent from the result —
+ *   on update that clears it, those blocks being replaced wholesale.
+ *   `tlsFingerprint` / `proxy` are the two keys whose `null` is read
+ *   explicitly (an absent one keeps the stored value on update, so their
+ *   clear must not collapse into "omitted").
  * - An absent `tlsFingerprint` on an update keeps the stored pin (dropping
  *   a pin silently would widen upstream trust from fail-closed pinning to
- *   system-CA verification, ADR-004); an explicit `null` clears it.
+ *   system-CA verification, ADR-004); an explicit `null` — or the grammar's
+ *   empty / whitespace-only value, the startup loader's own "no pin" —
+ *   clears it. An empty value is normalized to absent, so a stored entry
+ *   never carries `tlsFingerprint: ""`.
+ * - An absent `proxy` on an update keeps the stored outbound proxy (an
+ *   omitted field must never silently change the egress topology, ADR-017);
+ *   an explicit `null` — or the grammar's empty / whitespace-only value —
+ *   clears it to a direct connection. The proxy URL is not a credential (the
+ *   grammar admits no userinfo), so it rides the masked view verbatim, unlike
+ *   `apiKey` / `tlsFingerprint`; a malformed one is still never echoed into a
+ *   problem line.
  * - Deleting a resource that live configuration still references (an
  *   upstream named by a model route, a model named by a client's alias ACL)
  *   is refused with problem lines naming the referencing entries — the
@@ -66,9 +86,12 @@ import {
   isPlainObject,
   isPositiveInteger,
   isValidModelAlias,
+  isValidProxyUrl,
   isValidTlsFingerprint,
   normalizeBaseUrl,
+  normalizeProxy,
   normalizeTlsFingerprint,
+  withoutNulls,
 } from "./schema.ts";
 import type {
   BalanceStrategy,
@@ -165,9 +188,10 @@ export class ConfigStore {
 
   /**
    * Replace an upstream entry identified by its id. Every field is required
-   * except `apiKey` (absent → keep the stored credential) and
-   * `tlsFingerprint` (absent → keep the stored pin, explicit `null` → clear
-   * it). The id itself is immutable.
+   * except `apiKey` (absent → keep the stored credential), `tlsFingerprint`
+   * (absent → keep the stored pin, explicit `null` or the grammar's empty /
+   * whitespace-only value → clear it) and `proxy` (absent → keep the stored
+   * proxy, explicit `null` or empty → clear it). The id itself is immutable.
    */
   updateUpstream(id: string, input: unknown): StoreResult {
     const existing = this.findUpstream(id);
@@ -214,7 +238,9 @@ export class ConfigStore {
 
   /**
    * Replace a model entry identified by its alias. `routes`, `balance` and
-   * `limits` are replaced wholesale; the alias itself is immutable.
+   * `limits` are replaced wholesale (an absent or `null` limits block
+   * leaves the entry without limits — the null rule reads `null` as not
+   * set); the alias itself is immutable.
    */
   updateModel(alias: string, input: unknown): StoreResult {
     const existing = this.findModel(alias);
@@ -419,25 +445,36 @@ export class ConfigStore {
 /**
  * Validate one upstream entry for a create (`existing` absent) or an update
  * (`existing` present: an absent `apiKey` keeps the stored credential, an
- * absent `tlsFingerprint` keeps the stored pin, `null` clears it, and the id
- * — given or inherited — must not collide with `others`). The returned entry
- * is normalized the same way the startup validator normalizes
- * (`normalizeBaseUrl`, `normalizeTlsFingerprint`).
+ * absent `tlsFingerprint` keeps the stored pin while `null` or the grammar's
+ * empty / whitespace-only value clears it, an absent `proxy` keeps the stored
+ * proxy while `null` or empty clears it, and the id — given or inherited —
+ * must not collide with `others`). A `null` value for any other key is the
+ * key not set — it reads exactly as if omitted (the null rule). The returned
+ * entry is normalized the same way the startup validator normalizes
+ * (`normalizeBaseUrl`, `normalizeTlsFingerprint`, `normalizeProxy`) — an
+ * empty pin or proxy never reaches the entry as `""`.
  */
 function validateUpstreamEntry(
-  input: unknown,
+  given: unknown,
   context: { others: readonly UpstreamConfig[]; existing?: UpstreamConfig },
 ): Checked<UpstreamConfig> {
   const problems: string[] = [];
-  if (!isPlainObject(input)) {
+  if (!isPlainObject(given)) {
     return { ok: false, problems: ["upstream entry must be a JSON object"] };
   }
 
-  for (const key of Object.keys(input)) {
+  for (const key of Object.keys(given)) {
     if (!UPSTREAM_KEYS.includes(key)) {
       problems.push(`upstream: unknown key "${key}" (valid keys: ${UPSTREAM_KEYS.join(", ")})`);
     }
   }
+
+  // The grammar's null rule, point-applied: a `null` body value is the key
+  // not set — `type`, `id`, `baseUrl` and `apiKey` read exactly as if
+  // omitted (the strict-key pass above still saw the raw body). The two
+  // optional fields keep their `null`: their explicit clear below must not
+  // collapse into "absent from the patch", which on update means keep (D7).
+  const input = withoutNulls(given, ["tlsFingerprint", "proxy"]);
 
   const type = input.type;
   let validType: UpstreamType | undefined;
@@ -507,11 +544,15 @@ function validateUpstreamEntry(
     validApiKey = apiKey;
   }
 
+  // The pin value is never echoed into a problem line (apiKey-grade output
+  // care, ADR-004). Absent: create → no pin; update → keep the stored pin
+  // (never widen upstream trust by dropping a pin silently). An explicit
+  // `null` clears it; an empty or whitespace-only string is the grammar's
+  // own "no pin" and clears it too — the same normalization the startup
+  // loader applies, so a stored entry never carries `tlsFingerprint: ""`.
   const tlsFingerprint = input.tlsFingerprint;
   let validPin: string | undefined;
   if (tlsFingerprint === undefined) {
-    // absent: create → no pin; update → keep the stored pin (never widen
-    // upstream trust by dropping a pin silently, ADR-004)
     validPin = context.existing?.tlsFingerprint;
   } else if (tlsFingerprint === null) {
     validPin = undefined; // explicit clear
@@ -521,12 +562,47 @@ function validateUpstreamEntry(
     problems.push(
       `upstream: tlsFingerprint must not be the literal ${quoted(CONFIGURED_MASK)} mask — send the pin value, or omit the field to keep the stored one`,
     );
-  } else if (!isValidTlsFingerprint(tlsFingerprint)) {
+  } else {
+    const pin = normalizeTlsFingerprint(tlsFingerprint);
+    if (pin === undefined) {
+      validPin = undefined; // empty / whitespace-only → no pin
+    } else if (!isValidTlsFingerprint(pin)) {
+      problems.push(
+        "upstream: tlsFingerprint must be base64 (standard alphabet) decoding to exactly 32 bytes — compute it with tools/tls-fingerprint.ts",
+      );
+    } else {
+      validPin = pin;
+    }
+  }
+
+  // The proxy value is never echoed into a problem line — a pasted
+  // `user:pass@host` URL carries credentials that must not reach an error
+  // envelope or a log (ADR-017). Absent: create → direct connection; update →
+  // keep the stored proxy (an omitted field must never silently change the
+  // egress topology). An explicit `null` clears it; an empty or
+  // whitespace-only string is the grammar's own "direct connection" and
+  // clears it too — the same normalization the startup loader applies.
+  const proxy = input.proxy;
+  let validProxy: string | undefined;
+  if (proxy === undefined) {
+    validProxy = context.existing?.proxy;
+  } else if (proxy === null) {
+    validProxy = undefined; // explicit clear
+  } else if (typeof proxy !== "string") {
     problems.push(
-      "upstream: tlsFingerprint must be base64 (standard alphabet) decoding to exactly 32 bytes — compute it with tools/tls-fingerprint.ts",
+      "upstream: proxy must be a string — an http: or socks5: URL with an explicit port, or null for a direct connection",
     );
   } else {
-    validPin = normalizeTlsFingerprint(tlsFingerprint);
+    const trimmed = normalizeProxy(proxy);
+    if (trimmed === undefined) {
+      validProxy = undefined; // empty / whitespace-only → a direct connection
+    } else if (!isValidProxyUrl(trimmed)) {
+      problems.push(
+        "upstream: proxy must be an http: or socks5: URL with a non-empty host, an explicit port in 1-65535, no username/password, and no path, query or fragment",
+      );
+    } else {
+      validProxy = trimmed;
+    }
   }
 
   if (problems.length > 0 || validType === undefined || validId === undefined || validBaseUrl === undefined || validApiKey === undefined) {
@@ -540,6 +616,7 @@ function validateUpstreamEntry(
       baseUrl: validBaseUrl,
       apiKey: validApiKey,
       ...(validPin !== undefined ? { tlsFingerprint: validPin } : {}),
+      ...(validProxy !== undefined ? { proxy: validProxy } : {}),
     },
   };
 }
@@ -548,22 +625,28 @@ function validateUpstreamEntry(
  * Validate one model entry for a create or an update. Every route must name
  * a registered upstream id (`context.upstreamIds`), the balance strategy and
  * route weights must agree, and a present `limits` block carries at least
- * one positive integer — the startup validator's rules, point-applied.
+ * one positive integer — the startup validator's rules, point-applied. A
+ * `null` body value is the key not set: a `null` `weight` is an unweighted
+ * route, a `null` limit or `limits` block leaves the entry without it (an
+ * update replaces those wholesale, so absent is cleared), and a `null`
+ * `alias` is inherited from the updated entry like an omitted one.
  */
 function validateModelEntry(
-  input: unknown,
+  given: unknown,
   context: { others: readonly ModelConfig[]; existing?: ModelConfig; upstreamIds: ReadonlySet<string> },
 ): Checked<ModelConfig> {
   const problems: string[] = [];
-  if (!isPlainObject(input)) {
+  if (!isPlainObject(given)) {
     return { ok: false, problems: ["model entry must be a JSON object"] };
   }
 
-  for (const key of Object.keys(input)) {
+  for (const key of Object.keys(given)) {
     if (!MODEL_KEYS.includes(key)) {
       problems.push(`model: unknown key "${key}" (valid keys: ${MODEL_KEYS.join(", ")})`);
     }
   }
+
+  const input = withoutNulls(given);
 
   const alias = input.alias;
   let validAlias: string | undefined;
@@ -593,17 +676,19 @@ function validateModelEntry(
     problems.push("model: routes must be an array with at least one route entry");
   } else {
     const seenPairs = new Set<string>();
-    routes.forEach((route, routeIndex) => {
-      if (!isPlainObject(route)) {
+    routes.forEach((rawRoute, routeIndex) => {
+      if (!isPlainObject(rawRoute)) {
         problems.push(`model: routes[${routeIndex}] must be a JSON object`);
         return;
       }
 
-      for (const key of Object.keys(route)) {
+      for (const key of Object.keys(rawRoute)) {
         if (!MODEL_ROUTE_KEYS.includes(key)) {
           problems.push(`model: routes[${routeIndex}]: unknown key "${key}" (valid keys: ${MODEL_ROUTE_KEYS.join(", ")})`);
         }
       }
+
+      const route = withoutNulls(rawRoute);
 
       const routeUpstream = route.upstream;
       const routeModel = route.model;
@@ -680,7 +765,9 @@ function validateModelEntry(
       // strategy/weight consistency, exactly like the startup validator
       const weighted = strategy === "weighted-round-robin";
       if (Array.isArray(routes)) {
-        routes.forEach((route, routeIndex) => {
+        routes.forEach((rawRoute, routeIndex) => {
+          // the null-stripped view: a `null` weight is an unweighted route
+          const route = isPlainObject(rawRoute) ? withoutNulls(rawRoute) : rawRoute;
           if (!isPlainObject(route)) return;
           if (weighted && route.weight === undefined) {
             problems.push(
@@ -696,17 +783,18 @@ function validateModelEntry(
     }
   }
 
-  const limits = input.limits;
+  const rawLimits = input.limits;
   let validLimits: ModelLimitsConfig | undefined;
-  if (limits !== undefined) {
-    if (!isPlainObject(limits)) {
+  if (rawLimits !== undefined) {
+    if (!isPlainObject(rawLimits)) {
       problems.push("model: limits must be a JSON object");
     } else {
-      for (const key of Object.keys(limits)) {
+      for (const key of Object.keys(rawLimits)) {
         if (!LIMITS_KEYS.includes(key)) {
           problems.push(`model: limits: unknown key "${key}" (valid keys: ${LIMITS_KEYS.join(", ")})`);
         }
       }
+      const limits = withoutNulls(rawLimits);
       if (Object.keys(limits).length === 0) {
         problems.push('model: limits must carry at least one of "context", "output"');
       }
@@ -743,22 +831,26 @@ function validateModelEntry(
  * Validate one client entry for a create or an update. Every listed alias
  * must name a defined `models[].alias` (`context.aliases`); an absent
  * `apiKey` on update keeps the stored credential; the view's mask literal is
- * rejected as a key.
+ * rejected as a key. A `null` body value is the key not set — it reads
+ * exactly as if omitted (`apiKey` included: a required credential cannot be
+ * cleared, so on update it keeps the stored one).
  */
 function validateClientEntry(
-  input: unknown,
+  given: unknown,
   context: { others: readonly ClientConfig[]; existing?: ClientConfig; aliases: ReadonlySet<string> },
 ): Checked<ClientConfig> {
   const problems: string[] = [];
-  if (!isPlainObject(input)) {
+  if (!isPlainObject(given)) {
     return { ok: false, problems: ["client entry must be a JSON object"] };
   }
 
-  for (const key of Object.keys(input)) {
+  for (const key of Object.keys(given)) {
     if (!CLIENT_KEYS.includes(key)) {
       problems.push(`client: unknown key "${key}" (valid keys: ${CLIENT_KEYS.join(", ")})`);
     }
   }
+
+  const input = withoutNulls(given);
 
   const name = input.name;
   let validName: string | undefined;
@@ -849,6 +941,7 @@ function upstreamEntryToJson(entry: UpstreamConfig): Record<string, unknown> {
     baseUrl: entry.baseUrl,
     apiKey: entry.apiKey,
     ...(entry.tlsFingerprint !== undefined ? { tlsFingerprint: entry.tlsFingerprint } : {}),
+    ...(entry.proxy !== undefined ? { proxy: entry.proxy } : {}),
   };
 }
 

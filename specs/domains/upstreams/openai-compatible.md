@@ -6,8 +6,10 @@ The MVP provider upstream: a pure HTTP proxy in front of any provider API that s
 
 ## Key Files
 
-- `src/upstreams/openai-compatible.ts` — `OpenAICompatibleUpstream`: proxying, header policy, timeouts, model mapping, the pinned upstream path (`upstreamFetch`)
+- `src/upstreams/openai-compatible.ts` — `OpenAICompatibleUpstream`: proxying, header policy, timeouts, model-entry normalization (`toModelEntry`), the pinned upstream path (`upstreamFetch`), the outbound-proxy resolution and failure mapping (`proxyFetchUrl`, `dispose`, `upstream_proxy_error`)
 - `src/upstreams/tls-pinning.ts` — the TLS SPKI pinning module it enforces the pin with: `pinnedUpstreamRequest`, `assertPinnedCertificate`, `computeSpkiPin`, the bare-handshake probe for the fingerprint CLI (`fetchLeafCertificate`, `probePinnedLeaf`), `UpstreamTlsPinError`
+- `src/upstreams/proxy.ts` — the outbound-proxy transport primitives (ADR-017): `parseProxyUrl` (the defensive second parse), `resolveProxyTransport` (http: as-is, socks5: through a bridge), `openConnectTunnel` (the pinned path's CONNECT), `UpstreamProxyError`, `PROXY_DIAL_TIMEOUT_MS`
+- `src/upstreams/socks-bridge.ts` — the per-upstream loopback HTTP→SOCKS5 bridge behind a `socks5://` proxy (`SocksBridge`), and the dial-failed marker header the upstream maps to `upstream_proxy_error`
 
 ## Behavior
 
@@ -51,7 +53,7 @@ When the upstream response has `Content-Type: text/event-stream`:
 
 ### TLS pinning (`tlsFingerprint`) — ADR-004
 
-A non-empty `tlsFingerprint` on the config entry switches the upstream's only upstream fetch (`upstreamFetch` — shared by `forward()` and `fetchModels()`) to the pinned path; `http` baseUrls and absent/empty pins keep the plain fetch:
+A non-empty `tlsFingerprint` on the config entry switches the upstream's only upstream fetch (`upstreamFetch` — shared by `forward()` and `fetchModels()`) to the pinned path; `http` baseUrls and absent/empty pins keep the plain fetch (the config grammar normalizes an empty or whitespace-only value away — a normalized entry carries either a full pin or no key, [Configuration](../configuration.md); the module keeps its own non-empty guard, so a directly constructed entry with `""` is unpinned as well):
 
 ```
 upstreamFetch on a pinned upstream (https baseUrl) — pinnedUpstreamRequest:
@@ -80,16 +82,55 @@ Properties that hold on this path:
 - The pinned path does not pool connections — each request pays its own TLS handshake.
 - A pin on a plain-http `baseUrl` stays valid config but is never enforced.
 
+### Outbound proxy (`proxy`) — ADR-017
+
+A configured `proxy` — `http://host:port` or `socks5://host:port`, [ADR-017](../../decisions/017-per-upstream-outbound-proxy.md) — carries **every** outbound call of the upstream through that proxy: `forward()`, both probe legs of `connect()` / `discover()`, and `listModels()`, on the pinned and the unpinned path alike. `null` / absent means a direct connection — the pre-existing behavior, byte for byte. The proxy URL never carries credentials (the config grammar rejects userinfo), so nothing about it is secret.
+
+**Resolution — lazy.** The constructor only reads `config.proxy`. The transport is resolved on the first outbound call (`resolveProxyTransport`, `src/upstreams/proxy.ts`) and retained:
+
+| Configured scheme | Transport | What `fetch` is handed |
+| ----------------- | --------- | ---------------------- |
+| `http://` | Bun's native proxy support | the proxy URL itself — `fetch(url, { ...init, proxy })` |
+| `socks5://` | a per-upstream loopback HTTP→SOCKS5 bridge (`src/upstreams/socks-bridge.ts`, `Bun.listen` on `127.0.0.1:0`) started at resolution | the bridge's `http://127.0.0.1:<port>` — the bridge dials the SOCKS5 server (RFC 1928, no-auth) for every request |
+
+The bridge starts with the first request, never at construction — an upstream whose provider is never contacted never listens — and stops with the instance (`dispose()`), which the registry calls when a runtime CRUD write replaces or removes it ([ADR-014](../../decisions/014-runtime-management-crud.md)) and, in config order, on every instance at shutdown. A `proxy` value that fails its defensive re-parse rejects that call with `UpstreamProxyError` (the config grammar already refused every such value at startup — this is the second gate, not a second grammar).
+
+**Unpinned path.** Without a `tlsFingerprint` — or on a plain-http `baseUrl` — the request is plain `fetch` with the proxy option added and nothing else changed: an `http://` target travels in absolute-form (`GET http://host:port/path HTTP/1.1`) for the proxy to forward; an `https://` target travels through a `CONNECT host:port` tunnel the runtime opens itself, after which TLS runs end to end between the gateway and the origin (system-CA verification unchanged — the proxy sees ciphertext only).
+
+**Pinned path.** With a `tlsFingerprint` on an `https` `baseUrl` the request runs over the pinned connection exactly as above; a configured proxy changes only where the TCP socket comes from:
+
+```
+pinned upstream through a proxy — openPinnedSocket:
+  openConnectTunnel(target, proxy)        proxy.ts: net.connect to the proxy,
+      │           CONNECT host:port HTTP/1.1 — only a 200 hands the socket back
+      │           (PROXY_DIAL_TIMEOUT_MS budget; a refusal is UpstreamProxyError,
+      │            an unreachable proxy a plain error)
+      ▼
+  tls.connect({ socket: tunnel, servername, rejectUnauthorized: false })
+      │ secureConnect
+      ▼
+  assertPinnedCertificate — the same fail-closed check, still BEFORE any request byte
+      │ match
+      ▼
+  node:http request over the verified socket → standard Response (SSE included)
+```
+
+A `socks5://` proxy on the pinned path goes through the bridge the same way: the CONNECT is sent to the bridge's loopback URL, the bridge dials through SOCKS5 and relays the tunnel bytes, and the TLS handshake and the pin check stay between the gateway and the origin.
+
+**Logging.** The bridge logs its lifecycle through the upstream's child logger — `socks bridge listening` / `socks bridge stopped` (info, with the proxy's scheme/host:port). Every proxy failure the upstream maps logs one error line with `code: "upstream_proxy_error"`, the log-safe `reason`, and the proxy's `{ scheme, host, port }` — never credentials (there are none) and never request bytes.
+
 ### Timeouts
 
 | Constant | Default | Applies to |
 | -------- | ------- | ---------- |
 | `CONNECT_PROBE_TIMEOUT_MS` | `10 000` | both legs of the model probe inside `connect()` and `discover()` |
-| `PIN_PROBE_TIMEOUT_MS` | `10 000` | the TLS handshake budget of one pinned upstream connection |
+| `PIN_PROBE_TIMEOUT_MS` | `10 000` | the TLS handshake budget of one pinned upstream connection (starting once the socket — direct or tunnelled — exists) |
+| `PROXY_DIAL_TIMEOUT_MS` | `10 000` | the CONNECT exchange with an http proxy on the pinned path (`proxy.ts`): TCP connect to the proxy plus its status line |
+| `SOCKS_DIAL_TIMEOUT_MS` | `10 000` | the bridge's dial through the SOCKS5 server to the target (`socks-bridge.ts`): TCP connect + greeting + CONNECT reply; a stall is cut and reported as a dial failure |
 | `FORWARD_TIMEOUT_MS` | `120 000` | non-streaming `forward()` end-to-end; for streams — until upstream response headers arrive |
 | `STREAM_IDLE_TIMEOUT_MS` | `300 000` | once streaming: maximum silence between chunks (no total cap) |
 
-Forward timeout expiry maps to the upstream-unreachable error path (`504`, `code: "upstream_timeout"`), including for streams that stall before response headers arrive; an idle-stream expiry ends the SSE response. A failed probe at startup is logged and does not abort.
+Forward timeout expiry maps to the upstream-unreachable error path (`504`, `code: "upstream_timeout"`), including for streams that stall before response headers arrive; an idle-stream expiry ends the SSE response. A failed probe at startup is logged and does not abort. An `http://` proxy that is unreachable or times out during CONNECT is likewise unreachable — `504 upstream_timeout`; a proxy that *refuses* CONNECT is a proxy failure — `502 upstream_proxy_error`. On the `socks5://` path the bridge is loopback, so its own dial through the SOCKS server is the only thing that can fail: every such failure — refused, rejected, unreachable, or cut by `SOCKS_DIAL_TIMEOUT_MS` — is the marked `502`, hence `upstream_proxy_error`.
 
 ## Error Handling
 
@@ -114,6 +155,16 @@ Forward timeout expiry maps to the upstream-unreachable error path (`504`, `code
 
   The message states the fact of the pin mismatch and never certificate bytes, subject, or DNS names; the failure is logged at error level (code + reason). Without a pin, a TLS failure keeps the pre-existing mapping — unreachable upstream, `504 upstream_timeout`.
 
+- The configured outbound proxy refused or failed the connection ([ADR-017](../../decisions/017-per-upstream-outbound-proxy.md)) — a refused `CONNECT` (Bun's `ERR_PROXY_TUNNEL` on the fetch path, the upstream's own CONNECT on the pinned path), a SOCKS dial that could not reach the upstream (the bridge's marked `502`), or an unusable proxy URL — the upstream synthesizes `502` with `type: "api_error"`, `code: "upstream_proxy_error"`:
+
+```json
+{ "error": { "message": "upstream \"openai\" is unreachable through its configured proxy",
+             "type": "api_error",
+             "code": "upstream_proxy_error" } }
+```
+
+  The message states the fact for the client and names neither credentials nor the target's bytes; the error log line carries the proxy's scheme/host:port. A proxy that is merely *down* is **not** a proxy failure when it is an `http://` proxy — the upstream is unreachable, `504 upstream_timeout` — and neither is a target that dies behind a live tunnel (the proxy did its job); a `socks5://` proxy the bridge could not dial is the marked `502` above, whatever the SOCKS server's failure. A pin decision through a proxy keeps `502 upstream_tls_error`. The probe legs name the proxy in their rejection (`upstream "…" is unreachable: proxy failure: …`), so the retained probe `reason` says where the request stopped.
+
 - The upstream performs a single attempt per client request — no retries in the MVP (retry policy is future work).
 
 ## Invariants
@@ -125,11 +176,16 @@ Forward timeout expiry maps to the upstream-unreachable error path (`504`, `code
 - A configured `tlsFingerprint` always fails closed: a pin mismatch — checked on every pinned connection before any request byte is written — surfaces as `502 upstream_tls_error` and never as a relayed response or a degraded-verification success ([ADR-004](../../decisions/004-per-upstream-tls-pinning.md)).
 - At most one upstream attempt happens per client request.
 - The LM Studio native probe leg is best-effort: any of its failures silently skips the leg (debug), and only the standard leg can fail `connect()` or `discover()`; `discover()` never writes the startup snapshot.
+- A configured `proxy` carries every outbound call of the upstream — forwards, both probe legs, listings — on the pinned and the unpinned path alike; a proxy URL never carries credentials, and no `Proxy-Authorization` is ever sent ([ADR-017](../../decisions/017-per-upstream-outbound-proxy.md)).
+- Through a proxy the pin check still precedes every request byte: the CONNECT tunnel supplies only the TCP socket, the TLS handshake and the pin decision happen over it, so a mismatching upstream never receives a byte of the request.
+- A proxy failure is reported as what it is — `502 upstream_proxy_error` — never as a relayed upstream verdict, a timeout, or a pin decision; an unreachable or timed-out `http://` proxy, or a dead target behind a live tunnel, stays `504 upstream_timeout`, while a `socks5://` proxy the bridge could not dial is the marked `502` — this very code.
+- A `socks5://` bridge listens on loopback only, starts with the first outbound call, and stops with its instance (`dispose()`).
 
 ## Related Specs
 
 - [Upstreams](./README.md) — domain overview and registry
 - [Upstream contract](./upstream-contract.md) — interface and lifecycle this module implements
-- [Configuration](../configuration.md) — `baseUrl` / `apiKey` / `tlsFingerprint` validation rules
+- [Configuration](../configuration.md) — `baseUrl` / `apiKey` / `tlsFingerprint` / `proxy` validation rules
 - [Observability](../observability.md) — what this upstream logs per level (never secrets)
 - [ADR-004: per-upstream TLS SPKI pinning](../../decisions/004-per-upstream-tls-pinning.md) — the decision behind the pinned path this module implements
+- [ADR-017: per-upstream outbound proxy](../../decisions/017-per-upstream-outbound-proxy.md) — the `proxy` field and the transport this module honors it with

@@ -5,11 +5,13 @@
  *
  * The view is built field by field — never by spreading a config entry:
  * every `apiKey` (upstream or client) is always the fixed mask, a configured
- * `tlsFingerprint` becomes the same mask, an absent one becomes `null`. The
- * real key and pin values are simply not copied, so no handler downstream of
- * this function can serialize them. `server` mirrors the config's listener
- * block verbatim — `listen`, the request-body cap and the `cert`/`key` PEM
- * paths are not secret.
+ * `tlsFingerprint` becomes the same mask, an absent one becomes `null`;
+ * `baseUrl` and `proxy` are copied verbatim (neither can carry a credential —
+ * the proxy grammar rejects userinfo, ADR-017), an absent `proxy` becomes
+ * `null`. The real key and pin values are simply not copied, so no handler
+ * downstream of this function can serialize them. `server` mirrors the
+ * config's listener block verbatim — `listen`, the request-body cap and the
+ * `cert`/`key` PEM paths are not secret.
  * The mask is the view's own literal `[Configured]`,
  * deliberately distinct from the logging layer's censor (`[Redacted]`,
  * src/logging/logger.ts): the view marks "a credential is configured here",
@@ -33,6 +35,8 @@ export interface RedactedUpstreamConfig {
   apiKey: string;
   /** the fixed mask when configured, `null` when absent */
   tlsFingerprint: string | null;
+  /** verbatim outbound proxy URL — not secret (the grammar admits no userinfo); `null` when absent (ADR-017) */
+  proxy: string | null;
 }
 
 /** TLS options of the redacted view — paths verbatim, absent values as `null`. */
@@ -193,6 +197,7 @@ export function redactedConfigView(config: NormalizedGatewayConfig): RedactedGat
       baseUrl: entry.baseUrl,
       apiKey: CONFIGURED_MASK,
       tlsFingerprint: entry.tlsFingerprint !== undefined ? CONFIGURED_MASK : null,
+      proxy: entry.proxy ?? null,
     })),
   };
 }

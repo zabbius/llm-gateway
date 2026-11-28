@@ -7,14 +7,22 @@
  * upstream 4xx JSON relayed as-is, 502/502-empty synthesis, 504 on timeout,
  * and connect() probe failures surfacing to the registry as a rejection with
  * a log-safe reason (the registry warns and retains the outcome).
+ *
+ * The outbound-proxy block (ADR-017) runs the same surface through the
+ * test-only proxy doubles: an http:// proxy (absolute-form for http targets,
+ * CONNECT for https), a socks5:// proxy through its in-process bridge, and
+ * the failure mapping of each (upstream_proxy_error vs upstream_timeout).
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import net from "node:net";
 import type pino from "pino";
-import type { ProxyRequest, ModelEntry } from "./upstream.ts";
+import type { ProxyRequest, ModelEntry, UpstreamConfig } from "./upstream.ts";
 import {
   OpenAICompatibleUpstream,
   type OpenAICompatibleTimeouts,
 } from "./openai-compatible.ts";
+import { MockHttpProxy } from "./testing/mock-http-proxy.ts";
+import { httpResponse, MockRawTarget, MockSocks5Server, pairTo } from "./testing/mock-socks.ts";
 
 /** Minimal capturing stand-in for the injected pino child logger. */
 function fakeLogger(bindings: Record<string, unknown> = {}): {
@@ -50,6 +58,8 @@ interface CapturedRequest {
 }
 
 const servers: Array<{ stop(force?: boolean): void }> = [];
+const proxies: MockHttpProxy[] = [];
+const socks: Array<{ stop(): void }> = [];
 
 /** Start a mock OpenAI upstream; every request is captured (body read as text). */
 function startUpstream(handler: (req: Request, url: URL) => Response | Promise<Response>): {
@@ -76,15 +86,23 @@ function startUpstream(handler: (req: Request, url: URL) => Response | Promise<R
 afterEach(() => {
   for (const server of servers) server.stop(true);
   servers.length = 0;
+  for (const proxy of proxies) proxy.stop();
+  proxies.length = 0;
+  for (const server of socks) server.stop();
+  socks.length = 0;
 });
 
-function makeUpstream(baseUrl: string, timeouts: OpenAICompatibleTimeouts = {}): {
+function makeUpstream(
+  baseUrl: string,
+  timeouts: OpenAICompatibleTimeouts = {},
+  config: Pick<UpstreamConfig, "proxy"> = {},
+): {
   upstream: OpenAICompatibleUpstream;
   lines: ReturnType<typeof fakeLogger>["lines"];
 } {
   const { logger, lines } = fakeLogger();
   const upstream = new OpenAICompatibleUpstream(
-    { type: "openai-compatible", id: "openai", baseUrl, apiKey: API_KEY },
+    { type: "openai-compatible", id: "openai", baseUrl, apiKey: API_KEY, ...config },
     logger,
     timeouts,
   );
@@ -645,5 +663,200 @@ describe("OpenAICompatibleUpstream", () => {
     expect(models.map((model) => model.id)).toEqual(["a"]); // standard answer only — never merged
     expect(requests).toHaveLength(1);
     expect(requests[0]?.path).toBe("/v1/models");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// outbound proxy (ADR-017): every outbound call honors config.proxy
+// ---------------------------------------------------------------------------
+
+/** A loopback port nothing listens on — bound, read, released. */
+function closedPort(): number {
+  const listener = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, error() {} } });
+  const port = listener.port;
+  listener.stop(true);
+  return port;
+}
+
+/** Resolve when a loopback port accepts a TCP connection; reject when it refuses one. */
+function portAccepts(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", () => resolve(false));
+  });
+}
+
+/** The `error` object of a gateway-synthesized envelope. */
+async function errorOf(response: Response): Promise<{ type: string; code: string; message: string }> {
+  return ((await response.json()) as { error: { type: string; code: string; message: string } }).error;
+}
+
+/**
+ * A raw origin behind the SOCKS double that speaks just enough HTTP for the
+ * requests the bridge forwards: the model list for the probe legs, a chat
+ * completion otherwise. Only a request head is answered — a body chunk that
+ * trails its head never produces a second response.
+ */
+function startRawOrigin(): MockRawTarget {
+  return new MockRawTarget((data, respond) => {
+    const text = data.toString("latin1");
+    if (!/^(GET|POST) \S+ HTTP\/1\.[01]\r\n/.test(text)) return;
+    const path = text.split(" ")[1] ?? "/";
+    const body = path.startsWith("/v1/models")
+      ? JSON.stringify({ data: [{ id: "socks-model", object: "model", created: 1, owned_by: "system" }] })
+      : JSON.stringify({ choices: [{ message: { content: "via socks" } }] });
+    respond.write(httpResponse(body));
+    respond.end();
+  }).start();
+}
+
+describe("OpenAICompatibleUpstream outbound proxy (http://)", () => {
+  test("an http:// upstream is reached in absolute-form and the answer relayed", async () => {
+    const target = startUpstream(() => Response.json({ choices: [{ message: { content: "proxied" } }] }));
+    const proxy = new MockHttpProxy().start();
+    proxies.push(proxy);
+    const { upstream } = makeUpstream(target.baseUrl, {}, { proxy: proxy.url });
+
+    const response = await upstream.forward(proxyRequest({ body: streamOf(JSON.stringify({ model: "m", stream: false })) }));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ choices: [{ message: { content: "proxied" } }] });
+
+    // absolute-form on the wire to the proxy, origin-form at the target
+    expect(proxy.requests).toHaveLength(1);
+    expect(proxy.requests[0]?.method).toBe("POST");
+    expect(proxy.requests[0]?.url).toBe(`${target.baseUrl}/chat/completions`);
+    expect(proxy.requests[0]?.headers.join("\n")).toMatch(/transfer-encoding:\s*chunked/i); // a streaming body
+    expect(proxy.connects).toHaveLength(0); // a plain-http target never needs a tunnel
+    expect(target.requests).toHaveLength(1);
+    expect(target.requests[0]?.path).toBe("/v1/chat/completions");
+    expect(target.requests[0]?.body).toBe(JSON.stringify({ model: "m", stream: false })); // decoded by the target
+    expect(target.requests[0]?.headers.authorization).toBe(`Bearer ${API_KEY}`); // the one credential, unchanged
+  });
+
+  test("both legs of the startup probe go through the proxy — merged native-first", async () => {
+    const target = startUpstream((_req, url) =>
+      url.pathname === "/api/v0/models"
+        ? Response.json({ data: [{ id: "native", object: "model", created: 1, owned_by: "lmstudio" }] })
+        : Response.json({ data: [{ id: "standard", object: "model", created: 1, owned_by: "system" }] }),
+    );
+    const proxy = new MockHttpProxy().start();
+    proxies.push(proxy);
+    const { upstream } = makeUpstream(target.baseUrl, {}, { proxy: proxy.url });
+
+    await upstream.connect();
+    expect(upstream.status()?.probe).toBe("ok");
+    expect(upstream.status()?.models?.map((model) => model.id)).toEqual(["native", "standard"]);
+    expect(proxy.requests.map((request) => request.url).sort()).toEqual(
+      [`${target.baseUrl}/models`, `${target.baseUrl.slice(0, -"/v1".length)}/api/v0/models`].sort(),
+    );
+  });
+
+  test("a proxy that is down leaves the upstream unreachable — 504 upstream_timeout, not a proxy error", async () => {
+    const { upstream, lines } = makeUpstream("http://127.0.0.1:9/v1", {}, { proxy: `http://127.0.0.1:${closedPort()}` });
+
+    const response = await upstream.forward(proxyRequest());
+    expect(response.status).toBe(504);
+    expect(await errorOf(response)).toEqual({
+      type: "api_error",
+      code: "upstream_timeout",
+      message: expect.stringContaining("unreachable"),
+    });
+    expect(lines.some((line) => (line.obj as { code?: string } | undefined)?.code === "upstream_proxy_error")).toBe(
+      false,
+    );
+  });
+
+  test("a failed probe names the proxy in its reason", async () => {
+    const { upstream } = makeUpstream("http://127.0.0.1:9/v1", {}, { proxy: `socks5://127.0.0.1:${closedPort()}` });
+
+    await expect(upstream.connect()).rejects.toThrow(/proxy failure: .*dial/i);
+  });
+});
+
+describe("OpenAICompatibleUpstream outbound proxy (socks5://)", () => {
+  test("the probe and forward() both travel through the bridge and the SOCKS server", async () => {
+    const origin = startRawOrigin();
+    socks.push(origin);
+    const socksServer = new MockSocks5Server("accept", pairTo(origin)).start();
+    socks.push(socksServer);
+    const proxyUrl = `socks5://127.0.0.1:${socksServer.port}`;
+    const { upstream, lines } = makeUpstream(`http://${origin.hostPort}/v1`, {}, { proxy: proxyUrl });
+
+    await upstream.connect();
+    expect(upstream.status()?.models?.map((model) => model.id)).toEqual(["socks-model"]);
+    expect(socksServer.connects.length).toBeGreaterThanOrEqual(2); // both probe legs
+    expect(socksServer.connects.every((connect) => connect.port === origin.port)).toBe(true);
+
+    const before = socksServer.connects.length;
+    const response = await upstream.forward(proxyRequest({ body: streamOf(JSON.stringify({ model: "m", stream: false })) }));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ choices: [{ message: { content: "via socks" } }] });
+    expect(socksServer.connects.length).toBeGreaterThan(before);
+
+    // the bridge lifecycle is logged with the proxy it serves
+    const listening = lines.find((line) => line.msg === "socks bridge listening");
+    expect(listening?.level).toBe("info");
+    expect((listening?.obj as { proxy?: string }).proxy).toBe(proxyUrl);
+  });
+
+  test("a SOCKS dial failure surfaces as 502 upstream_proxy_error", async () => {
+    const socksServer = new MockSocks5Server("refuse_connect").start();
+    socks.push(socksServer);
+    const proxyUrl = `socks5://127.0.0.1:${socksServer.port}`;
+    const { upstream, lines } = makeUpstream("http://127.0.0.1:9/v1", {}, { proxy: proxyUrl });
+
+    const response = await upstream.forward(proxyRequest());
+    expect(response.status).toBe(502);
+    expect(await errorOf(response)).toEqual({
+      type: "api_error",
+      code: "upstream_proxy_error",
+      message: 'upstream "openai" is unreachable through its configured proxy',
+    });
+    // the log line carries the code and the proxy's scheme/host:port — nothing else to carry
+    const failure = lines.find((line) => line.msg === "upstream proxy failed — synthesizing 502");
+    expect(failure?.level).toBe("error");
+    expect((failure?.obj as { code?: string }).code).toBe("upstream_proxy_error");
+    expect((failure?.obj as { proxy?: unknown }).proxy).toEqual({
+      scheme: "socks5",
+      host: "127.0.0.1",
+      port: socksServer.port,
+    });
+  });
+
+  test("the transport is lazy and dispose() stops the bridge — its loopback port closes", async () => {
+    const origin = startRawOrigin();
+    socks.push(origin);
+    const socksServer = new MockSocks5Server("accept", pairTo(origin)).start();
+    socks.push(socksServer);
+    const { upstream, lines } = makeUpstream(`http://${origin.hostPort}/v1`, {}, {
+      proxy: `socks5://127.0.0.1:${socksServer.port}`,
+    });
+    // nothing listens before the first outbound call
+    expect(lines.some((line) => line.msg === "socks bridge listening")).toBe(false);
+
+    const response = await upstream.forward(proxyRequest());
+    expect(response.status).toBe(200);
+    const listen = (lines.find((line) => line.msg === "socks bridge listening")?.obj as { listen?: string })
+      .listen;
+    const bridgePort = Number(/:(\d+)$/.exec(listen ?? "")?.[1]);
+    expect(Number.isInteger(bridgePort)).toBe(true);
+    expect(await portAccepts(bridgePort)).toBe(true);
+
+    upstream.dispose();
+    expect(await portAccepts(bridgePort)).toBe(false);
+    expect(lines.some((line) => line.msg === "socks bridge stopped")).toBe(true);
+  });
+
+  test("without a proxy nothing starts and dispose() is a no-op", async () => {
+    const target = startUpstream(() => Response.json({ choices: [{ message: { content: "direct" } }] }));
+    const { upstream, lines } = makeUpstream(target.baseUrl);
+    const response = await upstream.forward(proxyRequest());
+    expect(response.status).toBe(200);
+    expect(() => upstream.dispose()).not.toThrow();
+    expect(lines.some((line) => line.msg.startsWith("socks bridge"))).toBe(false);
   });
 });

@@ -10,6 +10,7 @@ Navigation for the specification system. One glance to find the right document f
 | Add an upstream for a NEW provider type | [domains/upstreams/README.md](./domains/upstreams/README.md), [domains/upstreams/upstream-contract.md](./domains/upstreams/upstream-contract.md) | [contracts/gateway-upstream.md](./contracts/gateway-upstream.md), [decisions/001-upstream-per-provider-type.md](./decisions/001-upstream-per-provider-type.md), [decisions/009-alias-table-routing.md](./decisions/009-alias-table-routing.md), [domains/configuration.md](./domains/configuration.md) |
 | Add a connection of an EXISTING type (e.g. another OpenAI-compatible provider) | [domains/upstreams/openai-compatible.md](./domains/upstreams/openai-compatible.md) | [domains/configuration.md](./domains/configuration.md), [contracts/gateway-upstream.md](./contracts/gateway-upstream.md) |
 | Pin a self-signed / internal-PKI upstream (TLS `tlsFingerprint`) | [decisions/004-per-upstream-tls-pinning.md](./decisions/004-per-upstream-tls-pinning.md) | [domains/upstreams/openai-compatible.md](./domains/upstreams/openai-compatible.md), [domains/configuration.md](./domains/configuration.md), `tools/tls-fingerprint.ts` |
+| Route one upstream through an outbound proxy (`proxy`) | [decisions/017-per-upstream-outbound-proxy.md](./decisions/017-per-upstream-outbound-proxy.md) | [domains/configuration.md](./domains/configuration.md) (`proxy` grammar), [domains/upstreams/openai-compatible.md](./domains/upstreams/openai-compatible.md), [contracts/gateway-upstream.md](./contracts/gateway-upstream.md) |
 | Change the routing scheme (model aliases, per-client ACL, dispatch) | [domains/routing.md](./domains/routing.md), [decisions/009-alias-table-routing.md](./decisions/009-alias-table-routing.md) | [contracts/client-gateway.md](./contracts/client-gateway.md), [architecture/data-flow.md](./architecture/data-flow.md), [domains/configuration.md](./domains/configuration.md) (`models` schema) |
 | Change balancing, route health, or session affinity (strategies, weights, failover, cooldowns, 503 semantics, affinity keys/bindings) | [domains/load-balancing.md](./domains/load-balancing.md), [decisions/010-session-affinity.md](./decisions/010-session-affinity.md) | [domains/routing.md](./domains/routing.md), [architecture/data-flow.md](./architecture/data-flow.md), [contracts/client-gateway.md](./contracts/client-gateway.md) (the 503 envelope, the `X-Session-Id` header), [domains/configuration.md](./domains/configuration.md) (`balance` grammar) |
 | Change the client-facing OpenAI surface (endpoints, error envelope, model list shape) | [contracts/client-gateway.md](./contracts/client-gateway.md) | [domains/routing.md](./domains/routing.md), [architecture/data-flow.md](./architecture/data-flow.md), [decisions/005-gateway-surface-namespace.md](./decisions/005-gateway-surface-namespace.md) (surface namespace) |
@@ -93,7 +94,7 @@ specs/
 ├── domains/
 │   ├── upstreams/
 │   │   ├── README.md                            upstream domain overview
-│   │   ├── upstream-contract.md                 the Upstream interface, connect → serve lifecycle
+│   │   ├── upstream-contract.md                 the Upstream interface, connect → serve → dispose lifecycle
 │   │   └── openai-compatible.md                 MVP upstream: pure proxy to an OpenAI-compatible provider API
 │   ├── routing.md                               alias routing, client-scoped model catalog, dispatch, startup route inventory
 │   ├── load-balancing.md                        per-alias route selection strategies, in-memory route health, session affinity, failover
@@ -123,9 +124,10 @@ specs/
     ├── 011-management-live-model-listing.md     operator-triggered live model listing on the management surface (ADR-011)
     ├── 012-alias-model-metadata.md              alias model metadata: c0wrk detector port, discovery at start + on demand, min-rule limits, capability-AND (ADR-012)
     ├── 013-openapi-docs-surface.md              the /docs documentation surface: build-time-generated OpenAPI artifact + Swagger UI shell, ungated static metadata (ADR-013)
-    ├── 014-runtime-management-crud.md           runtime management CRUD on /api: config.json write-back (tmp + atomic rename), hot apply, discover replacement, the mutation ADR (ADR-014)
+    ├── 014-runtime-management-crud.md           runtime management CRUD on /api: config.json write-back (tmp + atomic rename), hot apply, `meta` on the models read, the mutation ADR (ADR-014)
     ├── 015-adopt-react-bootstrap.md             react-bootstrap as the SPA's component layer over the Bootstrap CSS, the shared ConfirmModal (ADR-015)
-    └── 016-discover-folded-into-live-listing.md the discover mount folded into the live listing's `discover=1` query parameter (ADR-016)
+    ├── 016-discover-folded-into-live-listing.md the discover mount folded into the live listing's `discover=1` query parameter (ADR-016)
+    └── 017-per-upstream-outbound-proxy.md       per-upstream outbound proxy: the optional `proxy` field (http:/socks5: URL, explicit port, no userinfo), Bun 1.4.5 fetch facts (ADR-017)
 ```
 
-All 32 spec files (3 architecture + 10 domain + 3 contracts + 16 ADRs) are listed above, alongside META.md, this INDEX, and the ADR template. After adding or removing a spec file, update this listing — see [META.md](./META.md), Update Protocol.
+All 33 spec files (3 architecture + 10 domain + 3 contracts + 17 ADRs) are listed above, alongside META.md, this INDEX, and the ADR template. After adding or removing a spec file, update this listing — see [META.md](./META.md), Update Protocol.

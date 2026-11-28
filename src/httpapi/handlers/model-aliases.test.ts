@@ -521,6 +521,39 @@ describe("PUT /api/models/:alias", () => {
     expect(made.get("ollama")?.forwards).toBe(0);
   });
 
+  test("a null body value is the key not set: a null alias is inherited, a null weight is unweighted, null limits fall away", async () => {
+    const { app } = await gateway();
+
+    const cleared = await app.request("/api/models/smart", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        alias: null,
+        routes: [{ upstream: "openai", model: "gpt-4o", weight: null }],
+        balance: { strategy: "round-robin" },
+        limits: null,
+      }),
+    });
+    expect(cleared.status).toBe(200);
+    const clearedBody = JSON.parse(await bodyText(cleared)) as ManagedAliasBody;
+    expect(clearedBody.alias).toBe("smart");
+    expect(clearedBody.routes).toEqual([{ upstream: "openai", model: "gpt-4o", weight: null }]);
+    expect(clearedBody.limits).toBeNull();
+
+    // a null single limit falls away; the view reports the absent dimension as null
+    const partial = await app.request("/api/models/smart", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        routes: [{ upstream: "openai", model: "gpt-4o", weight: 1 }],
+        balance: { strategy: "weighted-round-robin" },
+        limits: { context: null, output: 4096 },
+      }),
+    });
+    expect(partial.status).toBe(200);
+    expect((JSON.parse(await bodyText(partial)) as ManagedAliasBody).limits).toEqual({ context: null, output: 4096 });
+  });
+
   test("unknown alias is the 404 envelope before any validation; a differing body alias is refused (immutable)", async () => {
     const { app } = await gateway();
 

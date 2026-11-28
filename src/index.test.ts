@@ -19,11 +19,13 @@
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type pino from "pino";
 import type { Upstream, UpstreamConfig, UpstreamStatus, ModelEntry, ProxyRequest } from "./upstreams/upstream.ts";
 import type { UpstreamFactories } from "./upstreams/registry.ts";
+import { MockRawTarget, MockSocks5Server, httpResponse, pairTo } from "./upstreams/testing/mock-socks.ts";
 import { parseListen, startGateway, type GatewayHandles } from "./index.ts";
 
 /** A guaranteed-free loopback port (bind an ephemeral server, close it). */
@@ -33,6 +35,18 @@ function freePort(): number {
   server.stop(true);
   if (port === undefined) throw new Error("ephemeral server reported no port");
   return port;
+}
+
+/** Resolve when a loopback port accepts a TCP connection; false when it refuses one. */
+function portAccepts(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", () => resolve(false));
+  });
 }
 
 /** Write a config file into a fresh temp dir; returns the path (caller cleans up). */
@@ -244,6 +258,80 @@ describe("startGateway (in-process wiring)", () => {
       cleanupConfig(path);
     }
   });
+
+  test("stop() disposes the registry first — a SOCKS bridge's loopback port is refused afterwards", async () => {
+    // The origin behind the SOCKS double: the model list for the probe legs,
+    // a chat completion otherwise (the openai-compatible proxy test's shape).
+    const origin = new MockRawTarget((data, respond) => {
+      const text = data.toString("latin1");
+      if (!/^(GET|POST) \S+ HTTP\/1\.[01]\r\n/.test(text)) return;
+      const requestPath = text.split(" ")[1] ?? "/";
+      const body = requestPath.startsWith("/v1/models")
+        ? JSON.stringify({ data: [{ id: "socks-model", object: "model", created: 1, owned_by: "system" }] })
+        : JSON.stringify({ choices: [{ message: { content: "via socks" } }] });
+      respond.write(httpResponse(body));
+      respond.end();
+    }).start();
+    const socks = new MockSocks5Server("accept", pairTo(origin)).start();
+    const port = freePort();
+    const path = tempConfig(
+      configJson(
+        `127.0.0.1:${port}`,
+        [
+          {
+            type: "openai-compatible",
+            id: "proxied",
+            baseUrl: `http://${origin.hostPort}/v1`,
+            apiKey: "sk-upstream-socks-secret",
+            proxy: `socks5://127.0.0.1:${socks.port}`,
+          },
+        ],
+        [{ alias: "proxied-alias", upstream: "proxied", model: "socks-model" }],
+        [e2eClient(["proxied-alias"])],
+      ),
+    );
+    let handles: GatewayHandles | undefined;
+    try {
+      handles = await startGateway({ configPath: path }); // the real factory map
+
+      // The startup probe already resolved the transport, so the bridge is
+      // listening by the time the gateway is handed out. Read its loopback
+      // port off the instance (implementation-private, test-only access —
+      // the interface exposes no accessor).
+      const instance = handles.registry.find("proxied") as unknown as {
+        transport?: { kind: string; bridge?: { port: number } };
+      };
+      expect(instance.transport?.kind).toBe("socks5");
+      const bridgePort = instance.transport?.bridge?.port;
+      if (bridgePort === undefined) throw new Error("the socks bridge reported no port");
+      expect(await portAccepts(bridgePort)).toBe(true);
+
+      // The bridge is live end to end: a request through the alias reaches
+      // the origin behind SOCKS and the answer is relayed back.
+      const chat = await fetch(`http://127.0.0.1:${port}/llm/v1/chat/completions`, {
+        method: "POST",
+        headers: bearerClient(),
+        body: JSON.stringify({ model: "proxied-alias", messages: [{ role: "user", content: "ping" }] }),
+      });
+      expect(chat.status).toBe(200);
+      const answered = (await chat.json()) as { choices: Array<{ message: { content: string } }> };
+      expect(answered.choices[0]?.message.content).toBe("via socks");
+
+      handles.stop();
+
+      // The bridge went with the registry — before the listener stopped.
+      expect(await portAccepts(bridgePort)).toBe(false);
+      await expect(
+        fetch(`http://127.0.0.1:${port}/llm/v1/models`, { headers: bearerClient() }),
+      ).rejects.toThrow();
+    } finally {
+      handles?.stop();
+      socks.stop();
+      origin.stop();
+      cleanupConfig(path);
+    }
+  }, 30_000);
+
   test("auth enabled: /api gated by the session cookie — /llm/v1 admits the client key, the shell stays open", async () => {
     const port = freePort();
     const password = "operator-password";

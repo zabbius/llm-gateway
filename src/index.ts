@@ -23,6 +23,13 @@
  * invariant 7): config loaded (path + upstream id/type pairs), per-upstream
  * probe results, listening address (with the fact of TLS — never the PEM
  * contents), shutdown. The raw config and key material are never logged.
+ *
+ * Shutdown (SIGINT/SIGTERM in production, `GatewayHandles.stop()` in tests
+ * and embedding) runs in a fixed order too: the registry disposes every
+ * upstream first — in config order, each instance's optional `dispose()` —
+ * so a resource owned beyond a request (a `socks5://` proxy's bridge
+ * listener, ADR-017) never outlives the gateway; only then does the
+ * listener stop, aborting in-flight connections.
  */
 import { loadConfigOrExit, resolveConfigPath } from "./config/load.ts";
 import type { NormalizedGatewayConfig } from "./config/schema.ts";
@@ -67,7 +74,13 @@ export interface GatewayHandles {
   readonly app: Hono<GatewayEnv>;
   readonly server: GatewayServer;
   readonly logger: pino.Logger;
-  /** Close the listener, aborting in-flight connections (tests, shutdown). */
+  /**
+   * Stop the gateway: dispose every upstream (config order — an instance's
+   * optional `dispose()` releases what it owns beyond a request, e.g. a
+   * `socks5://` proxy's bridge listener), then close the listener, aborting
+   * in-flight connections. The order is fixed: an owned resource never
+   * outlives the listener (tests, shutdown).
+   */
   stop(): void;
 }
 
@@ -273,7 +286,13 @@ export async function startGateway(options: StartGatewayOptions = {}): Promise<G
     app,
     server,
     logger,
-    stop: () => server.stop(true),
+    stop: () => {
+      // Dispose first: every upstream releases what it owns beyond a request
+      // (a socks5 bridge's listener, ADR-017) while the gateway is still
+      // whole; only then do in-flight connections abort with the listener.
+      registry.dispose();
+      server.stop(true);
+    },
   };
 }
 

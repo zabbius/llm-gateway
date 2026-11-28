@@ -20,7 +20,11 @@
  * the retained statuses the `GET /api/status` snapshot serves. The alias
  * routing table resolves upstream instances through `find()` at selection
  * time, so a replaced or removed instance hot-applies to `/llm/v1` without
- * a routing-table rebuild or a listener restart.
+ * a routing-table rebuild or a listener restart. Each of those writes also
+ * disposes the instance it retires, and teardown is the registry's one
+ * read-side lifecycle call: `dispose()` releases every instance in config
+ * order, driven by the entry point before it stops the listener
+ * (specs/architecture/data-flow.md).
  *
  * `find()` matches upstream ids
  * exactly (never fuzzy — specs/architecture/data-flow.md anti-patterns),
@@ -206,9 +210,12 @@ export class UpstreamRegistry {
     const logger = this.loggerFor(entry.id);
     const upstream = buildUpstream(entry, this.factories, logger);
     const status = await probeUpstream(upstream, logger, timeoutMs, "runtime");
+    const replaced = this.byId.get(id);
     this.byId.set(id, upstream);
     this.inOrder[index] = upstream;
     this.statuses[index] = Object.freeze(status);
+    // the old instance's own resources (a proxy bridge's listener, ADR-017) end with it
+    replaced?.dispose?.();
     return status;
   }
 
@@ -225,10 +232,30 @@ export class UpstreamRegistry {
     if (index === -1) {
       return false;
     }
+    const removed = this.inOrder[index];
     this.byId.delete(id);
     this.inOrder.splice(index, 1);
     this.statuses.splice(index, 1);
+    // the instance's own resources (a proxy bridge's listener, ADR-017) end with it
+    removed?.dispose?.();
     return true;
+  }
+
+  /**
+   * Teardown: call `dispose()` on every registered upstream, in config
+   * order — the shutdown path the entry point drives before it stops the
+   * listener (`GatewayHandles.stop()`, specs/architecture/data-flow.md), and
+   * the same release a runtime `replace`/`remove` gives the instance it
+   * retires. Upstreams without the hook are untouched; an implementation's
+   * `dispose()` is idempotent and never throws (the interface contract), so
+   * a repeated call is harmless. Nothing is unregistered — the id/order maps
+   * keep their contents; only the instances' own resources (a `socks5://`
+   * proxy's bridge listener, ADR-017) end here.
+   */
+  dispose(): void {
+    for (const upstream of this.inOrder) {
+      upstream.dispose?.();
+    }
   }
 
   /** The per-upstream child logger — the startup naming convention. */
